@@ -102,6 +102,18 @@ def _material_from_xs(name: str, total, nu_fission, chi, scatter) -> Material:
     )
 
 
+def c5g7_materials() -> dict[str, Material]:
+    """The eight original seven-group transport materials, keyed by name.
+
+    These are the supplied region constants before pin-cell homogenization,
+    including the control rod. Each call constructs independent Materials
+    through the same conversion used by the existing C5G7 geometry builder.
+    """
+    return {name: _material_from_xs(name, xs["total"], xs["nu_fission"],
+                                    xs["chi"], xs["scatter"])
+            for name, xs in C5G7_XS.items()}
+
+
 def _homogenized_pin(pin_char: str) -> tuple[Material, np.ndarray]:
     """Volume-weighted mix of a pin with its surrounding moderator.
 

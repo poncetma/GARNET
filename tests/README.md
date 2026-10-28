@@ -22,6 +22,8 @@ without a checkout).
 | `test_boundary_conditions.py` | bc spec forms; symmetry-plane invariant |
 | `test_hex_lattice.py` | hex topology, k = k∞ invariant, BC ordering |
 | `test_tri_prisms.py` | tri-z extrusion: slab limit, order, extruded-2D = 3D |
+| `test_axial_diffusion.py` | independent column matrices, diffusion-operator equivalence, Robin slab convergence, mixed boundaries, and conservative axial currents |
+| `test_sn_2d1d.py` | planar S_N / axial diffusion: independent fixed-source/angular eigenproblems, dimensional limits, upscatter, signed sources, step/SCB currents, thin layers, blended fission spectra, normalized currents and convergence reporting |
 | `test_unstructured_mesh.py` | unstructured FV ≡ structured FV on the same mesh |
 | `test_transient_point_kinetics.py` | transient stack vs the exact point-kinetics ODE |
 | `test_delayed_spectra.py` | shared and family-specific delayed spectra vs independently assembled two-group neutron/precursor equations, with BDF1/BDF2 and both diffusion step solvers |

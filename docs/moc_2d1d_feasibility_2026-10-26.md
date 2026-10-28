@@ -5,6 +5,15 @@ the production solvers are unchanged. The accompanying
 [inventory](qa/moc-feasibility-2026-10-26.json) records source hashes and CPU
 allocation probes. No GPU timing or MOC solution was generated in this study.
 
+Follow-on planning (28 October 2026): the
+[planar S_N / axial diffusion milestones](sn_2d1d_implementation_plan.md) turn
+the S_N-first recommendation into implementation and verification steps. The
+[benchmark shortlist](sn_2d1d_benchmarks.md) identifies supplied multigroup data
+and the remaining geometry/reference work. The first four steps now have a
+[verified CPU prototype](sn_2d1d_prototype.md), now including fixed-source and
+eigenvalue iteration. Shared CMFD, GPU batching, and official benchmark
+qualification remain subsequent work.
+
 ## Recommendation
 
 **A 2D/1D transport option makes sense for GARNET's extruded reactor models.
