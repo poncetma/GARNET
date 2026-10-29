@@ -1,5 +1,10 @@
 # Diffusion API audit
 
+> A later code audit of the solver numerics (28–29 October 2026) changed
+> several user-visible defaults and conventions. These include event restarts,
+> the SP3 vacuum condition, the IQS guard and tri/hex lattice boundaries. See
+> [code_audit_2026-10-28.md](qa/code_audit_2026-10-28.md).
+
 Reviewed on 23 October 2026. The audit followed a user through defining
 materials, painting a core, solving criticality and adjoints, changing cross
 sections, inspecting power, running kinetics, and adding thermal feedback.

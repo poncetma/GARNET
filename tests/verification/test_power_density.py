@@ -98,21 +98,28 @@ def test_active_mask_excludes_excised_cells():
     assert np.sum(q) == pytest.approx(5.0, rel=1e-12)
 
 
-def test_cylindrical_volume_weight_changes_the_normalization():
-    """On an r-z grid cells are annuli, so the scalar cell_volume is wrong; the
-    radial metric must carry the weight or the outer ring is under-counted."""
-    grid = Grid(shape=(8, 1, 4), size=(40.0, 1.0, 20.0), geometry="cylindrical")
-    rc = grid.cylindrical_metrics()[0]
+def test_cylindrical_power_density_is_absolute_w_per_cm3():
+    """On an r-z grid cells are annuli. Passing the physical volumes
+    (grid.cell_volumes, 2 pi r dr dz) gives absolute W/cm^3: a uniform core
+    with a flat flux is P / (pi R^2 H) in every cell, by hand."""
+    radius, height, power = 40.0, 20.0, 1.0e6
+    grid = Grid(shape=(8, 1, 4), size=(radius, 1.0, height), geometry="cylindrical")
     mmap = np.ones(grid.shape, dtype=int)
     flux = np.ones((2, *grid.shape))
-    q = power_density(flux, _mats(), mmap, total_power=1.0,
-                      cell_volume=grid.cell_volume, volume_weight=rc)
-    assert float(np.sum(q * grid.cell_volume * rc)) == pytest.approx(1.0, rel=1e-12)
-    # A flat flux in an annular geometry is NOT a flat power density per rated
-    # watt: the outer rings hold more volume, so each cm^3 gets less.
-    flat = power_density(flux, _mats(), mmap, total_power=1.0,
-                         cell_volume=grid.cell_volume)
-    assert not np.allclose(q, flat)
+    q = power_density(flux, _mats(), mmap, total_power=power,
+                      cell_volume=grid.cell_volumes)
+    expected = power / (np.pi * radius**2 * height)
+    np.testing.assert_allclose(q, expected, rtol=1e-12)
+    assert float(np.sum(q * grid.cell_volumes)) == pytest.approx(power, rel=1e-12)
+
+    # The radial stencil metric is NOT a volume: r * dr * dy * dz sums to
+    # R^2/2 * dy * H, so dividing the rated power by it overstates W/cm^3 by
+    # exactly 2 pi / dy -- the recipe this test used to encode.
+    rc = grid.cylindrical_metrics()[0]
+    stencil = power_density(flux, _mats(), mmap, total_power=power,
+                            cell_volume=grid.cell_volume, volume_weight=rc)
+    np.testing.assert_allclose(stencil, expected * 2.0 * np.pi / grid.spacing[1],
+                               rtol=1e-12)
 
 
 def test_zero_flux_is_reported_not_silently_divided():

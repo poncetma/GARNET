@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from garnet import (DiffusionEigenSolver, Grid, Material, PWR_TWO_GROUP,
-                   first_order_reactivity)
+                   SP3EigenSolver, first_order_reactivity)
 from garnet.benchmarks.hpmr import build_hpmr2d, _placeholder_materials
 from garnet.tri import TriDiffusionEigenSolver
 
@@ -47,6 +47,42 @@ def test_first_order_matches_resolve_and_converges_quadratically():
     assert e_small / rho_small < 1e-3               # accurate for a weak perturbation
     # error is second order in the perturbation: 10x eps -> ~100x error
     assert 40 < e_big / e_small < 250, e_big / e_small
+
+
+def test_first_order_on_rz_grid_is_volume_weighted():
+    # r-z: the loss operator is volume-weighted (rhs weight = cell radius), so
+    # in-scatter and fission must carry the same weight. Without it the zero
+    # perturbation returned O(10) instead of 0. Perturb only the near-axis
+    # region, where the radius weight differs most from uniform.
+    grid = Grid(shape=(20, 1, 20), size=(80.0, 80.0, 80.0), geometry="cylindrical")
+    inner = np.zeros(grid.shape, dtype=int)
+    inner[:6] = 1
+    ref = DiffusionEigenSolver(grid, [PWR_TWO_GROUP, PWR_TWO_GROUP],
+                               material_map=inner, device="cpu")
+    fwd = ref.solve(**TIGHT)
+    adj = ref.solve(adjoint=True, **TIGHT)
+    assert abs(first_order_reactivity(ref, fwd, adj, ref)) < 1e-9
+
+    def errors(eps):
+        pert = DiffusionEigenSolver(
+            grid, [PWR_TWO_GROUP, _poison(PWR_TWO_GROUP, [0.0, eps])],
+            material_map=inner, device="cpu")
+        drho_exact = 1.0 / fwd.k_eff - 1.0 / pert.solve(**TIGHT).k_eff
+        drho_pt = first_order_reactivity(ref, fwd, adj, pert)
+        return abs(drho_pt - drho_exact), abs(drho_exact)
+
+    e_small, rho_small = errors(1e-4)
+    e_big, rho_big = errors(1e-3)
+    assert e_small / rho_small < 1e-2, e_small / rho_small
+    assert 40 < e_big / e_small < 250, e_big / e_small
+
+
+def test_block_solvers_are_rejected_clearly():
+    grid = Grid(shape=(8, 8, 1), size=(40.0, 40.0, 1.0))
+    sp3 = SP3EigenSolver(grid, PWR_TWO_GROUP, device="cpu")
+    fwd = sp3.solve()
+    with pytest.raises(TypeError, match="diffusion-family"):
+        first_order_reactivity(sp3, fwd, fwd, sp3)
 
 
 def _tri_hpmr(angle, materials=None):

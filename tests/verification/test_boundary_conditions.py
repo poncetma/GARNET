@@ -5,6 +5,7 @@ reflective symmetry plane must reproduce the full-domain k exactly (the
 fundamental mode is symmetric) -- an exact invariant, independent of mesh.
 """
 
+import numpy as np
 import pytest
 
 from garnet import DiffusionEigenSolver, Grid, ONE_GROUP_DEMO
@@ -33,6 +34,17 @@ def test_normalize_bc_forms():
         normalize_bc(-1.0)
     with pytest.raises(ValueError):
         normalize_bc(["zero-flux"] * 5)
+
+
+def test_normalize_bc_albedo_numeric_types():
+    # numpy scalar albedos are valid (np.float32 is not a Python float);
+    # non-finite albedos and bools are rejected rather than reaching the stencil.
+    assert normalize_bc(np.float32(0.5)) == tuple((0.5,) * 2 for _ in range(3))
+    assert normalize_bc(("vacuum", np.float64(0.25), np.int64(1)))[1:] == (
+        (0.25, 0.25), (1.0, 1.0))
+    for bad in (float("nan"), np.float32("nan"), float("inf"), True):
+        with pytest.raises(ValueError):
+            normalize_bc(bad)
 
 
 def test_reflective_symmetry_plane_equals_full_domain():

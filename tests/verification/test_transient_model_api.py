@@ -63,8 +63,9 @@ def test_events_split_fixed_steps_and_restart_bdf(build):
     np.testing.assert_allclose(accepted, result.times[1:])
     assert np.all(result.step_widths > 0) and np.max(result.step_widths) <= 0.03 + 1e-15
     for event in events:
+        # History restarts on the step leaving the event (times[index]).
         index = int(np.flatnonzero(np.isclose(result.times, event))[0])
-        assert result.time_orders[index - 1] == 1
+        assert result.time_orders[index] == 1
     np.testing.assert_allclose(result.power, 1.0, atol=1e-9)
 
 

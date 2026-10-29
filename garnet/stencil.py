@@ -25,6 +25,7 @@ hex and triangular stencils and the SP3/SDPN angular blocks all reuse it.
 from __future__ import annotations
 
 import math
+import numbers
 
 import numpy as np
 
@@ -45,16 +46,20 @@ _VACUUM_ALPHA = 0.5
 
 def _face_valid(f):
     """Validate and canonicalize one face spec: a known string or an albedo."""
-    if f in (BC_ZERO_FLUX, BC_REFLECTIVE, BC_VACUUM):
+    if isinstance(f, str) and f in (BC_ZERO_FLUX, BC_REFLECTIVE, BC_VACUUM):
         return f
+    # numbers.Real admits numpy scalars (np.float32(0.5)); a numeric string
+    # (e.g. from an input file) is still parsed; bool is not an albedo.
     try:
+        if not isinstance(f, (str, numbers.Real)) or isinstance(f, bool):
+            raise TypeError
         alpha = float(f)
     except (TypeError, ValueError):
         raise ValueError(
             f"unknown bc {f!r}; use {BC_ZERO_FLUX!r}, {BC_REFLECTIVE!r}, "
-            f"{BC_VACUUM!r}, or a non-negative albedo coefficient")
-    if alpha < 0:
-        raise ValueError(f"albedo coefficient must be non-negative, got {alpha}")
+            f"{BC_VACUUM!r}, or a non-negative albedo coefficient") from None
+    if not math.isfinite(alpha) or alpha < 0:
+        raise ValueError(f"albedo coefficient must be finite (not NaN or inf) and non-negative, got {alpha}")
     return alpha
 
 
@@ -79,7 +84,7 @@ def normalize_bc(bc):
     coefficient alpha (the boundary law J_net = alpha * phi_surface).
     """
     def is_scalar(x):
-        return isinstance(x, (str, int, float))
+        return isinstance(x, (str, numbers.Real))
 
     if is_scalar(bc):
         faces = [bc] * 6
@@ -197,6 +202,11 @@ class GroupOperator:
             radial_face_radius = xp.asarray(face_radii, dtype=D.dtype)
             inner_boundary_radius, outer_boundary_radius = float(inner_radius), float(outer_radius)
             self.rhs_weight = cell_radius
+            # The y "faces" of an r-z grid are the azimuthal seam, not a
+            # surface: always reflective, whatever a scalar/all-face bc says
+            # (as CylindricalModel does). The r = 0 axis needs no override --
+            # its boundary radius is 0, so any bc there is inert below.
+            bc = (bc[0], (BC_REFLECTIVE, BC_REFLECTIVE), bc[2])
 
         def robin(Dface, d, alpha):
             return robin_face_term(xp, Dface, d, alpha)

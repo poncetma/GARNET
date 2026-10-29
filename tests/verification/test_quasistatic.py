@@ -136,6 +136,20 @@ def test_local_rayleigh_projection_recovers_uniform_absorption_worth():
     assert p.rho / p.beta_total == pytest.approx(0.5, rel=2e-13)
 
 
+def test_projections_reject_block_solvers_clearly():
+    """SP3/SPN/SDPN carry a moment-vector state, not a scalar flux."""
+    from garnet import SP3EigenSolver
+
+    sp3 = SP3EigenSolver(GRID, [BASE], bc="reflective", device="cpu")
+    flux = np.ones((1,) + GRID.shape)
+    with pytest.raises(TypeError, match="diffusion-family"):
+        project_effective_kinetics(sp3, flux, flux, KIN, k0=1.0)
+    with pytest.raises(TypeError, match="diffusion-family"):
+        projected_shape_residual(sp3, flux, flux)
+    with pytest.raises(TypeError, match="diffusion-family"):
+        projected_adjoint_residual(sp3, flux, flux)
+
+
 def test_critical_point_kinetics_equilibrium_is_stationary():
     p = EffectiveKinetics(
         rho=0.0, generation_time=1.5e-4,
@@ -294,7 +308,15 @@ def test_adiabatic_quasistatic_tracks_reduced_hpmr_drum_ramp():
 
 
 def test_iqs_keeps_accepted_precursor_history_across_shape_corrections():
-    """A coarse shape predictor must not replace the fine amplitude history."""
+    """A coarse shape corrector must not replace the fine amplitude history.
+
+    The corrector's end power used to be discarded: its >1% disagreement with
+    the explicit-shape amplitude was absorbed into the power factor and only
+    shortened the *next* interval. Each interval is now re-marched with the
+    end-shape kinetics, so the corrector and the accepted power agree to
+    well under 0.1% here, and a predictor tolerance below that rejects and
+    halves the offending intervals instead of accepting them.
+    """
     from garnet.benchmarks.hpmr import build_hpmr2d
     from garnet.benchmarks.hpmr_thermal import (build_hpmr_coupling,
                                                hpmr_drum_ramp)
@@ -315,26 +337,36 @@ def test_iqs_keeps_accepted_precursor_history_across_shape_corrections():
         shape_method="iqs", **options)
     adaptive = quasistatic_coupled_transient(
         build_hpmr_coupling(problem), shape_dt=0.25, adjoint_every=2,
-        shape_method="iqs", iqs_predictor_tol=0.02, **options)
+        shape_method="iqs", iqs_predictor_tol=5e-4, **options)
     guarded = quasistatic_coupled_transient(
         build_hpmr_coupling(problem), shape_dt=0.25, adjoint_every=2,
         shape_method="iqs", residual_tol=1e-8, fallback_residual=1.0,
         **options)
 
-    # The deliberately coarse independent predictor differs by several
-    # percent. Its spatial shape is useful, but adopting its precursor field
-    # used to leave the accepted point amplitude about 10% low after the ramp.
-    assert iqs.counters["iqs_max_amplitude_error_ppm"] > 10_000
+    def error(result):
+        return np.max(np.abs(result.power - full.power) / full.power)
+
+    # Measured: corrector/accepted disagreement <= 853 ppm (was 17,177 ppm
+    # with the explicit-shape step); max power error 0.46% (was 1.5%).
+    assert iqs.counters["iqs_max_amplitude_error_ppm"] < 2_000
+    assert iqs.counters["iqs_corrector_iterations"] > 0
     assert len(iqs.predictor_disagreement) == iqs.counters["iqs_predictor_checks"]
     assert np.all(iqs.predictor_disagreement > 0.0)
     np.testing.assert_array_equal(iqs.predictor_disagreement_times,
                                   iqs.shape_update_times)
-    assert adaptive.counters["iqs_predictor_interval_reductions"] > 0
-    assert adaptive.counters["shape_updates"] > iqs.counters["shape_updates"]
     assert abs(iqs.power[-1] / full.power[-1] - 1.0) < 1e-3
-    assert np.max(np.abs(guarded.power - full.power) / full.power) < 1e-2
-    assert (np.max(np.abs(guarded.power - full.power) / full.power)
-            < np.max(np.abs(adiabatic.power - full.power) / full.power))
+    assert error(iqs) < 1e-2
+    assert error(iqs) < 0.5 * error(adiabatic)
+    # Intervals whose corrector disagrees by more than the tolerance are
+    # rejected and retried at half width; every accepted one then agrees.
+    assert adaptive.counters["iqs_interval_rejections"] > 0
+    assert adaptive.counters["iqs_predictor_interval_reductions"] > 0
+    assert adaptive.counters["iqs_predictor_tol_accepts"] == 0
+    assert np.all(adaptive.predictor_disagreement <= 5e-4)
+    assert adaptive.counters["shape_updates"] > iqs.counters["shape_updates"]
+    assert error(adaptive) < error(iqs)
+    assert error(guarded) < 1e-2
+    assert error(guarded) < error(adiabatic)
     assert guarded.counters["full_diffusion_fallbacks"] == 0
     assert "residual" in guarded.shape_update_reasons
 

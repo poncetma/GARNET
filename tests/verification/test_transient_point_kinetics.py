@@ -144,7 +144,8 @@ def test_bdf_history_restart_reduces_order_without_disturbing_equilibrium():
     result = _core().transient(
         at=lambda _t: ([BASE], None), device='cpu', t_end=0.08, dt=0.01,
         time_scheme='bdf5', bdf_restart_times=[0.04], tol_step=1e-09)
-    assert result.time_orders == [1, 2, 3, 1, 2, 3, 4, 5]
+    # The step ending at 0.04 keeps its history; the step leaving it restarts.
+    assert result.time_orders == [1, 2, 3, 4, 1, 2, 3, 4]
     np.testing.assert_allclose(result.power, 1.0, rtol=0, atol=2e-9)
 
 
@@ -207,7 +208,11 @@ def test_adaptive_bdf_rejects_aligns_event_and_restarts_order():
     event = int(np.flatnonzero(np.isclose(result.times, 0.01))[0])
     # time_orders indexes steps, so the first step leaving the event is event.
     assert result.time_orders[event] == 1
-    assert result.power[-1] == pytest.approx(3.634, abs=2e-2)
+    # Reference 3.6339 (fixed BDF2, 640 steps). Since the startup step uses
+    # an O(h**2) explicit-Euler defect, rtol=1e-2 gives 3.662 (0.8%), and
+    # 1e-3 / 1e-4 give 3.6381 / 3.6347. The old constant startup predictor
+    # (an O(h) defect) forced a needlessly small first step.
+    assert result.power[-1] == pytest.approx(3.634, rel=1e-2)
 
 
 def test_adaptive_bdf_automatic_order_selects_and_reports_candidates():

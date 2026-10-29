@@ -481,7 +481,13 @@ class ThetaMethod(TimeScheme):
     """theta-method with weight w on the end-of-step operator (w=1/2 is CN).
 
     A-stable for w >= 1/2 but *not* L-stable at w = 1/2, so a prompt jump rings
-    rather than decays; opt-in, and prompt-only (no BDF-form precursors).
+    rather than decays; opt-in. Precursors use the matching theta form below.
+
+    Crank--Nicolson is first order for a perturbation applied at t=0: the
+    first step's explicit half uses ``F^0 = 0``, the steady state of
+    ``problem_at(0)`` (the pre-step material), not the perturbed operator.
+    Second order holds for data continuous at t=0. A mid-transient restart
+    must re-seed ``F^n`` through :meth:`start`.
     """
 
     is_bdf = True          # has its own analytic precursor treatment (below)
@@ -496,8 +502,20 @@ class ThetaMethod(TimeScheme):
         self._carry = (1.0 - self.w) / self.w
         self._psi = None
 
-    def start(self, u0):
-        self._psi = list(u0)
+    def start(self, u0, increment=None):
+        """Seed ``Psi^n = u^n + (1 - w) v dt F^n``.
+
+        ``increment`` is the explicit-Euler increment ``v dt F^n`` at ``u0``
+        for the coming step width. The critically adjusted t=0 steady state
+        has ``F^0 = 0`` (evaluated with ``problem_at(0)``), so it may be
+        omitted there. A mid-transient restart must supply it: ``Psi = u``
+        alone drops the ``(1 - w) F^n`` half of the trapezoid and makes the
+        restarted step first order.
+        """
+        if increment is None:
+            self._psi = list(u0)
+        else:
+            self._psi = [u + (1.0 - self.w) * d for u, d in zip(u0, increment)]
         return list(u0)
 
     def a0(self, step):
@@ -570,6 +588,14 @@ class BDF(TimeScheme):
     The first accepted step uses BDF1, the next BDF2, and so on until the
     requested maximum order is reached.  This avoids inventing unavailable
     pre-history and preserves an initially critical equilibrium exactly.
+
+    Order cap: at a constant width those startup steps carry O(h**2) and
+    O(h**3) local errors that the later steps cannot remove, so fixed-step
+    BDF3--BDF6 converge globally at second order (measured 2.09 for BDF3 on
+    a smooth ramp), with a smaller constant than BDF2. Restarts repeat the
+    startup. Third order needs startup widths that shrink faster than h: the
+    adaptive controller selects them, or an explicit nonuniform schedule
+    graded from ~h*sqrt(h/T) by a ratio <= 1.5 (measured 3.25 for BDF3).
     """
 
     is_bdf = True

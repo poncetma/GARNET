@@ -8,8 +8,9 @@ basis vector for GMRES).
 CG is the default everywhere -- the discretized diffusion/SP3 operators are
 kept symmetric positive definite by construction (volume-weighted stencils on
 cylindrical grids exist for exactly this reason). GMRES and BiCGStab are the
-escape hatches for operators that cannot be symmetrized: both share pcg's
-signature and stopping rule, so any solver can swap them in via
+escape hatches for operators that cannot be symmetrized: every solver in
+``LINEAR_SOLVERS`` accepts pcg's common keywords (``COMMON_SOLVER_KWARGS``)
+and shares its stopping rule, so any call site can swap them in via
 ``linear_solver="gmres"`` / ``"bicgstab"``. GMRES has a monotone residual but
 stores `restart` basis vectors; BiCGStab runs in constant memory with two
 operator applies per step but converges irregularly and can restart on
@@ -201,6 +202,12 @@ class MixedPrecisionPreconditioner:
             self.operator_out = False
 
     def __call__(self, residual, out=None):
+        if self.degree and not getattr(self, "_damped", False):
+            # Same damped splitting as neumann_preconditioner (estimated on the
+            # low-precision shadow operator, once, on first use).
+            self.inv_diag = jacobi_damping(
+                self.apply_A, self.inv_diag) * self.inv_diag
+            self._damped = True
         kernels.mixed_jacobi_start(
             self.xp, residual, self.inv_diag, self.r, self.z)
         for _ in range(self.degree):
@@ -228,17 +235,74 @@ def mixed_precision_preconditioner(apply_A_low, inv_diag_low, degree,
         apply_A_low, inv_diag_low, degree, outer_dtype)
 
 
-def neumann_preconditioner(apply_A, inv_diag, degree):
+def jacobi_damping(apply_A, inv_diag, steps=12):
+    """Damping factor omega = 2 / (lambda_min + lambda_max) of D^-1 A.
+
+    The extremes are estimated by ``steps`` Lanczos iterations on the
+    symmetric scaling D^-1/2 A D^-1/2 (same spectrum as D^-1 A): the largest
+    Ritz value plus its residual bound for lambda_max (an over-estimate, the
+    safe side), the smallest Ritz value for lambda_min (also an over-estimate,
+    again the safe side). Costs ``steps`` operator applies and ~2 ``steps``
+    reductions, once. Returns 1.0 (undamped) when the estimate does not apply
+    -- complex or non-positive diagonals (e.g. the frequency-domain noise
+    operator) -- or comes out non-finite.
+    """
+    xp = kernels.module_of(inv_diag)
+    if (not np.issubdtype(np.dtype(inv_diag.dtype), np.floating)
+            or not bool(xp.all(inv_diag > 0))):
+        return 1.0
+    scale = xp.sqrt(inv_diag)
+    # Deterministic pseudo-random start: overlaps every eigenvector,
+    # including the high-frequency ones that set lambda_max.
+    start = np.random.default_rng(12345).standard_normal(inv_diag.shape)
+    v = xp.asarray(start, dtype=inv_diag.dtype)
+    v = v / xp.sqrt(xp.sum(v * v))
+    v_prev = xp.zeros_like(v)
+    alphas, betas, beta = [], [], 0.0
+    for _ in range(int(steps)):
+        w = scale * apply_A(scale * v)
+        alpha = float(xp.sum(w * v))
+        w = w - alpha * v - beta * v_prev
+        beta = float(xp.sqrt(xp.sum(w * w)))
+        alphas.append(alpha)
+        betas.append(beta)
+        if not beta > 1e-12 * abs(alpha):      # invariant subspace (or NaN)
+            break
+        v_prev, v = v, w / beta
+    n = len(alphas)
+    tridiagonal = (np.diag(alphas) + np.diag(betas[:n - 1], 1)
+                   + np.diag(betas[:n - 1], -1))
+    ritz, vectors = np.linalg.eigh(tridiagonal)
+    lam_max = ritz[-1] + abs(betas[-1] * vectors[-1, -1])
+    lam_min = max(ritz[0], 0.0)
+    omega = 2.0 / (lam_min + lam_max)
+    return float(omega) if np.isfinite(omega) and omega > 0.0 else 1.0
+
+
+def neumann_preconditioner(apply_A, inv_diag, degree, damping="auto"):
     """Truncated Neumann-series (polynomial) preconditioner.
 
     Approximates A^-1 by the first `degree`+1 terms of the Neumann series in
-    the Jacobi splitting,  sum_k (I - D^-1 A)^k D^-1,  evaluated as `degree`
-    Jacobi correction sweeps: z <- z + D^-1 (r - A z). Symmetric positive
-    definite whenever Jacobi converges (diagonally dominant A), so CG theory
-    still applies. Each application costs `degree` extra operator applies --
-    pure stencil streaming, no dot products -- and cuts the CG iteration
-    count (and with it the per-iteration global reductions, the only
-    synchronization points on the GPU). Degree 0 is plain Jacobi.
+    the damped Jacobi splitting,  sum_k (I - w D^-1 A)^k w D^-1,  evaluated as
+    `degree` damped-Jacobi correction sweeps: z <- z + w D^-1 (r - A z). Each
+    application costs `degree` extra operator applies -- pure stencil
+    streaming, no dot products -- and cuts the CG iteration count (and with it
+    the per-iteration global reductions, the only synchronization points on
+    the GPU). Degree 0 is plain Jacobi.
+
+    Definiteness: for SPD A the polynomial maps an eigenvalue lam of D^-1 A to
+    1 - (1 - w lam)^(degree+1), so EVEN degrees are always SPD but ODD degrees
+    are SPD only while w lam_max < 2. Undamped (w = 1) that holds for a
+    diagonally dominant diffusion stencil, but not for the SP5/SP7 moment
+    blocks, whose inter-moment coupling pushes lam_max(D^-1 A) slightly past
+    2 (~2.02): there an odd undamped degree is indefinite and CG crawls (SP7
+    degree 1: ~350 iterations against 21 for plain Jacobi). ``damping="auto"``
+    (default) therefore sets w = 2/(lam_min + lam_max) from a short Lanczos
+    estimate (:func:`jacobi_damping`), computed lazily on the first
+    application -- a one-off ``~12`` operator applies, no change to the
+    per-application cost. For diffusion (lam_max < 2) w stays within a few
+    percent of 1 and the iteration counts are unchanged to +-1; pass a float
+    to fix w, or ``damping=None``/``1.0`` for the undamped splitting.
     GPU fine-mesh diffusion reference: Y. E et al., Nuclear Engineering and
     Design 320 (2017), 88-102, doi:10.1016/j.nucengdes.2017.04.001.
     Their comparison motivates the Neumann-PCG option; its degree and benefit
@@ -249,12 +313,20 @@ def neumann_preconditioner(apply_A, inv_diag, degree):
         operator_out = "out" in inspect.signature(apply_A).parameters
     except (TypeError, ValueError):
         operator_out = False
+    # Degree 0 is plain Jacobi, whose scale no Krylov method sees: no damping.
+    weights = {"inv_diag": inv_diag if degree == 0 or damping is None
+               or damping == "auto" else float(damping) * inv_diag,
+               "pending": degree > 0 and damping == "auto"}
 
     def apply(r, out=None, scratch=None):
+        if weights["pending"]:
+            weights["inv_diag"] = jacobi_damping(apply_A, inv_diag) * inv_diag
+            weights["pending"] = False
+        inv_diag_w = weights["inv_diag"]
         if out is None:
-            z = inv_diag * r
+            z = inv_diag_w * r
         else:
-            xp.multiply(inv_diag, r, out=out)
+            xp.multiply(inv_diag_w, r, out=out)
             z = out
         for _ in range(degree):
             if scratch is None:
@@ -264,7 +336,7 @@ def neumann_preconditioner(apply_A, inv_diag, degree):
             else:
                 xp.copyto(scratch, apply_A(z))
                 az = scratch
-            kernels.neumann_step(xp, z, r, az, inv_diag)
+            kernels.neumann_step(xp, z, r, az, inv_diag_w)
         return z
 
     # PCG uses this opt-in instead of guessing whether an arbitrary user
@@ -392,7 +464,13 @@ def pcg(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
             residual_replace_every=residual_replace_every)
         return solved, iterations + fallback_iterations
 
-    residual_tolerance_squared = max(rtol * float(xp.sqrt(dot(b, b))), atol) ** 2
+    b_norm = float(xp.sqrt(dot(b, b)))
+    if b_norm == 0.0:
+        # A x = 0 has the exact solution 0; iterating from a warm start would
+        # only chase a relative target of 0 (raising after maxiter).
+        x[...] = 0
+        return x, 0
+    residual_tolerance_squared = max(rtol * b_norm, atol) ** 2
     if float(dot(r, r)) <= residual_tolerance_squared:
         return x, 0
 
@@ -637,7 +715,8 @@ def fixed_pcg(apply_A, b, x0, inv_diag, xp, iterations=1, precond=None,
 
 
 def gmres(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
-          precond=None, restart=30, raise_on_fail=True):
+          precond=None, restart=30, raise_on_fail=True, check_every=1,
+          workspace=None):
     """Solve A x = b with restarted, right-preconditioned GMRES(m).
 
     Same interface, warm start and stopping rule as :func:`pcg` (true
@@ -659,15 +738,24 @@ def gmres(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
                instead of raising -- the same escape hatch :func:`pcg` has, for
                call sites where a partial result is still useful (an inexact
                within-group solve inside an outer iteration that revisits it).
+    check_every, workspace : accepted for signature compatibility with
+               :func:`pcg` (see :data:`COMMON_SOLVER_KWARGS`) and ignored: the
+               Arnoldi residual estimate is a host scalar at every step anyway,
+               and the basis is allocated per restart cycle (use
+               :func:`fgmres` for a persistent workspace).
 
     Returns (x, n_iterations) where an iteration is one operator apply.
     """
+    del check_every, workspace          # inapplicable; see docstring
     dot = lambda u, v: float(xp.sum(u * v))
     norm = lambda u: float(xp.sqrt(xp.sum(u * u)))
     M = precond if precond is not None else (lambda r: inv_diag * r)
 
+    b_norm = norm(b)
+    if b_norm == 0.0:
+        return xp.zeros_like(x0), 0       # A x = 0: exact solution
     x = x0.copy()
-    residual_tolerance = max(rtol * norm(b), atol)
+    residual_tolerance = max(rtol * b_norm, atol)
     r = b - apply_A(x)
     residual_norm = norm(r)
     if residual_norm <= residual_tolerance:
@@ -830,7 +918,7 @@ def _fgmres_workspace_solve(apply_A, b, x0, xp, M, *, rtol, atol,
 
 def fgmres(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0,
            maxiter=5000, precond=None, restart=30, raise_on_fail=True,
-           workspace=None):
+           workspace=None, check_every=1):
     """Solve a real non-symmetric system with flexible restarted GMRES.
 
     Reference: Saad, SIAM J. Sci. Comput. 14 (1993), 461-469,
@@ -847,8 +935,14 @@ def fgmres(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0,
     ``inv_diag`` supplies the default Jacobi preconditioner for interface
     compatibility. ``workspace`` may be an :class:`FGMRESWorkspace`; on GPU
     this also batches all Arnoldi projections into one host synchronization per
-    iteration. Returns ``(x, n_iterations)``, counting operator applies.
+    iteration. ``check_every`` is accepted for signature compatibility with
+    :func:`pcg` and ignored (every Arnoldi step already returns its residual
+    estimate to the host). A ``workspace`` that is not an
+    :class:`FGMRESWorkspace` (e.g. a :class:`PCGWorkspace` handed to every
+    interchangeable solver) is ignored. Returns ``(x, n_iterations)``,
+    counting operator applies.
     """
+    del check_every                     # inapplicable; see docstring
     dot = lambda u, v: float(xp.sum(u * v))
     norm = lambda u: float(xp.sqrt(xp.sum(u * u)))
     M = precond if precond is not None else (lambda r: inv_diag * r)
@@ -856,6 +950,14 @@ def fgmres(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0,
     restart = int(restart)
     if restart < 1:
         raise ValueError("restart must be positive")
+    if not isinstance(workspace, FGMRESWorkspace):
+        workspace = None
+    if norm(b) == 0.0:
+        if workspace is None:
+            return xp.zeros_like(x0), 0   # A x = 0: exact solution
+        workspace.validate(x0, restart)
+        workspace.x[...] = 0
+        return workspace.x, 0
     if workspace is not None:
         return _fgmres_workspace_solve(
             apply_A, b, x0, xp, M, rtol=rtol, atol=atol,
@@ -924,7 +1026,7 @@ def fgmres(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0,
 
 
 def cocg(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
-         precond=None):
+         precond=None, raise_on_fail=True, check_every=1, workspace=None):
     """Solve A x = b with preconditioned COCG for *complex-symmetric* A.
 
     Conjugate Orthogonal CG (van der Vorst & Melissen, IEEE Trans. Magn. 26
@@ -940,28 +1042,39 @@ def cocg(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
     (to which it reduces for real A), so it slots into the same call sites.
 
     COCG can break down if a bilinear product vanishes on a non-null vector;
-    that is rare for these near-SPD operators and is reported as a failure.
+    that is rare for these near-SPD operators and is reported as a failure
+    (or, with ``raise_on_fail=False``, returns the current iterate, as after
+    ``maxiter``). ``check_every`` and ``workspace`` are accepted for
+    signature compatibility with :func:`pcg` and ignored (the true-norm test
+    runs every iteration; vectors are allocated per solve).
 
     Returns (x, n_iterations).
     """
+    del check_every, workspace          # inapplicable; see docstring
     bdot = lambda u, v: kernels.dot(xp, u, v)         # bilinear (unconjugated)
     rnorm = lambda u: float(xp.sqrt(xp.sum((u.conj() * u).real)))
     M = precond if precond is not None else (lambda r: inv_diag * r)
 
+    b_norm = rnorm(b)
+    if b_norm == 0.0:
+        return xp.zeros_like(x0), 0       # A x = 0: exact solution
     x = x0.copy()
     r = b - apply_A(x)
-    stop = max(rtol * rnorm(b), atol)
+    stop = max(rtol * b_norm, atol)
     if rnorm(r) <= stop:
         return x, 0
 
     z = M(r)
     p = z.copy()
     rz = bdot(r, z)
+    it = 0
     for it in range(1, maxiter + 1):
         Ap = apply_A(p)
         pAp = bdot(p, Ap)
         if pAp == 0:
-            raise RuntimeError("COCG breakdown (p^T A p = 0)")
+            if raise_on_fail:
+                raise RuntimeError("COCG breakdown (p^T A p = 0)")
+            return x, it
         alpha = rz / pAp
         kernels.cg_update(xp, x, r, p, Ap, alpha)
         if rnorm(r) <= stop:
@@ -970,14 +1083,16 @@ def cocg(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
         rz_new = bdot(r, z)
         kernels.cg_direction(xp, p, z, rz_new / rz)
         rz = rz_new
-    raise RuntimeError(
-        f"COCG failed to converge in {maxiter} iterations "
-        f"(residual {rnorm(r):.3e}, target {stop:.3e})"
-    )
+    if raise_on_fail:
+        raise RuntimeError(
+            f"COCG failed to converge in {maxiter} iterations "
+            f"(residual {rnorm(r):.3e}, target {stop:.3e})"
+        )
+    return x, it
 
 
 def bicgstab(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
-             precond=None):
+             precond=None, raise_on_fail=True, check_every=1, workspace=None):
     """Solve A x = b with preconditioned BiCGStab (van der Vorst).
 
     Same interface, warm start and stopping rule as :func:`pcg`. Like
@@ -986,35 +1101,53 @@ def bicgstab(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
     and two operator+preconditioner applies per iteration -- the same
     trade-off that makes it the standard asymmetric solver in CFD codes
     (e.g. OpenFOAM's PBiCGStab). The price is a non-monotone residual and
-    the possibility of breakdown (rho or omega ~ 0); breakdowns are handled
-    by restarting the recurrence from the current residual, and reported as
-    a failure only if no progress is possible.
+    the possibility of breakdown: (r_hat, r), (r_hat, v) or (t, s) vanishing
+    *relative to the norms of its factors* (machine epsilon of the dtype, so
+    the test is scale invariant). Breakdowns are handled by restarting the
+    recurrence from the current residual, and reported as a failure only if
+    no progress is possible.
+
+    maxiter : bound on BiCGStab *steps*; each step costs two operator applies,
+              so a solve may use up to 2 * maxiter applies.
+    raise_on_fail : if False, return the current iterate on failure instead
+              of raising (as :func:`pcg`).
+    check_every, workspace : accepted for signature compatibility with
+              :func:`pcg` and ignored (every half step already reduces its
+              residual on the host; vectors are allocated per solve).
 
     Returns (x, n_iterations) where an iteration is one operator apply
     (each BiCGStab step counts 2, keeping counts comparable with pcg/gmres).
     """
+    del check_every, workspace          # inapplicable; see docstring
     dot = lambda u, v: float(xp.sum(u * v))
     norm2 = lambda u: float(xp.sum(u * u))
     M = precond if precond is not None else (lambda r: inv_diag * r)
+    eps = float(np.finfo(np.result_type(b.dtype, np.float32)).eps)
 
+    b_norm2 = norm2(b)
+    if b_norm2 == 0.0:
+        return xp.zeros_like(x0), 0       # A x = 0: exact solution
     x = x0.copy()
     r = b - apply_A(x)
-    stop2 = max(rtol * norm2(b) ** 0.5, atol) ** 2
+    stop2 = max(rtol * b_norm2 ** 0.5, atol) ** 2
     if norm2(r) <= stop2:
         return x, 0
 
     r_hat = r.copy()                      # fixed shadow residual
+    r_hat_norm = norm2(r_hat) ** 0.5
     rho = alpha = omega = 1.0
     v = p = None
     restarted = False
     it = 0
     while it < 2 * maxiter:
         rho_new = dot(r_hat, r)
-        if abs(rho_new) < 1e-300 or (v is not None and omega == 0.0):
+        if (abs(rho_new) <= eps * r_hat_norm * norm2(r) ** 0.5
+                or (v is not None and omega == 0.0)):
             # Lanczos breakdown: restart the recurrence from where we are.
             if restarted and norm2(r) > stop2:
                 break                     # twice in a row -> give up
             r_hat = r.copy()
+            r_hat_norm = norm2(r_hat) ** 0.5
             rho = alpha = omega = 1.0
             v = p = None
             restarted = True
@@ -1029,8 +1162,9 @@ def bicgstab(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
         v = apply_A(p_hat)
         it += 1
         denom = dot(r_hat, v)
-        if abs(denom) < 1e-300:
+        if abs(denom) <= eps * r_hat_norm * norm2(v) ** 0.5:
             r_hat = r.copy()
+            r_hat_norm = norm2(r_hat) ** 0.5
             rho = alpha = omega = 1.0
             v = p = None
             if restarted:
@@ -1039,23 +1173,28 @@ def bicgstab(apply_A, b, x0, inv_diag, xp, rtol=1e-6, atol=0.0, maxiter=5000,
             continue
         alpha = rho / denom
         s = r - alpha * v
-        if norm2(s) <= stop2:             # converged at the half step
+        ss = norm2(s)
+        if ss <= stop2:                   # converged at the half step
             x += alpha * p_hat
             return x, it
         s_hat = M(s)
         t = apply_A(s_hat)
         it += 1
         tt = norm2(t)
-        omega = dot(t, s) / tt if tt > 0.0 else 0.0
+        ts = dot(t, s)
+        # omega = 0 (stagnation: t orthogonal to s) triggers the restart above.
+        omega = ts / tt if tt > 0.0 and abs(ts) > eps * (tt * ss) ** 0.5 else 0.0
         x += alpha * p_hat + omega * s_hat
         r = s - omega * t
         restarted = False
         if norm2(r) <= stop2:
             return x, it
-    raise RuntimeError(
-        f"BiCGStab failed to converge in {it} operator applies "
-        f"(residual {norm2(r)**0.5:.3e}, target {stop2**0.5:.3e})"
-    )
+    if raise_on_fail:
+        raise RuntimeError(
+            f"BiCGStab failed to converge in {it} operator applies "
+            f"(residual {norm2(r)**0.5:.3e}, target {stop2**0.5:.3e})"
+        )
+    return x, it
 
 
 def fgmres_c(apply_A, b, x0, xp, precond, rtol=1e-8, atol=0.0, maxiter=1000,
@@ -1266,6 +1405,13 @@ class AndersonAccelerator:
 
 LINEAR_SOLVERS = {"cg": pcg, "cocg": cocg, "gmres": gmres,
                   "fgmres": fgmres, "bicgstab": bicgstab}
+
+#: Keyword arguments every solver in :data:`LINEAR_SOLVERS` accepts, so call
+#: sites can pass them regardless of ``linear_solver=``. A solver for which
+#: one is meaningless (e.g. ``check_every`` for GMRES, which returns its
+#: residual estimate every step anyway) accepts and ignores it explicitly.
+COMMON_SOLVER_KWARGS = ("rtol", "atol", "maxiter", "precond", "check_every",
+                        "raise_on_fail", "workspace")
 
 
 def get_linear_solver(name):

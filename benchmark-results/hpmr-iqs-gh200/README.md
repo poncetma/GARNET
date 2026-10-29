@@ -2,6 +2,15 @@
 
 Decision date: 2026-08-20
 
+> **Caveat (2026-10-29).** These guard settings were calibrated under the IQS
+> semantics that preceded the 2026-10-29 audit fix. At that time the shape
+> step was explicit and `iqs_predictor_tol` only shortened the *next*
+> interval. IQS is now a predictor–corrector that replays each interval, and
+> `iqs_predictor_tol` rejects the current one. The results below are unchanged
+> records of the old code. The `0.002/0.01/0.02` profile must be re-checked on
+> the GH200 before it is relied on again. This is open item O3 of the
+> [code audit](../../docs/qa/code_audit_2026-10-28.md).
+
 Decision: **guarded adaptive IQS is the preferred method for production HP-MR
 coupled transients.** Fixed-cadence IQS remains a benchmark/reference mode, and
 full diffusion remains the accuracy reference.

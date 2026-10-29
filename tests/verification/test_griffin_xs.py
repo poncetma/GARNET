@@ -127,3 +127,40 @@ def test_sph_factor_scales_cross_sections(lib_path):
     uniform = volume_homogenize(lib, {1: 0.7, 2: 0.3}, chi_from=1,
                                 sph_factors=np.array([0.9, 0.9]))
     assert k_infinite(uniform) == pytest.approx(k_infinite(base), rel=1e-12)
+
+
+def _write_without(tmp_path, *tags, material="1"):
+    """The fixture with ``tags`` removed from one material's table."""
+    lines, current = [], None
+    for line in _FIXTURE.splitlines():
+        if "Multigroup_Cross_Section_Library ID=" in line:
+            current = line.split('ID="')[1].split('"')[0]
+        if current == material and any(f"<{t}>" in line for t in tags):
+            continue
+        lines.append(line)
+    p = tmp_path / "missing.xml"
+    p.write_text("\n".join(lines))
+    return str(p)
+
+
+@pytest.mark.parametrize("tag", ["Total", "Absorption"])
+def test_missing_required_tag_raises_instead_of_zero_filling(tmp_path, tag):
+    # Zero-filled, Total gave D = inf and Absorption a non-absorbing material.
+    with pytest.raises(KeyError, match=tag):
+        read_material(_write_without(tmp_path, tag), 1, grid_index="1 1")
+
+
+def test_non_fissile_material_may_omit_all_fission_tags(tmp_path):
+    # The VTB library omits nuFission/FissionSpectrum/kappaFission on every
+    # non-fissile table; that is the legitimately optional case.
+    path = _write_without(tmp_path, "nuFission", "FissionSpectrum", material="2")
+    m = read_material(path, 2, grid_index="1 1")
+    assert not m.is_fissile
+    np.testing.assert_array_equal(m.nu_sigma_f, 0.0)
+
+
+def test_incomplete_fission_data_is_rejected(tmp_path):
+    with pytest.raises(KeyError, match="nuFission"):
+        read_material(_write_without(tmp_path, "nuFission"), 1, grid_index="1 1")
+    with pytest.raises(KeyError, match="FissionSpectrum"):
+        read_material(_write_without(tmp_path, "FissionSpectrum"), 1, grid_index="1 1")

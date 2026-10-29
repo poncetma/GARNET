@@ -17,7 +17,13 @@ down the conventions:
           Sigma_tr2  Sigma_a2  nuSigma_f2  Sigma_f2
 
   and optional ``Precursors`` / ``Velocity`` kinetics blocks. The fission
-  spectrum is chi = (1, 0) by convention and D_g = 1/(3 Sigma_tr,g).
+  spectrum is chi = (1, 0) by convention and D_g = 1/(3 Sigma_tr,g). The
+  ``Sigma_f`` column is a plain fission cross section; it is stored as
+  ``kappa_fission = energy_per_fission * Sigma_f`` (default 200 MeV in J, the
+  same energy units as the library readers' ``kappaFission``). The
+  group-independent kappa cancels in :func:`garnet.power.power_density`'s
+  normalization to rated power, so only the Sigma_f shape matters. A 3-D
+  file splits ``Materials`` into ``PLANE n`` blocks, one map per axial plane.
 
 - ``read_material_xml`` -- the multigroup XML materials file
   (``input.mat.xml``): ``<materials ngroups="G">`` with one ``<mix>`` per
@@ -47,12 +53,16 @@ class XsecFile:
     core_map  : the raw ``Materials`` section as ragged rows of ids (the row
                 label is dropped). Geometry placement -- rectangular or
                 hexagonal stagger -- is up to the caller, as in FEMFFUSION.
+                For a 3-D file (``PLANE n`` headers) it is instead a list of
+                such maps, one per plane, bottom (``PLANE 1``) first.
     kinetics  : Kinetics from the Precursors/Velocity blocks, or None.
+    n_planes  : number of ``PLANE`` blocks; 0 for a 2-D file.
     """
 
     materials: list
     core_map: list
     kinetics: Kinetics | None
+    n_planes: int = 0
 
 
 def _content_lines(path):
@@ -63,10 +73,19 @@ def _content_lines(path):
             yield line
 
 
-def read_xsec(path, name_prefix: str = "") -> XsecFile:
-    """Parse a FEMFFUSION two-group ``.xsec`` (Valkin/xsec_2g) file."""
+# Recoverable energy per fission (~200 MeV), in J.
+ENERGY_PER_FISSION_J = 200.0e6 * 1.602176634e-19
+
+
+def read_xsec(path, name_prefix: str = "",
+              energy_per_fission: float = ENERGY_PER_FISSION_J) -> XsecFile:
+    """Parse a FEMFFUSION two-group ``.xsec`` (Valkin/xsec_2g) file.
+
+    ``energy_per_fission`` converts the file's Sigma_f column into
+    ``kappa_fission`` (energy units, J by default).
+    """
     lines = list(_content_lines(path))
-    materials, core_map, kinetics = [], [], None
+    materials, core_map, kinetics, n_planes = [], [], None, 0
     beta = decay = velocities = None
 
     i = 0
@@ -75,10 +94,25 @@ def read_xsec(path, name_prefix: str = "") -> XsecFile:
         key = tok[0]
         if key == "Materials":
             i += 1
+            planes = []
             while i < len(lines) and lines[i].split()[0] not in _KEYWORDS:
                 row = lines[i].split()
-                core_map.append([int(v) for v in row[1:]])  # drop row label
+                if row[0].upper() == "PLANE":
+                    # A plane header, not a map row: reading it as one put a
+                    # stray [n] row between planes and merged them all.
+                    if len(row) != 2 or int(row[1]) != len(planes) + 1:
+                        raise ValueError(f"{path}: expected 'PLANE {len(planes) + 1}', "
+                                         f"got {lines[i]!r}")
+                    if core_map and not planes:
+                        raise ValueError(f"{path}: map rows before the first PLANE")
+                    planes.append([])
+                    i += 1
+                    continue
+                ids = [int(v) for v in row[1:]]  # drop row label
+                (planes[-1] if planes else core_map).append(ids)
                 i += 1
+            if planes:
+                core_map, n_planes = planes, len(planes)
         elif key == "XSecs":
             n_mats = int(tok[1])
             i += 1
@@ -86,15 +120,19 @@ def read_xsec(path, name_prefix: str = "") -> XsecFile:
                 first = lines[i].split()
                 if int(first[0]) != m:
                     raise ValueError(f"{path}: expected material {m}, got {first[0]}")
-                tr1, a1, nsf1, _sf1, s12 = (float(v) for v in first[1:6])
+                tr1, a1, nsf1, sf1, s12 = (float(v) for v in first[1:6])
                 second = lines[i + 1].split()
-                tr2, a2, nsf2, _sf2 = (float(v) for v in second[:4])
+                tr2, a2, nsf2, sf2 = (float(v) for v in second[:4])
                 materials.append(Material(
                     name=f"{name_prefix}{m}",
                     diffusion=[1.0 / (3.0 * tr1), 1.0 / (3.0 * tr2)],
                     sigma_a=[a1, a2], nu_sigma_f=[nsf1, nsf2],
                     sigma_s=[[0.0, s12], [0.0, 0.0]], chi=[1.0, 0.0],
-                    total=[tr1, tr2]))
+                    total=[tr1, tr2],
+                    # None on non-fissile rows, like the library readers.
+                    kappa_fission=([energy_per_fission * sf1,
+                                    energy_per_fission * sf2]
+                                   if sf1 > 0 or sf2 > 0 else None)))
                 i += 2
         elif key == "Precursors":
             n_prec = int(tok[1])
@@ -110,7 +148,8 @@ def read_xsec(path, name_prefix: str = "") -> XsecFile:
 
     if beta is not None and velocities is not None:
         kinetics = Kinetics(velocities=velocities, beta=beta, decay=decay)
-    return XsecFile(materials=materials, core_map=core_map, kinetics=kinetics)
+    return XsecFile(materials=materials, core_map=core_map, kinetics=kinetics,
+                    n_planes=n_planes)
 
 
 def _xml_rows(element) -> np.ndarray:

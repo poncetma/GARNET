@@ -25,7 +25,7 @@ import numpy as np
 
 from .backend import asnumpy, synchronize
 from .materials import Kinetics
-from .solver import Result
+from .solver import DiffusionEigenSolver, Result
 
 
 @dataclass(frozen=True)
@@ -148,6 +148,19 @@ def _flux_array(value, name: str, groups: int, shape: tuple[int, ...], xp,
     return out
 
 
+def _require_scalar_flux(solver, role, caller):
+    """Reject solvers whose group state is not a scalar flux.
+
+    The projections below apply diffusion loss/fission operators to the
+    group-first scalar flux a :class:`Result` exposes. The SP3/SPN/SDPN block
+    solvers carry a moment-vector state instead, so applying their operators
+    to a scalar flux would silently produce a meaningless projection.
+    """
+    if not isinstance(solver, DiffusionEigenSolver):
+        raise TypeError(f"{caller} supports diffusion-family solvers only; "
+                        f"{role} is {type(solver).__name__}")
+
+
 def _source_weight(solver):
     """Weight matching the discrete operator's right-hand-side convention."""
     weight = getattr(solver, "_src_weight", None)
@@ -168,6 +181,16 @@ def _loss_apply(solver, flux, *, adjoint=False):
                 value = value - weight * scatter * flux[gf]
         out.append(value)
     return out
+
+
+def _fission_apply(solver, flux):
+    """Apply the fission production operator, weighted like ``_loss_apply``:
+    (F phi)_g = w chi_g sum_g' nuSigma_f,g' phi_g' (w = r-z rhs weight)."""
+    weight = _source_weight(solver)
+    production = solver.nu_sigma_f[0] * flux[0]
+    for g in range(1, solver.n_groups):
+        production = production + solver.nu_sigma_f[g] * flux[g]
+    return [weight * solver.chi[g] * production for g in range(solver.n_groups)]
 
 
 def _mapped_kinetics(solver, kinetics: Kinetics):
@@ -198,6 +221,7 @@ def _shape_time_importance(solver, forward, adjoint, kinetics: Kinetics) -> floa
     finite-interval form of the adjoint-weighted shape-derivative term in the
     amplitude equation.
     """
+    _require_scalar_flux(solver, "solver", "quasi-static projection")
     xp = solver.xp
     groups = solver.n_groups
     shape = tuple(solver.grid.shape)
@@ -228,6 +252,7 @@ def project_effective_kinetics(solver, forward, adjoint, kinetics: Kinetics,
     reactivity estimate used between shape corrections. Large black-absorber
     moves must be split into small cached frames and periodically re-anchored.
     """
+    _require_scalar_flux(solver, "solver", "project_effective_kinetics")
     if not isinstance(kinetics, Kinetics):
         raise TypeError("kinetics must be a Kinetics object")
     if k0 is None:
@@ -298,18 +323,14 @@ def projected_shape_residual(solver, forward, adjoint) -> float:
     or eigenvalue change therefore reports zero; only spatial/energy-shape
     mismatch remains. This is the trigger used by the quasi-static driver.
     """
+    _require_scalar_flux(solver, "solver", "projected_shape_residual")
     xp = solver.xp
     groups = solver.n_groups
     shape = tuple(solver.grid.shape)
     forward_flux = _flux_array(forward, "forward flux", groups, shape, xp, solver.dtype)
     adjoint_flux = _flux_array(adjoint, "adjoint flux", groups, shape, xp, solver.dtype)
-    weight = _source_weight(solver)
     loss = _loss_apply(solver, forward_flux)
-    fission_source = solver.nu_sigma_f[0] * forward_flux[0]
-    for g in range(1, groups):
-        fission_source = fission_source + solver.nu_sigma_f[g] * forward_flux[g]
-    fission = [weight * solver.chi[g] * fission_source
-               for g in range(groups)]
+    fission = _fission_apply(solver, forward_flux)
     loss_importance = sum(xp.sum(adjoint_flux[g] * loss[g]) for g in range(groups))
     fission_importance = sum(
         xp.sum(adjoint_flux[g] * fission[g]) for g in range(groups))
@@ -339,6 +360,7 @@ def projected_adjoint_residual(solver, forward, adjoint) -> float:
     Cartesian ADF leakage uses its algebraic transpose, and scattering and
     fission exchange their energy-group production/emission roles.
     """
+    _require_scalar_flux(solver, "solver", "projected_adjoint_residual")
     xp = solver.xp
     groups = solver.n_groups
     shape = tuple(solver.grid.shape)
@@ -442,6 +464,25 @@ def equilibrium_precursors(parameters: EffectiveKinetics,
     amplitude = float(amplitude)
     return (parameters.beta / (parameters.generation_time * parameters.decay)
             * amplitude)
+
+
+def _interpolated_kinetics(start: EffectiveKinetics, delta, weight: float
+                           ) -> EffectiveKinetics:
+    """Add the fraction ``weight`` of an end-shape correction to ``start``.
+
+    ``start`` is projected with the interval's start shape on the current
+    operator and ``delta`` is ``(d_rho, d_Lambda, d_beta)``, the end-shape
+    minus start-shape projection on the interval-end operator. Interpolating
+    only this shape correction keeps every fine-step control and feedback
+    change while the shape varies linearly between the two anchors.
+    """
+    if delta is None or weight == 0.0:
+        return start
+    d_rho, d_generation_time, d_beta = delta
+    return replace(
+        start, rho=start.rho + weight * d_rho,
+        generation_time=start.generation_time + weight * d_generation_time,
+        beta=start.beta + weight * d_beta)
 
 
 def _step_count(t_end: float, dt: float) -> int:
@@ -559,7 +600,8 @@ def _coupled_quasistatic(
         adjoint_residual_tol=None,
         residual_tol=None, fallback_residual=None, iqs_kwargs=None,
         iqs_precond_degree=1, iqs_substeps=1,
-        iqs_predictor_tol=None):
+        iqs_predictor_tol=None, iqs_iteration_tol=1e-4,
+        iqs_max_iterations=4):
     """Shared fixed-shape, adiabatic, and IQS coupled implementation.
 
     An initial adjoint eigenvalue solve establishes the shape importance. At
@@ -570,6 +612,18 @@ def _coupled_quasistatic(
     time-dependent spatial shape and precursor fields over each macro step.
     Optional projected-residual thresholds can shorten that macro step or
     replace a fine interval with the full spatial diffusion solve.
+
+    IQS is a predictor-corrector iteration over each macro interval. The
+    predictor marches the amplitude with start-shape kinetics; the corrector
+    advances the time-dependent shape to the interval end, and the amplitude,
+    precursors, power edits and thermal windows are then re-marched from the
+    accepted start state with the end-shape correction to rho, Lambda and beta
+    interpolated linearly in time. The end shape is re-solved when feedback
+    changes the end operator. The interval is accepted once the end power of
+    the re-projected march changes by at most ``iqs_iteration_tol``; it is
+    rejected and retried with half the width after ``iqs_max_iterations``
+    re-marches or when the corrector's own end power disagrees with the
+    accepted one by more than ``iqs_predictor_tol``.
 
     ``problem_at(0)`` must describe the same physical core as ``ctx`` because
     the converged coupled state supplies the time-zero forward shape. Return
@@ -638,6 +692,17 @@ def _coupled_quasistatic(
         raise ValueError("iqs_precond_degree must be non-negative")
     if iqs_substeps < 1:
         raise ValueError("iqs_substeps must be positive")
+    iqs_iteration_tol = float(iqs_iteration_tol)
+    iqs_max_iterations = int(iqs_max_iterations)
+    if not np.isfinite(iqs_iteration_tol) or iqs_iteration_tol <= 0.0:
+        raise ValueError("iqs_iteration_tol must be finite and positive")
+    if iqs_max_iterations < 1:
+        raise ValueError("iqs_max_iterations must be positive")
+    if (isinstance(ctx.solver_cls, type)
+            and not issubclass(ctx.solver_cls, DiffusionEigenSolver)):
+        raise TypeError("quasi-static transients support diffusion-family "
+                        f"solvers only; ctx.solver_cls is "
+                        f"{ctx.solver_cls.__name__}")
     thermal_maxiter = int(thermal_maxiter)
     thermal_check_every = int(thermal_check_every)
     thermal_precond_degree = int(thermal_precond_degree)
@@ -689,6 +754,8 @@ def _coupled_quasistatic(
     with profiler.region("operator_rebuild"):
         anchor_solver = build_solver(spec0, feedback_hook)
     counters["operator_rebuilds"] += 1
+    _require_scalar_flux(anchor_solver, "ctx.solver_cls",
+                         "quasi-static transients")
     adjoint_options = dict(ctx.eigen_kwargs)
     adjoint_options.update(adjoint_kwargs or {})
     reserved = {"adjoint", "state0"} & adjoint_options.keys()
@@ -870,10 +937,98 @@ def _coupled_quasistatic(
     adaptive_shape_every = shape_every
     next_shape_step = shape_every
     current_solver = anchor_solver
+    start_parameters = parameters
     previous_spec = spec0
     previous_hook = feedback_hook
     # Object identity is the cache contract used by TransientSolver too.
     current_key = tuple(id(item) for item in spec0) + (id(feedback_hook),)
+    # IQS predictor-corrector state. ``checkpoint`` is the accepted state at
+    # the current anchor. After each end-shape solve the interval is
+    # re-marched from it with the interpolated shape correction (``replay``),
+    # or restarted from it with half the width when the iteration fails.
+    # ``interval_start_parameters`` holds the start-shape kinetics of every
+    # fine step since the anchor for the inexpensive amplitude re-march.
+    interval_start_parameters = []
+    replay = None
+
+    def snapshot(anchor_step):
+        return {"n": anchor_step, "amplitude": amplitude,
+                "precursors": precursors.copy(),
+                "start_parameters": start_parameters,
+                "power_shape_factor": power_shape_factor,
+                "spatial_precursors": spatial_precursors.copy(),
+                "temperature": temperature, "feedback_hook": feedback_hook,
+                "power_accum": power_accum, "window_steps": window_steps,
+                "cached_peak": cached_peak, "cached_mean": cached_mean,
+                "current_solver": current_solver, "current_key": current_key,
+                "previous_spec": previous_spec,
+                "previous_hook": previous_hook,
+                "history": len(powers), "residuals": len(residual_times)}
+
+    def iqs_end_shape(shape_solver, spec, hook, width):
+        """Corrector shape, precursor shape and power shape at the end."""
+        with profiler.region("iqs_shape_solve"):
+            corrected, flux, precursor_shape, predicted = \
+                time_dependent_corrector(
+                    anchor_spec, anchor_hook, spec, hook, width, anchor_flux,
+                    anchor_precursors / anchor_power_shape_factor,
+                    substeps=iqs_substeps, start_time=anchor_time)
+        counters["iqs_shape_solves"] += 1
+        counters["iqs_corrector_substeps"] += iqs_substeps
+        counters["iqs_inner_iterations"] += corrected.total_inner_iterations
+        counters["iqs_fixed_point_sweeps"] += sum(corrected.step_iterations)
+        # Feedback can change at the thermal exchange immediately before
+        # this solve. Normalize flux and precursor shape together under that
+        # exact end operator.
+        flux, _, scale = normalized_neutron_shape(shape_solver, flux)
+        with profiler.region("power_shape"):
+            power_shape = normalized_power_shape(spec, flux)
+        return {"flux": flux, "precursors": precursor_shape / scale,
+                "predicted": predicted, "power_shape": power_shape,
+                "key": tuple(id(item) for item in spec) + (id(hook),)}
+
+    def iqs_correction(solver, shape, start, anchor_importance):
+        """End-shape minus start-shape kinetics on the interval-end operator.
+
+        Both projections use the operator that advanced the last fine step, so
+        the correction isolates the shape change; control and feedback timing
+        stay exactly those of the predictor march.
+        """
+        with profiler.region("reactivity_projection"):
+            raw_end = project_effective_kinetics(
+                solver, shape["flux"], adjoint.flux, ctx.kinetics,
+                k0=steady.k_eff)
+        counters["reactivity_projections"] += 1
+        delta = (raw_end.rho - rho_reference - start.rho,
+                 raw_end.generation_time - start.generation_time,
+                 raw_end.beta - start.beta)
+        return {"delta": delta, "T0": anchor_importance,
+                "T1": raw_end.time_importance}
+
+    def remarch_amplitude(correction, first_step, width):
+        """Re-march the anchor amplitude with a shape correction over this
+        march's start-shape kinetics. Host-only: no spatial work."""
+        value = checkpoint["amplitude"]
+        effective = checkpoint["precursors"]
+        t0 = float(times[first_step - 1])
+        history = {"amplitude": [], "power": [], "factor": [], "rho": []}
+        for j, start in enumerate(interval_start_parameters):
+            weight = (float(times[first_step + j]) - t0) / width
+            kinetics = _interpolated_kinetics(
+                start, correction["delta"], weight)
+            value, effective = advance_point_kinetics(
+                kinetics, dt, value, effective)
+            factor = (anchor_power_shape_factor * correction["T0"]
+                      / ((1.0 - weight) * correction["T0"]
+                         + weight * correction["T1"]))
+            history["amplitude"].append(value)
+            history["power"].append(value * factor)
+            history["factor"].append(factor)
+            history["rho"].append(kinetics.rho)
+        history["precursors"] = effective
+        return history
+
+    checkpoint = snapshot(0)
 
     synchronize(xp)
     initialization_seconds = time.perf_counter() - initialization_start
@@ -881,13 +1036,18 @@ def _coupled_quasistatic(
     march_context = (profiler.region("quasistatic_total")
                      if profile else nullcontext())
     with march_context:
-        for n in range(1, steps + 1):
+        n = 0
+        while n < steps:
+            n += 1
             t = float(times[n])
             force_shape = False
             fallback_step = False
+            closed_window = None
             spec = _unpack_problem(get_problem(t), ctx.mix_material,
                                    ctx.mix_weight)
             key = tuple(id(item) for item in spec) + (id(feedback_hook),)
+            step_start_solver = current_solver
+            step_start_key = current_key
             if key != current_key:
                 with profiler.region("operator_rebuild"):
                     current_solver = build_solver(spec, feedback_hook)
@@ -897,8 +1057,11 @@ def _coupled_quasistatic(
                         current_solver, forward_flux, adjoint.flux,
                         ctx.kinetics, k0=steady.k_eff)
                 counters["reactivity_projections"] += 1
-                parameters = replace(raw, rho=raw.rho - rho_reference)
-                if residual_tol is not None or fallback_residual is not None:
+                start_parameters = replace(raw, rho=raw.rho - rho_reference)
+                # A re-march ends at the interval already chosen; its safety
+                # triggers were evaluated by the predictor march.
+                if replay is None and (residual_tol is not None
+                                       or fallback_residual is not None):
                     with profiler.region("shape_residual"):
                         residual = projected_shape_residual(
                             current_solver, forward_flux, adjoint.flux)
@@ -909,12 +1072,29 @@ def _coupled_quasistatic(
                                    and residual >= residual_tol)
                     fallback_step = (fallback_residual is not None
                                      and residual >= fallback_residual)
-                if (parameters.beta.shape != precursors.shape
-                        or not np.array_equal(parameters.decay,
+                if (start_parameters.beta.shape != precursors.shape
+                        or not np.array_equal(start_parameters.decay,
                                               anchor_raw.decay)):
                     raise ValueError("delayed family count/decay constants "
                                      "changed in time")
                 current_key = key
+            interval_start_parameters.append(start_parameters)
+            if replay is None:
+                parameters = start_parameters
+                edit_shape = unit_power_shape
+            else:
+                # Corrector pass: interpolate the end-shape correction and
+                # the matching time-importance/power-shape coordinates.
+                weight = (t - replay["t0"]) / replay["width"]
+                parameters = _interpolated_kinetics(
+                    start_parameters, replay["delta"], weight)
+                power_shape_factor = (
+                    replay["q0"] * replay["T0"]
+                    / ((1.0 - weight) * replay["T0"]
+                       + weight * replay["T1"]))
+                edit_shape = (replay["U1"] if n == replay["n_end"]
+                              else (1.0 - weight) * unit_power_shape
+                              + weight * replay["U1"])
 
             forward_flux_before_step = forward_flux
             amplitude_before = amplitude
@@ -923,12 +1103,26 @@ def _coupled_quasistatic(
                 # The residual says the frozen shape is outside the trusted
                 # QS neighborhood. Advance this fine interval with the full
                 # spatial diffusion equations and carry their precursor field.
+                # TransientSolver renormalizes the start flux to P(0)=1 under
+                # its start operator; scale the precursors identically.
+                start_key = (tuple(id(item) for item in previous_spec)
+                             + (id(previous_hook),))
+                if start_key == step_start_key:
+                    start_solver = step_start_solver
+                else:
+                    with profiler.region("operator_rebuild"):
+                        start_solver = build_solver(previous_spec,
+                                                    previous_hook)
+                    counters["operator_rebuilds"] += 1
+                _, _, start_scale = normalized_neutron_shape(
+                    start_solver, forward_flux)
                 with profiler.region("full_diffusion_fallback"):
                     fallback, new_flux, new_precursor_shape, predicted = \
                         time_dependent_corrector(
                             previous_spec, previous_hook, spec, feedback_hook,
                             dt, forward_flux,
-                            spatial_precursors / physical_power_before,
+                            spatial_precursors
+                            / (physical_power_before * start_scale),
                             substeps=1, start_time=t - dt)
                 _, precursors = advance_point_kinetics(
                     parameters, dt, amplitude_before, precursors)
@@ -945,6 +1139,7 @@ def _coupled_quasistatic(
                                       * spatial_precursor_shape)
                 with profiler.region("power_shape"):
                     unit_power_shape = normalized_power_shape(spec, forward_flux)
+                edit_shape = unit_power_shape
                 fallback_times.append(t)
                 counters["full_diffusion_fallbacks"] += 1
                 counters["fallback_inner_iterations"] += \
@@ -974,8 +1169,9 @@ def _coupled_quasistatic(
             powers.append(physical_power)
             power_shape_factors.append(power_shape_factor)
             rhos.append(parameters.rho)
+            edit_power = physical_power
             with profiler.region("power_edit"):
-                weighted_shape = physical_power * unit_power_shape
+                weighted_shape = physical_power * edit_shape
                 power_accum = (weighted_shape if power_accum is None
                                else power_accum + weighted_shape)
             window_steps += 1
@@ -985,6 +1181,11 @@ def _coupled_quasistatic(
                 width = window_steps * dt
                 stepper = (thermal if window_steps == every
                            else thermal_solver_for(width))
+                # Kept so a shape correction of this step's power can redo
+                # the exchange it has just been consumed by.
+                closed_window = {"temperature": temperature,
+                                 "accum": power_accum,
+                                 "steps": window_steps, "stepper": stepper}
                 power_density = ctx.total_power * power_accum / window_steps
                 next_thermal = counters["thermal_steps"] + 1
                 diagnostics = (thermal_diagnostics_every > 0 and
@@ -1012,14 +1213,24 @@ def _coupled_quasistatic(
                 power_accum = None
                 window_steps = 0
 
-            due_interval = (shape_every is not None
-                            and ((n % shape_every == 0)
-                                 if iqs_predictor_tol is None
-                                 else n >= next_shape_step))
-            due_final = (shape_every is not None and final_window
-                         and shape_on_final and not due_interval)
-            due_residual = force_shape and not fallback_step
-            if due_interval or due_final or due_residual or fallback_step:
+            if replay is not None:
+                due_interval = replay["due_interval"]
+                due_final = replay["due_final"]
+                due_residual = replay["due_residual"]
+                shape_event = n == replay["n_end"]
+            else:
+                due_interval = (
+                    shape_every is not None
+                    and ((n % shape_every == 0)
+                         if (iqs_predictor_tol is None
+                             and shape_method != "iqs")
+                         else n >= next_shape_step))
+                due_final = (shape_every is not None and final_window
+                             and shape_on_final and not due_interval)
+                due_residual = force_shape and not fallback_step
+                shape_event = (due_interval or due_final or due_residual
+                               or fallback_step)
+            if shape_event:
                 # Re-anchor against the end-of-step control and temperature
                 # state. The adjoint-weighted population amplitude remains
                 # continuous; the fission-power factor is corrected for the
@@ -1027,20 +1238,22 @@ def _coupled_quasistatic(
                 with profiler.region("shape_operator_rebuild"):
                     shape_solver = build_solver(spec, feedback_hook)
                 counters["operator_rebuilds"] += 1
+                shape_hook = feedback_hook
+                shape_key = tuple(id(item) for item in spec) + (id(shape_hook),)
                 old_forward_flux = (forward_flux_before_step if fallback_step
                                     else forward_flux)
-                old_unit_power_shape = unit_power_shape
-                provisional_power = powers[-1]
                 # Measure both sides of the shape replacement with the same
                 # adjoint.  If the adjoint itself is refreshed below it is
                 # rescaled so this old-shape functional remains continuous.
                 old_time_importance = _shape_time_importance(
                     shape_solver, old_forward_flux, adjoint.flux,
                     ctx.kinetics)
-                predicted = 1.0
                 predictor_disagreement = None
-                corrected_precursor_shape = None
                 precursors_follow_flux = True
+                accepted_power = None
+                new_unit_power_shape = None
+                iteration = 0
+                iqs_converged = True
                 if fallback_step:
                     # The fine-step fallback already supplied the new shape and
                     # spatial precursor history. Only re-anchor its projection
@@ -1048,34 +1261,137 @@ def _coupled_quasistatic(
                     reason = "full_diffusion_fallback"
                     shape_state = [forward_flux[g].copy()
                                    for g in range(shape_solver.n_groups)]
+                    new_unit_power_shape = unit_power_shape
                 elif shape_method == "iqs":
+                    reason = ("residual" if due_residual else
+                              "maximum_interval" if due_interval else
+                              "final_state")
+                    iteration = 0 if replay is None else replay["iteration"]
+                    end_shape = None if replay is None else replay["shape"]
+                    first_step = checkpoint["n"] + 1
+                    interval_steps = n - checkpoint["n"]
                     width = t - anchor_time
-                    with profiler.region("iqs_shape_solve"):
-                        corrected, forward_flux, corrected_precursor_shape, predicted = \
-                            time_dependent_corrector(
-                                anchor_spec, anchor_hook, spec, feedback_hook,
-                                width, anchor_flux,
-                                anchor_precursors / anchor_power_shape_factor,
-                                substeps=iqs_substeps,
-                                start_time=anchor_time)
-                    counters["iqs_shape_solves"] += 1
-                    counters["iqs_corrector_substeps"] += iqs_substeps
-                    counters["iqs_inner_iterations"] += \
-                        corrected.total_inner_iterations
-                    counters["iqs_fixed_point_sweeps"] += sum(
-                        corrected.step_iterations)
-                    # The corrector's precursor field followed its independent
-                    # coarse amplitude prediction.  Preserve the inventory
-                    # accumulated with the accepted fine point-amplitude
-                    # history instead of replacing it with that different
-                    # history merely because the spatial shape was corrected.
-                    precursors_follow_flux = False
+                    if end_shape is None:
+                        end_shape = iqs_end_shape(
+                            shape_solver, spec, shape_hook, width)
+                    anchor_importance = _shape_time_importance(
+                        current_solver, anchor_flux, adjoint.flux,
+                        ctx.kinetics)
+                    correction = iqs_correction(
+                        current_solver, end_shape, start_parameters,
+                        anchor_importance)
+                    trial = remarch_amplitude(correction, first_step, width)
+                    trial_power = trial["power"][-1]
+                    change = abs(trial_power - powers[-1]) / trial_power
+                    iqs_converged = change <= iqs_iteration_tol
+                    if (not iqs_converged and iteration > 0
+                            and end_shape["key"] != shape_key):
+                        # Feedback re-marched with the corrected power moved
+                        # the end operator: solve the end shape again.
+                        end_shape = iqs_end_shape(
+                            shape_solver, spec, shape_hook, width)
+                        correction = iqs_correction(
+                            current_solver, end_shape, start_parameters,
+                            anchor_importance)
+                        trial = remarch_amplitude(
+                            correction, first_step, width)
+                        trial_power = trial["power"][-1]
+                    corrector_power = (anchor_amplitude
+                                       * anchor_power_shape_factor
+                                       * end_shape["predicted"])
+                    disagreement = (abs(corrector_power - trial_power)
+                                    / trial_power)
+                    counters["iqs_max_iteration_change_ppm"] = max(
+                        counters["iqs_max_iteration_change_ppm"],
+                        int(round(1e6 * change)) if iteration > 0 else 0)
+                    predictor_rejects = (iqs_predictor_tol is not None
+                                         and disagreement > iqs_predictor_tol)
+                    exhausted = (not iqs_converged
+                                 and iteration >= iqs_max_iterations)
+                    rewind = None
+                    if interval_steps > 1 and (predictor_rejects or exhausted):
+                        # Reject the whole interval and retry it with half
+                        # the shape step from the accepted anchor.
+                        rewind = "reject"
+                        counters["iqs_interval_rejections"] += 1
+                        if predictor_rejects:
+                            counters["iqs_predictor_interval_reductions"] += 1
+                        else:
+                            counters["iqs_unconverged_rejections"] += 1
+                        adaptive_shape_every = max(1, interval_steps // 2)
+                        next_shape_step = checkpoint["n"] + adaptive_shape_every
+                        replay = None
+                    elif not iqs_converged and not exhausted:
+                        rewind = "replay"
+                        counters["iqs_corrector_iterations"] += 1
+                        replay = dict(
+                            correction, iteration=iteration + 1,
+                            shape=end_shape, U1=end_shape["power_shape"],
+                            q0=anchor_power_shape_factor, t0=anchor_time,
+                            width=width, n_end=n, due_interval=due_interval,
+                            due_final=due_final, due_residual=due_residual)
+                    if rewind is not None:
+                        cp = checkpoint
+                        amplitude = cp["amplitude"]
+                        precursors = cp["precursors"].copy()
+                        start_parameters = parameters = cp["start_parameters"]
+                        power_shape_factor = cp["power_shape_factor"]
+                        spatial_precursors = cp["spatial_precursors"].copy()
+                        temperature = cp["temperature"]
+                        feedback_hook = cp["feedback_hook"]
+                        power_accum = cp["power_accum"]
+                        window_steps = cp["window_steps"]
+                        cached_peak = cp["cached_peak"]
+                        cached_mean = cp["cached_mean"]
+                        current_solver = cp["current_solver"]
+                        current_key = cp["current_key"]
+                        previous_spec = cp["previous_spec"]
+                        previous_hook = cp["previous_hook"]
+                        for history in (amplitudes, powers,
+                                        power_shape_factors, rhos, peaks,
+                                        means):
+                            del history[cp["history"]:]
+                        if rewind == "reject":
+                            del residual_times[cp["residuals"]:]
+                            del residual_values[cp["residuals"]:]
+                        interval_start_parameters = []
+                        n = cp["n"]
+                        continue
+                    if not iqs_converged:
+                        counters["iqs_unconverged_accepts"] += 1
+                    if predictor_rejects:
+                        counters["iqs_predictor_tol_accepts"] += 1
+                    # Accept the re-projected amplitude history. The thermal
+                    # windows of this march consumed powers within the
+                    # iteration tolerance of it; the corrector supplies the
+                    # end shape and the spatial distribution of the accepted
+                    # effective precursors.
+                    start = first_step
+                    amplitudes[start:] = trial["amplitude"]
+                    powers[start:] = trial["power"]
+                    power_shape_factors[start:] = trial["factor"]
+                    rhos[start:] = trial["rho"]
+                    amplitude = trial["amplitude"][-1]
+                    precursors = trial["precursors"]
+                    accepted_power = trial_power
+                    forward_flux = end_shape["flux"]
+                    new_unit_power_shape = end_shape["power_shape"]
                     shape_state = [forward_flux[g].copy()
                                    for g in range(shape_solver.n_groups)]
-                    predicted_end = (anchor_amplitude
-                                     * anchor_power_shape_factor * predicted)
-                    disagreement = (abs(predicted_end - provisional_power)
-                                    / provisional_power)
+                    precursors_follow_flux = False
+                    previous_spatial_precursors = spatial_precursors
+                    spatial_precursors, _ = _match_spatial_precursor_importance(
+                        shape_solver, adjoint.flux, end_shape["precursors"],
+                        precursors, ctx.kinetics,
+                        anchor_power_shape_factor * old_time_importance)
+                    delta_c = spatial_precursors - previous_spatial_precursors
+                    base_c = xp.sum(previous_spatial_precursors**2)
+                    relative_c = float(xp.sqrt(
+                        xp.sum(delta_c**2) / xp.maximum(base_c, 1e-300)))
+                    counters["iqs_precursor_shape_corrections"] += 1
+                    counters["iqs_max_precursor_shape_change_ppm"] = max(
+                        counters["iqs_max_precursor_shape_change_ppm"],
+                        int(round(1e6 * relative_c)))
                     predictor_disagreement = disagreement
                     predictor_disagreement_times.append(t)
                     predictor_disagreement_values.append(disagreement)
@@ -1083,9 +1399,6 @@ def _coupled_quasistatic(
                     counters["iqs_max_amplitude_error_ppm"] = max(
                         counters["iqs_max_amplitude_error_ppm"],
                         int(round(1e6 * disagreement)))
-                    reason = ("residual" if due_residual else
-                              "maximum_interval" if due_interval else
-                              "final_state")
                 else:
                     precursors_follow_flux = False
                     forward_options = dict(ctx.eigen_kwargs)
@@ -1106,6 +1419,7 @@ def _coupled_quasistatic(
                     reason = ("residual" if due_residual else
                               "maximum_interval" if due_interval else
                               "final_state")
+                replay = None
                 # Feedback can change at the thermal exchange immediately
                 # before this re-anchor. Normalize flux and precursor shape
                 # together under that exact end operator.
@@ -1113,9 +1427,6 @@ def _coupled_quasistatic(
                     shape_solver, forward_flux)
                 if precursors_follow_flux:
                     spatial_precursors = spatial_precursors / precursor_scale
-                elif corrected_precursor_shape is not None:
-                    corrected_precursor_shape = (corrected_precursor_shape
-                                                 / precursor_scale)
                 shape_updates += 1
 
                 adjoint_defect = None
@@ -1164,83 +1475,107 @@ def _coupled_quasistatic(
                         ctx.kinetics, k0=steady.k_eff)
                 counters["reactivity_projections"] += 1
                 parameters = replace(raw, rho=raw.rho - rho_reference)
+                start_parameters = parameters
                 # Integrated adjoint-weighted shape derivative.  With
                 # phi=A*psi and fission-normalized psi, continuity of
                 # <phi*,V^-1 phi> gives
                 #   P = A * q,  q_new/q_old = T_old/T_new.
                 # A remains the fine point-kinetics coordinate; q converts it
-                # to physical fission power.
-                previous_factor = power_shape_factor
-                power_shape_factor *= (old_time_importance
-                                       / raw.time_importance)
+                # to physical fission power. An accepted IQS march already
+                # carries this factor, so its physical power is kept and only
+                # the amplitude coordinate follows a refreshed adjoint.
+                previous_factor = anchor_power_shape_factor
+                power_shape_factor = previous_factor * (
+                    old_time_importance / raw.time_importance)
                 if (not np.isfinite(power_shape_factor)
                         or power_shape_factor <= 0.0):
                     raise RuntimeError("quasi-static shape normalization is invalid")
                 if fallback_step:
                     amplitude = fallback_physical_power / power_shape_factor
                     amplitudes[-1] = amplitude
+                elif accepted_power is not None:
+                    amplitude = accepted_power / power_shape_factor
+                    amplitudes[-1] = amplitude
                 correction = power_shape_factor / previous_factor
                 counters["shape_derivative_corrections"] += 1
                 counters["max_shape_derivative_correction_ppm"] = max(
                     counters["max_shape_derivative_correction_ppm"],
                     int(round(1e6 * abs(correction - 1.0))))
-                accepted_precursors = _project_spatial_precursors(
+                precursors = _project_spatial_precursors(
                     shape_solver, adjoint.flux, spatial_precursors,
                     ctx.kinetics,
                     power_shape_factor * raw.time_importance)
-                if corrected_precursor_shape is not None:
-                    previous_spatial_precursors = spatial_precursors
-                    spatial_precursors, _ = _match_spatial_precursor_importance(
-                        shape_solver, adjoint.flux,
-                        corrected_precursor_shape, accepted_precursors,
-                        ctx.kinetics,
-                        power_shape_factor * raw.time_importance)
-                    delta_c = spatial_precursors - previous_spatial_precursors
-                    base_c = xp.sum(previous_spatial_precursors**2)
-                    relative_c = float(xp.sqrt(
-                        xp.sum(delta_c**2) / xp.maximum(base_c, 1e-300)))
-                    counters["iqs_precursor_shape_corrections"] += 1
-                    counters["iqs_max_precursor_shape_change_ppm"] = max(
-                        counters["iqs_max_precursor_shape_change_ppm"],
-                        int(round(1e6 * relative_c)))
-                precursors = accepted_precursors
-                with profiler.region("power_shape"):
-                    unit_power_shape = normalized_power_shape(spec, forward_flux)
+                if new_unit_power_shape is None:
+                    with profiler.region("power_shape"):
+                        new_unit_power_shape = normalized_power_shape(
+                            spec, forward_flux)
+                unit_power_shape = new_unit_power_shape
                 corrected_power = amplitude * power_shape_factor
                 powers[-1] = corrected_power
                 power_shape_factors[-1] = power_shape_factor
-                if power_accum is not None:
+                edit_changed = (
+                    edit_shape is not unit_power_shape
+                    or abs(corrected_power - edit_power)
+                    > 1e-14 * abs(corrected_power))
+                if power_accum is not None and edit_changed:
                     # Replace this fine step's provisional edit if the thermal
                     # window has not already been consumed.
                     power_accum = (power_accum
-                                   - provisional_power * old_unit_power_shape
+                                   - edit_power * edit_shape
                                    + corrected_power * unit_power_shape)
+                elif closed_window is not None and edit_changed:
+                    # The window closed on this step's provisional edit: redo
+                    # that exchange with the corrected power and shape.
+                    accum = (closed_window["accum"]
+                             - edit_power * edit_shape
+                             + corrected_power * unit_power_shape)
+                    with profiler.region("thermal_solve"):
+                        thermal_result = closed_window["stepper"].step(
+                            ctx.total_power * accum / closed_window["steps"],
+                            closed_window["temperature"], rtol=thermal_rtol,
+                            maxiter=thermal_maxiter,
+                            check_every=thermal_check_every,
+                            diagnostics=False, synchronize_timing=False)
+                    temperature = thermal_result.temperature
+                    counters["thermal_steps"] += 1
+                    counters["thermal_redos"] += 1
+                    counters["thermal_iterations"] += thermal_result.iterations
+                    with profiler.region("feedback_update"):
+                        feedback_hook = ctx.feedback.hook(temperature)
+                    counters["feedback_updates"] += 1
+                    with profiler.region("telemetry_transfer"):
+                        packet = asnumpy(xp.stack((
+                            xp.max(temperature[fuel_dev]),
+                            xp.mean(temperature[fuel_dev]))))
+                    counters["telemetry_transfers"] += 1
+                    cached_peak, cached_mean = map(float, packet)
                 spatial_precursor_shape = spatial_precursors / amplitude
-                current_key = (tuple(id(item) for item in spec)
-                               + (id(feedback_hook),))
+                # The next fine step continues from the end operator; a redone
+                # thermal exchange changes the hook and so forces a rebuild.
+                current_solver = shape_solver
+                current_key = shape_key
+                start_parameters = parameters
                 shape_times.append(t)
                 shape_reasons.append(reason)
                 denominator = 1.0 - raw.rho
                 shape_ks.append(steady.k_eff / denominator
                                 if denominator > 0.0 else float("nan"))
                 anchor_spec = spec
-                anchor_hook = feedback_hook
+                anchor_hook = shape_hook
                 anchor_flux = forward_flux
                 anchor_precursors = spatial_precursor_shape
                 anchor_time = t
                 anchor_amplitude = amplitude
                 anchor_power_shape_factor = power_shape_factor
-                if iqs_predictor_tol is not None and not final_window:
+                if ((shape_method == "iqs" or iqs_predictor_tol is not None)
+                        and not final_window):
                     if (predictor_disagreement is not None
-                            and predictor_disagreement > iqs_predictor_tol):
-                        shortened = max(1, adaptive_shape_every // 2)
-                        if shortened < adaptive_shape_every:
-                            counters["iqs_predictor_interval_reductions"] += 1
-                        adaptive_shape_every = shortened
-                    elif (predictor_disagreement is not None
-                          and predictor_disagreement
-                          < 0.25 * iqs_predictor_tol
-                          and adaptive_shape_every < shape_every):
+                            and adaptive_shape_every < shape_every
+                            and iqs_converged and iteration <= 1
+                            and (iqs_predictor_tol is None
+                                 or predictor_disagreement
+                                 < 0.25 * iqs_predictor_tol)):
+                        # A calm accepted interval restores the step doubled.
                         restored = min(shape_every, 2 * adaptive_shape_every)
                         if restored > adaptive_shape_every:
                             counters["iqs_predictor_interval_recoveries"] += 1
@@ -1262,6 +1597,9 @@ def _coupled_quasistatic(
                       f"shape updates = {shape_updates}", flush=True)
             previous_spec = spec
             previous_hook = feedback_hook
+            if shape_event:
+                checkpoint = snapshot(n)
+                interval_start_parameters = []
 
     synchronize(xp)
     seconds = time.perf_counter() - march_start
@@ -1278,6 +1616,10 @@ def _coupled_quasistatic(
                  "iqs_corrector_substeps",
                  "iqs_predictor_interval_reductions",
                  "iqs_predictor_interval_recoveries",
+                 "iqs_corrector_iterations", "iqs_max_iteration_change_ppm",
+                 "iqs_interval_rejections", "iqs_unconverged_rejections",
+                 "iqs_unconverged_accepts", "iqs_predictor_tol_accepts",
+                 "thermal_redos",
                  "adjoint_residual_evaluations",
                  "adjoint_residual_refreshes",
                  "max_adjoint_residual_ppm"):
@@ -1322,7 +1664,8 @@ def fixed_shape_coupled_transient(ctx, t_end, dt, **kwargs):
                  "residual_tol", "fallback_residual", "adjoint_residual_tol",
                  "iqs_kwargs",
                  "iqs_precond_degree", "iqs_substeps",
-                 "iqs_predictor_tol"} & kwargs.keys()
+                 "iqs_predictor_tol", "iqs_iteration_tol",
+                 "iqs_max_iterations"} & kwargs.keys()
     if forbidden:
         raise TypeError("fixed_shape_coupled_transient does not accept "
                         + ", ".join(sorted(forbidden)))
@@ -1350,9 +1693,12 @@ def quasistatic_coupled_transient(ctx, t_end, dt, *, shape_dt=2.0,
     transposed eigenproblem; hard fallback always refreshes it.
     ``iqs_substeps`` optionally resolves cached
     control states inside each macro corrector instead of applying only the
-    endpoint state. ``iqs_predictor_tol`` halves future shape intervals when
-    the independent corrector power disagrees by more than that relative
-    tolerance, then restores the interval after the transient settles.
+    endpoint state. Each IQS interval is re-marched with kinetics
+    interpolated between its start and end shapes until its end power changes
+    by at most ``iqs_iteration_tol``; after ``iqs_max_iterations`` replays,
+    or when the corrector's own end power disagrees with the accepted power
+    by more than ``iqs_predictor_tol``, the interval is rejected and retried
+    with half the width. The width is restored after the transient settles.
 
     ``residual_tol`` forces an early shape correction when the amplitude-free
     spatial defect grows too large. ``fallback_residual`` is the hard safety

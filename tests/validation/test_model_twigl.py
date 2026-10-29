@@ -58,6 +58,9 @@ def test_twigl_transient_power_matches_literature(kind, p01, p05):
 
     res = model.transient(t_end=0.5, dt=0.005, materials_at=materials_at)
     at = lambda tt: res.power[np.argmin(np.abs(res.times - tt))]
-    assert at(0.1) == pytest.approx(p01, abs=0.02)
-    assert at(0.5) == pytest.approx(p05, abs=0.02)
+    # Measured P - P_ref: step +0.0005 (0.1 s), +0.0006 (0.5 s); ramp -0.0013,
+    # -0.0004. The references are quoted to two decimals (+-0.005), so the
+    # tolerance is that rounding half-unit (~4x the largest observed error).
+    assert at(0.1) == pytest.approx(p01, abs=0.005)
+    assert at(0.5) == pytest.approx(p05, abs=0.005)
     assert res.k0 == pytest.approx(res.steady.k_eff, abs=1e-12)   # transient carries its steady state

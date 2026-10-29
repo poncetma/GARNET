@@ -149,6 +149,30 @@ emission spectrum, not a cross section.
 *Honest limitation:* the mesh does not move, so `beta_exp` is a density effect
 on frozen geometry — a standard reduction of a fuel-density coefficient, but
 not core expansion, and it should not be reported as one.
+`hpmr_feedback(expansion_pcm_per_K=..., fuel_density_worth_pcm=W)` converts a
+reactivity coefficient to `beta_exp = -alpha / W` through the core's measured
+fuel-density worth `W = d rho / d ln N` (1952 pcm on the 2-group set, 7500 pcm
+on the 11-group set, refine 3). `W` is required whenever `expansion_pcm_per_K`
+is given; the old call without it raises.
+
+**Mixed cells.** Each material's change is evaluated under its *own* law —
+its own `c_D`, `T_ref`, `beta_exp` and cross sections — and the changes are
+blended, `dSigma_cell = sum_i w_i dSigma_i(T)` (and `1/D` likewise, the
+harmonic blend being linear in `1/D`). Blending the coefficients first and
+multiplying by the cell's blended `Sigma_a` put the fuel's Doppler on its
+partner's absorption (50.5x too much in a 50/50 fuel/absorber cell) and
+averaged reference temperatures (a cell whose fuel sat at its own `T_ref`
+still moved). Where both components respond differently the per-material
+change needs each one's cross sections, so `ThermalFeedback.hook(T,
+materials=...)` takes the material list; the coupling drivers pass it, and a
+mixed cell with differing laws and no material list is refused.
+
+**Power follows the feedback.** The power edit weights by `kappa*Sigma_f` from
+the static tables, which no feedback law touches; but expansion and tabulated
+branches move `Sigma_f` (the HP-MR fuel's `nu*Sigma_f` changes 1.7–2.5%
+between 600 and 1200 K). The coupled drivers scale `kappa*Sigma_f` by the same
+per-cell, per-group ratio the feedback applied to `nu*Sigma_f` (`kappa/nu` is
+a nuclide property, ~constant in temperature).
 
 ### Where it plugs in
 
@@ -193,6 +217,20 @@ the physics is wrong, not the accelerator.
 The reportable result is `k` at hot full power against the cold unfed core —
 the **temperature defect** — and, through `criticality_search`, the drum angle
 that holds the core critical once that defect is paid for.
+
+### What converges, and what is returned
+
+`tol` bounds the **fixed-point residual** `max|G(T) - T| / span`, not the size
+of the last step. Under Picard relaxation the step is `omega` times the
+residual, so testing the step loosened the tolerance by `1/omega`; an Anderson
+step can likewise be small while the residual is not. The result is one
+evaluated state: `temperature` is the field the cross sections were evaluated
+at, and `k_eff`, `flux` and `power_density` belong to exactly that field.
+`thermal.temperature` is its conduction response `G(T)`, within `tol * span`.
+
+`criticality_search` raises unless `|k - target| < tol` at the angle it
+returns — including when the secant stalls on a flat (coarse-mesh staircase)
+stretch of the worth curve.
 
 ### Convergence tolerance has a floor
 
@@ -368,9 +406,16 @@ window. BE/BDF keep the existing endpoint-source rule. Select
 `power_quadrature="endpoint"` to isolate the quadrature effect in an FTM study.
 Results expose the actual `step_source_weights` and `step_frequencies`.
 
-The conduction window remains backward Euler and feedback is held fixed
-between exchanges. Better neutron or source integration cannot by itself
-remove that splitting error; refine `dt_thermal` independently. The
+**The coupling is explicit, first-order Lie splitting.** Over each thermal
+window the neutronics advances with cross sections frozen at the temperature
+of the window START, and only then does conduction (backward Euler) advance
+with the window-mean power; feedback is not iterated within a window. The
+coupled scheme is therefore first order in `dt_thermal` *whatever* the
+neutron integrator: selecting BDF2/BDF3 or FTM raises the order of the neutron
+sub-problem, not of the coupled one, and the global error falls only linearly
+as `dt_thermal` is halved. Better neutron or source integration cannot by
+itself remove that splitting error; refine `dt_thermal` independently (and
+check convergence in it) when the feedback acts on the time scale of interest. The
 [prototype comparison](../benchmark-results/exponential-prototype/README.md)
 includes slow/fast feedback and two exchange cadences. The separate LRA driver
 also supports FTM with fully implicit adiabatic heating, integrating heat
@@ -444,11 +489,19 @@ fission power. Results expose that split as `.amplitude`, `.power`, and
 adjoint coordinate after each correction. Set `shape_method="adiabatic"` for
 periodic eigen shapes instead.
 
-`iqs_predictor_tol` adds a forward-looking amplitude guard. If the independent
-macro corrector and accepted power differ by more than this relative tolerance,
-subsequent shape intervals are halved; they recover geometrically after the
-disagreement falls below one quarter of the tolerance. This concentrates shape
-work around rapid control motion without immediately replaying a full interval.
+Each IQS interval is a predictor–corrector iteration. The amplitude, power
+edits and thermal windows are replayed from the interval start with the
+end-shape kinetics correction until the end power settles to
+`iqs_iteration_tol` (default `1e-4`, at most `iqs_max_iterations=4` replays).
+`iqs_predictor_tol` adds an amplitude guard. If the corrector's own end power
+and the accepted power differ by more than this relative tolerance, the
+*current* interval is rejected and retried from its start with half the width.
+An interval that does not converge is rejected in the same way. Widths double
+back towards `shape_dt` after calm intervals, in which the disagreement is
+below one quarter of the tolerance. Before 2026-10-29 the guard only halved
+*subsequent* intervals and never replayed one, so calibrated profiles need
+re-checking. See the
+[quasi-static plan](quasistatic_acceleration_plan.md#predictor-corrector-iqs-2026-10-29-audit-fix).
 `iqs_substeps>1` also makes a macro corrector traverse cached intermediate
 `problem_at` states, but is primarily a convergence control: the HP-MR CPU
 sweep found substantially more cost than accuracy benefit from 2–4 substeps.

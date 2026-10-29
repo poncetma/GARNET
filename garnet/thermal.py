@@ -197,7 +197,14 @@ class ConductionSolver:
 
         k = blend.field(np.array([m.conductivity for m in mats], dtype=float))
         h = blend.field(np.array([m.sink_coeff for m in mats], dtype=float))
-        t_sink = blend.field(np.array([m.sink_temperature for m in mats], dtype=float))
+        # The sink SOURCE in a mixed cell is sum_i w_i h_i T_sink,i, so blend
+        # the product, not h and T_sink separately: a cell half heat-pipe fuel
+        # (T_sink 750 K) and half reflector (h = 0) must still relax to 750 K,
+        # not to the 375 K that blending h and T_sink separately gave.
+        h_t_sink = blend.field(np.array([m.sink_coeff * m.sink_temperature
+                                         for m in mats], dtype=float))
+        t_sink_volume = blend.field(np.array([m.sink_temperature for m in mats],
+                                             dtype=float))
         rho_cp = blend.field(np.array([m.heat_capacity for m in mats], dtype=float))
         if float(xp.min(k)) <= 0.0:
             raise ValueError("conductivity must be positive in every cell "
@@ -211,8 +218,13 @@ class ConductionSolver:
             # a unit diagonal and no couplings, so they end up at exactly T_inf
             # -- inert, and they drop out of the energy balance identically.
             h = xp.where(self.active, h, 0.0)
+            h_t_sink = xp.where(self.active, h_t_sink, 0.0)
             rho_cp = xp.where(self.active, rho_cp, 0.0)
-        self.k, self.h, self.t_sink = k, h, t_sink
+        # Effective sink temperature, h_t_sink / h: the T a cell relaxes to with
+        # no source. Exposed for callers; the solve itself uses h_t_sink.
+        t_sink = xp.where(h > 0.0, h_t_sink / xp.where(h > 0.0, h, 1.0),
+                          t_sink_volume)
+        self.k, self.h, self.t_sink, self.h_t_sink = k, h, t_sink, h_t_sink
         self.rho_cp = rho_cp
 
         # Backward Euler in one line of algebra: rho*cp dT/dt costs the
@@ -351,7 +363,7 @@ class ConductionSolver:
         if self.active is not None:
             q = xp.where(self.active, q, 0.0)
 
-        source = q + self.h * self.t_sink
+        source = q + self.h_t_sink
         if _previous is not None:
             source = source + self._capacity_over_dt * xp.asarray(
                 _previous, dtype=self.dtype)
@@ -401,7 +413,7 @@ class ConductionSolver:
         dV = self.grid.cell_volume * self._physical_volume_scale
         vol = dV * self._rhs_weight
         source = float(xp.sum(vol * q))
-        sink = float(xp.sum(vol * self.h * (T - self.t_sink)))
+        sink = float(xp.sum(vol * (self.h * T - self.h_t_sink)))
         # _boundary_leakage already carries the operator's metric weight, so it
         # pairs with the bare cell volume.
         leak = float(xp.sum(dV * self._boundary_leakage * (T - self.ambient_temperature)))

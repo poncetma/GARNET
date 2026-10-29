@@ -17,8 +17,9 @@ from __future__ import annotations
 import numpy as np
 
 from . import kernels
+from .backend import asnumpy
 from .stencil import (BC_REFLECTIVE, BC_VACUUM, BC_ZERO_FLUX, GroupOperator,
-                      normalize_bc)
+                      _face_valid, normalize_bc)
 
 
 class CongruentSDPNOperator:
@@ -435,9 +436,18 @@ def _congruence_available(order, grid, bc, active, mask_bc, coeffs=None):
     return True
 
 
-def _marshak_faces(xp, grid, bc, D_list, g):
-    """Precompute, for each vacuum face, the per-boundary-cell coupling matrix
-    K (shape (*slab, M, M)) of the Marshak condition -n.D grad U = (g (x) I) U.
+def _marshak_faces(xp, grid, bc, D_list, g, active=None, mask_bc=None):
+    """Precompute the coupled Marshak boundary terms of -n.D grad U = (g (x) I) U.
+
+    Returns a list of up to six ``(index, K)`` pairs, one per face direction:
+    ``index`` is a tuple of three integer arrays naming the boundary cells
+    that have a vacuum face in that direction, ``K`` (shape (n, M, M)) the
+    per-cell leakage-per-volume coupling of that face. A face is a vacuum
+    face if it lies on the box surface with ``bc`` vacuum, or -- with an
+    ``active`` mask and ``mask_bc`` vacuum -- if it separates an active cell
+    from an excised one (the core/void surface). Only active cells carry a
+    term. Within one direction every cell appears at most once, so the
+    groups can be applied with plain fancy-indexed updates.
 
     With the two-point boundary current J_i = (2 D_i/d)(U_c,i - U_s,i) and
     J_i = sum_j g_ij U_s,j, eliminating the surface value U_s gives the leakage
@@ -448,25 +458,54 @@ def _marshak_faces(xp, grid, bc, D_list, g):
         raise NotImplementedError("Marshak vacuum not implemented for cylindrical grids")
     M = len(D_list)
     gm = xp.asarray(g, dtype=D_list[0].dtype)                # (M, M)
-    dx, dy, dz = grid.spacing
-    spacing = (dx, dy, dz)
-    faces = [(0, (0, slice(None), slice(None))), (0, (-1, slice(None), slice(None))),
-             (1, (slice(None), 0, slice(None))), (1, (slice(None), -1, slice(None))),
-             (2, (slice(None), slice(None), 0)), (2, (slice(None), slice(None), -1))]
-    specs = [bc[0][0], bc[0][1], bc[1][0], bc[1][1], bc[2][0], bc[2][1]]
-    out = []
+    spacing = tuple(grid.spacing)
+    shape = tuple(grid.shape)
+    act = (np.ones(shape, dtype=bool) if active is None
+           else np.asarray(asnumpy(active)).astype(bool))
+    mask_vacuum = (active is not None and mask_bc is not None
+                   and _face_valid(mask_bc) == BC_VACUUM)
     eye = xp.eye(M, dtype=gm.dtype)
-    for (axis, sl), spec in zip(faces, specs):
-        if spec != BC_VACUUM:
-            continue
-        d = spacing[axis]
-        # a_i on the boundary layer, moved to a trailing moment axis: (*slab, M).
-        a = xp.stack([2.0 * D_list[i][sl] / d for i in range(M)], axis=-1)
-        Mmat = gm + a[..., None] * eye                       # diag(a) + g, (*slab,M,M)
-        Minv = xp.linalg.inv(Mmat)
-        gMinv = xp.matmul(gm, Minv)                          # (*slab,M,M)
-        K = (1.0 / d) * gMinv * a[..., None, :]              # K_ij = (1/d) a_j (gMinv)_ij
-        out.append((sl, K))
+    out = []
+    for axis in range(3):
+        for side in (0, 1):
+            faces = np.zeros(shape, dtype=bool)
+            boundary = [slice(None)] * 3
+            boundary[axis] = 0 if side == 0 else -1
+            if bc[axis][side] == BC_VACUUM:
+                faces[tuple(boundary)] = True
+            if mask_vacuum and shape[axis] > 1:
+                # Active cell whose neighbour on this side is excised.
+                here, there = [slice(None)] * 3, [slice(None)] * 3
+                here[axis] = slice(1, None) if side == 0 else slice(None, -1)
+                there[axis] = slice(None, -1) if side == 0 else slice(1, None)
+                faces[tuple(here)] |= ~act[tuple(there)]
+            faces &= act
+            if not faces.any():
+                continue
+            index = tuple(xp.asarray(i) for i in np.nonzero(faces))
+            d = spacing[axis]
+            # a_i on the boundary cells, moment axis trailing: (n, M).
+            a = xp.stack([2.0 * D_list[i][index] / d for i in range(M)], axis=-1)
+            Minv = xp.linalg.inv(gm + a[..., None] * eye)    # (diag(a) + g)^-1
+            gMinv = xp.matmul(gm, Minv)                      # (n, M, M)
+            K = (1.0 / d) * gMinv * a[..., None, :]          # K_ij = (1/d) a_j (gMinv)_ij
+            out.append((index, K))
+    return out
+
+
+def _apply_marshak(xp, out, u, marshak, transpose=False):
+    """Coupled Marshak vacuum: row i += sum_j K_ij U_j on every vacuum-face
+    boundary cell (K = leakage per volume, from :func:`_marshak_faces`; it
+    reduces to the per-moment Robin term when the moments decouple). In place
+    on ``out``; ``transpose`` applies K^T (the adjoint block)."""
+    M = u.shape[0]
+    for index, K in marshak:
+        if transpose:
+            K = xp.swapaxes(K, -1, -2)
+        us = xp.stack([u[j][index] for j in range(M)], axis=-1)    # (n, M)
+        corr = xp.matmul(K, us[..., None])[..., 0]                 # (n, M)
+        for i in range(M):
+            out[i][index] += corr[:, i]
     return out
 
 
@@ -570,12 +609,17 @@ class SDPNGroupOperator:
         # carry their own vacuum leakage on those faces -- it is replaced by the
         # coupled -n.D grad U = (g (x) I) U term below -- so build them with the
         # vacuum faces made reflective.
+        # Excised (active-mask) core/void faces with mask_bc vacuum take the
+        # same coupled term, so the moment operators see them as reflective too.
         D_list = [D1 if i == 0 else 1.0 / ((4 * (i + 1) - 1) * sigma_t)
                   for i in range(M)]
         bc_mom = normalize_bc(bc)
+        mask_bc_mom = mask_bc
         self.marshak = None
         if boundary_g is not None:
             bc_mom = _strip_vacuum(bc_mom)
+            if active is not None and _face_valid(mask_bc) == BC_VACUUM:
+                mask_bc_mom = BC_REFLECTIVE
         # Hybrid transport/diffusion: generate the higher moments (i >= 1) only
         # in a masked subdomain -- the mask zeroes their source rows (driver
         # _rhs) and the inter-moment coupling (below) outside itself -- so there
@@ -607,8 +651,12 @@ class SDPNGroupOperator:
         self.moments = [
             op_cls(xp, grid, D_list[i], A(i, i), bc=bc_mom,
                    active=(active if i == 0 or not confined else hi_active),
-                   mask_bc=(mask_bc if i == 0 or not confined else hybrid_mask_bc))
+                   mask_bc=(mask_bc_mom if i == 0 or not confined else hybrid_mask_bc))
             for i in range(M)]
+        # Excised cells are decoupled from the domain (unit diagonal in every
+        # moment operator); zeroing their inter-moment coupling too keeps that
+        # block the identity, so a zero source leaves them exactly zero.
+        active_f = None if active is None else xp.asarray(active).astype(bool)
         # Off-diagonal reaction coupling A_ij (i != j) is a cell term, so it
         # carries the same metric weight as the moment operators' removal.
         w = getattr(self.moments[0], "rhs_weight", None)
@@ -622,29 +670,44 @@ class SDPNGroupOperator:
                     # is confined to the hybrid subdomain (zero elsewhere).
                     if self.hybrid_mask is not None:
                         a = a * self.hybrid_mask
+                    if active_f is not None:
+                        a = xp.where(active_f, a, 0.0)
                     self.coupling[(i, j)] = a
         self.rhs_weight = w
         diag = xp.stack([m.diag for m in self.moments])   # (M, *grid)
         if boundary_g is not None:
             self.marshak = _marshak_faces(xp, grid, normalize_bc(bc), D_list,
-                                          boundary_g)
+                                          boundary_g, active=active,
+                                          mask_bc=mask_bc)
             # Fold the coupled boundary's diagonal (i,i) into the Jacobi diagonal.
-            for sl, K in self.marshak:
+            for index, K in self.marshak:
                 for i in range(M):
-                    diag[i][sl] = diag[i][sl] + K[..., i, i]
+                    diag[i][index] += K[:, i, i]
         self.inv_diag = 1.0 / diag
         self._stacked_coupling = None   # dense (M, M, *grid), on first fused apply
+        self._stacked_coupling_t = None
 
-    def _coupling_stack(self, u):
+    def _coupling_stack(self, u, transpose=False):
         """Dense (M, M, *grid) off-diagonal coupling, built on first fused apply.
 
         The diagonal stays zero: the (i, i) reaction lives inside the moment
-        operators. Lazy so the CPU path keeps using the sparse dict.
+        operators. Lazy so the CPU path keeps using the sparse dict. The
+        transposed stack (for ``apply_transpose``) is built separately on
+        first use, so a forward-only solve never pays for it.
         """
+        if transpose:
+            if self._stacked_coupling_t is None:
+                self._stacked_coupling_t = kernels.stack_pairs(
+                    self.xp, self._coupling_t, self.M, u.shape[1:], u.dtype)
+            return self._stacked_coupling_t
         if self._stacked_coupling is None:
             self._stacked_coupling = kernels.stack_pairs(
                 self.xp, self.coupling, self.M, u.shape[1:], u.dtype)
         return self._stacked_coupling
+
+    @property
+    def _coupling_t(self):
+        return {(j, i): f for (i, j), f in self.coupling.items()}
 
     def apply(self, u):
         """Return the SDPN block operator applied to u of shape (M, *grid).
@@ -653,6 +716,20 @@ class SDPNGroupOperator:
         spatial operator supports it, and the whole M x M off-diagonal reaction
         is one pass -- M+1 kernels rather than M*(M+1) or so.
         """
+        return self._apply(u, transpose=False)
+
+    def apply_transpose(self, u):
+        """Return the algebraic transpose of the block applied to u.
+
+        The per-moment spatial stencils are symmetric (no ADF/DF on the moment
+        operators; cylindrical ones are volume-weighted), so the block
+        transpose is the same stencil with the cell coupling A_ij -> A_ji and
+        each boundary cell's Marshak matrix K -> K^T. The Jacobi diagonal is
+        unchanged, so ``inv_diag`` serves both. Used by the adjoint eigen-solve.
+        """
+        return self._apply(u, transpose=True)
+
+    def _apply(self, u, transpose):
         xp = self.xp
         out = xp.empty_like(u)
         into = getattr(self.moments[0], "supports_out", False)
@@ -661,15 +738,10 @@ class SDPNGroupOperator:
                 self.moments[i].apply(u[i], out=out[i])
             else:
                 out[i] = self.moments[i].apply(u[i])
-        stack = self._coupling_stack(u) if kernels.use_fused(xp, "block") else None
-        kernels.dense_react_add(xp, out, u, stack, self.coupling)
+        stack = (self._coupling_stack(u, transpose)
+                 if kernels.use_fused(xp, "block") else None)
+        pairs = self._coupling_t if transpose else self.coupling
+        kernels.dense_react_add(xp, out, u, stack, pairs)
         if self.marshak is not None:
-            # Coupled Marshak vacuum: row i += sum_j K_ij U_j on each vacuum-face
-            # boundary layer (K = leakage-per-volume, reduces to the per-moment
-            # Robin term when the moments decouple).
-            for sl, K in self.marshak:
-                us = xp.stack([u[j][sl] for j in range(self.M)], axis=-1)  # (*slab,M)
-                corr = xp.matmul(K, us[..., None])[..., 0]                 # (*slab,M)
-                for i in range(self.M):
-                    out[i][sl] = out[i][sl] + corr[..., i]
+            _apply_marshak(xp, out, u, self.marshak, transpose)
         return out

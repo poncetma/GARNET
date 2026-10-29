@@ -82,10 +82,10 @@ SPH data, moving control drums, and coupled calculations.
 ## Verification and validation
 **GARNET** code is AI generated. For that reason, there is greater emphasis on qualification via verification and validation. Results of major V&V tests are examined with human eyes. 
 
-More than 700 automated test cases cover analytic solutions, spatial and
+More than 1,000 automated test cases cover analytic solutions, spatial and
 temporal convergence, conservation, and published reactor benchmarks. The
 [V&V report](docs/verification_validation.md) maps each core feature to its
-tests, states the acceptance criteria, and records the current CPU results.
+tests, states the acceptance criteria, and records dated CPU results.
 
 | Evidence | Report or study |
 |---|---|
@@ -95,6 +95,7 @@ tests, states the acceptance criteria, and records the current CPU results.
 | Adaptive BDF, LRA-2D accuracy, and matched-error cost | [Rendered study (PDF)](benchmark-results/lra2d-adaptive-bdf-report/adaptive-bdf-lra-benchmark.pdf) · [data and reproduction](benchmark-results/lra2d-adaptive-bdf-report/) |
 | 3-D HP-MR guarded quasi-static transients on GH200 | [Accuracy study and recorded results](benchmark-results/hpmr-iqs-gh200/) |
 | T4 GPU accuracy and performance | [3-D transient study](benchmark-results/transient-acceleration/step-08a-adaptive-bdf-gpu-readiness.md) · [optimization studies](benchmark-results/transient-acceleration/) |
+| October 2026 code audit: findings, fixes, moved results, and open items | [Audit note](docs/qa/code_audit_2026-10-28.md) · [summary in the V&V report](docs/verification_validation.md#core-solver-code-audit) |
 
 These checks cover the numerical methods and the stated benchmark models.
 HP-MR demonstration cross sections and homogenization choices still need

@@ -27,6 +27,8 @@ def test_twigl_step_and_ramp():
 
     # This coarse 10x10 mesh lands ~1% high of the converged values (the
     # refined cells_per_8cm=4 solve reproduces them to <1e-3, see the README).
+    # Measured P - P_ref: step +0.0206 (0.1 s), +0.0225 (0.5 s); ramp +0.0015,
+    # +0.0206. abs=0.05 is ~2.2x the largest, so it is kept.
     step, ramp = results["step"], results["ramp"]
     i100 = np.searchsorted(step.times, 0.1)
     assert step.power[i100] == pytest.approx(P_REFERENCE["step"][0.1], abs=0.05)

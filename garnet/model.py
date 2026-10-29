@@ -29,7 +29,9 @@ Example -- a reflected Cartesian core::
 from __future__ import annotations
 
 import math
+import numbers
 import os
+import warnings
 from copy import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -413,6 +415,30 @@ class TransientModelResult:
                 f"peak {self.peak_power:.4f} at t={self.peak_time:g}s, on {self.device})")
 
 
+def _warn_painted_extent(axis, lo, hi, selected, length):
+    """Warn when cell-centre selection paints a visibly different interval.
+
+    Boxes keep their cell-centre semantics; each painted edge can move by up
+    to half a cell, so the painted length may differ from the request by up to
+    one cell. Half a cell or more of total mismatch (e.g. a 60 cm request
+    painted as 51.4 cm on 17.1 cm cells) is reported rather than left silent.
+    """
+    if not np.any(selected):
+        return
+    d = length / selected.size
+    index = np.flatnonzero(selected)
+    painted = (index[0] * d, (index[-1] + 1) * d)
+    wanted = (max(float(lo), 0.0), min(float(hi), length))
+    mismatch = abs(painted[0] - wanted[0]) + abs(painted[1] - wanted[1])
+    if mismatch >= 0.5 * d * (1.0 - 1e-9):
+        warnings.warn(
+            f"{axis} range ({float(lo):g}, {float(hi):g}) cm selects cell centres "
+            f"painting ({painted[0]:g}, {painted[1]:g}) cm "
+            f"({painted[1] - painted[0]:g} cm instead of {wanted[1] - wanted[0]:g} cm "
+            f"on {d:g} cm cells); align the box edges with cell faces or refine "
+            f"the mesh", UserWarning, stacklevel=3)
+
+
 # ---------------------------------------------------------------------------
 # Structured Cartesian model
 # ---------------------------------------------------------------------------
@@ -495,6 +521,11 @@ class _CoupledModel:
         ``initial_steady`` is checked against the actual t=0 model before reuse.
         ``kinetics.chi_delayed`` may supply a shared or family-specific delayed
         spectrum, distinct from the total fission spectrum in ``Material.chi``.
+
+        ``materials_at`` must return NEW Material objects whenever cross
+        sections change. The solver caches its operator by the identity of the
+        returned materials, so mutating a Material's arrays in place and
+        returning the same object leaves the time-zero operator in use, silently.
         """
         from .tri import TriGroupOperator
 
@@ -696,8 +727,9 @@ class _CoupledModel:
         factor. Time-dependent IQS is the default; ``shape_method="adiabatic"``
         selects instantaneous eigen shapes. Residual thresholds can force early
         corrections or full-diffusion fallback intervals for rapid localized
-        motion; ``iqs_predictor_tol`` adaptively shortens subsequent shape
-        intervals after a large amplitude-predictor disagreement.
+        motion; ``iqs_predictor_tol`` rejects the current shape interval and
+        retries it at half width when the corrector's end power disagrees with
+        the amplitude march by more than that relative amount.
         ``adjoint_residual_tol`` can refresh a reused importance shape before
         its configured ``adjoint_every`` maximum age.
         """
@@ -755,8 +787,13 @@ class Model(_CoupledModel):
     def from_grid(cls, grid, materials, material_map=None, *, bc="vacuum", kinetics=None):
         """Wrap an existing structured problem without repainting its regions.
 
-        Cylindrical grids return a :class:`CylindricalModel`. Cartesian grids
-        retain all three supplied axes, including their physical thickness.
+        Cylindrical grids return a :class:`CylindricalModel`. On a Cartesian
+        grid, trailing single-cell axes are collapsed exactly as in a model
+        built directly from a 1-D/2-D ``size``: the model's ``ndim`` excludes
+        them and a scalar ``bc`` applies to the real axes only, so collapsed
+        axes stay reflective. Naming a non-reflective face on a single-cell
+        axis in an explicit per-axis or per-face ``bc`` keeps that axis (a
+        physical one-cell slab). The grid's physical thickness is retained.
         Maps and material ordering are copied; the grid is immutable and shared.
         """
         if not isinstance(grid, Grid):
@@ -769,8 +806,19 @@ class Model(_CoupledModel):
         else:
             if cls is CylindricalModel:
                 raise ValueError("CylindricalModel.from_grid needs cylindrical geometry")
-            out = cls(size=grid.size, cells=grid.shape)
-            out._bc = list(normalize_bc(bc))
+            faces = normalize_bc(bc)
+            ndim = 3
+            # A scalar spec means "every real face"; an explicit sequence may
+            # deliberately close a single-cell axis, which then stays real.
+            explicit = not isinstance(bc, (str, numbers.Real))
+            while (ndim > 1 and grid.shape[ndim - 1] == 1 and
+                   not (explicit and any(face_alpha(f) != 0.0 for f in faces[ndim - 1]))):
+                ndim -= 1
+            out = cls(size=grid.size[:ndim], cells=grid.shape[:ndim])
+            out._size3 = tuple(float(s) for s in grid.size)
+            out._centers = [(np.arange(n) + 0.5) * (L / n)
+                            for n, L in zip(out._shape, out._size3)]
+            out._bc = list(faces[:ndim])
         out.grid = grid
         out._materials = checked_materials([materials] if isinstance(materials, Material) else materials)
         out._map = checked_map(material_map, grid.shape, len(out._materials))
@@ -809,6 +857,7 @@ class Model(_CoupledModel):
                 raise ValueError(f"cannot set {_AXES[ax]} range on a {self.ndim}D model")
             lo, hi = box_range(rng, _AXES[ax])
             sel = (self._centers[ax] >= lo) & (self._centers[ax] <= hi)
+            _warn_painted_extent(_AXES[ax], lo, hi, sel, self._size3[ax])
             shape = [1, 1, 1]
             shape[ax] = self._shape[ax]
             mask &= sel.reshape(shape)
@@ -1004,8 +1053,9 @@ class CylindricalModel(Model):
                 lo, hi = box_range(bounds, name)
                 shape = [1, 1, 1]
                 shape[axis] = self._shape[axis]
-                mask &= ((self._centers[axis] >= lo) &
-                         (self._centers[axis] <= hi)).reshape(shape)
+                sel = (self._centers[axis] >= lo) & (self._centers[axis] <= hi)
+                _warn_painted_extent(name, lo, hi, sel, self._size3[axis])
+                mask &= sel.reshape(shape)
         if not np.any(mask):
             raise ValueError("region selects no cell centres; check r/z bounds and resolution")
         self._map[mask] = self._index(material)
@@ -1391,18 +1441,109 @@ class TriReactor(_CoupledModel):
 
 
 
-def _drum_absorber_mix(raster, pitch, drums, samples):
+def _disk_polygon_area(poly, radius):
+    """Exact area of a polygon intersected with the origin-centred disk.
+
+    Sums the signed areas of disk & triangle(O, p, q) over the polygon edges;
+    each edge is split where it crosses the circle, inner pieces contribute a
+    triangle and outer pieces a circular sector. Valid for any simple polygon.
+    """
+    r2 = radius * radius
+    total = 0.0
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        e = q - p
+        a, b, c = e @ e, p @ e, p @ p - r2
+        ts = [0.0]
+        disc = b * b - a * c
+        if a > 0.0 and disc > 0.0:
+            root = math.sqrt(disc)
+            ts += [t for t in ((-b - root) / a, (-b + root) / a) if 0.0 < t < 1.0]
+        ts.append(1.0)
+        for t0, t1 in zip(ts[:-1], ts[1:]):
+            u, v = p + t0 * e, p + t1 * e
+            cross = u[0] * v[1] - u[1] * v[0]
+            mid = p + 0.5 * (t0 + t1) * e
+            if mid @ mid <= r2:
+                total += 0.5 * cross
+            else:
+                total += 0.5 * r2 * math.atan2(cross, u @ v)
+    return abs(total)
+
+
+def _clip_half_plane(poly, normal):
+    """Clip a convex polygon to ``normal . x >= 0`` (Sutherland-Hodgman)."""
+    out = []
+    n = len(poly)
+    for i in range(n):
+        p, q = poly[i], poly[(i + 1) % n]
+        sp, sq = normal @ p, normal @ q
+        if sp >= 0.0:
+            out.append(p)
+        if (sp >= 0.0) != (sq >= 0.0):
+            out.append(p + (sp / (sp - sq)) * (q - p))
+    return out
+
+
+def _sector_polygon_area(poly, radius, azimuth, half_angle):
+    """Exact area of a convex polygon inside the origin-centred circular sector
+    of ``radius`` spanning ``azimuth +- half_angle`` (half_angle in [0, pi])."""
+    if half_angle > 0.5 * math.pi:
+        # A reflex wedge is the disk minus the opposite convex wedge.
+        return (_disk_polygon_area(poly, radius) -
+                _sector_polygon_area(poly, radius, azimuth + math.pi,
+                                     math.pi - half_angle))
+    if half_angle <= 0.0:
+        return 0.0
+    lo, hi = azimuth - half_angle, azimuth + half_angle
+    # Left of the lower ray and right of the upper ray: an intersection of two
+    # half-planes is exactly the wedge while its opening is at most pi.
+    for normal in (np.array([-math.sin(lo), math.cos(lo)]),
+                   np.array([math.sin(hi), -math.cos(hi)])):
+        poly = _clip_half_plane(poly, normal)
+        if len(poly) < 3:
+            return 0.0
+    return _disk_polygon_area(poly, radius)
+
+
+def annular_sector_fraction(vertices, centre, inner, outer, azimuth, half_angle):
+    """Exact fraction of a triangle's area inside an annular sector.
+
+    The sector is ``inner < r <= outer`` about ``centre`` with azimuth within
+    ``azimuth +- half_angle`` (radians). The intersection is computed in closed
+    form (polygon clipped to the wedge, then intersected with each circle), so
+    the drum absorber volume is preserved independently of mesh resolution.
+    """
+    V = np.asarray(vertices, dtype=float) - np.asarray(centre, dtype=float)
+    area = 0.5 * abs((V[1, 0] - V[0, 0]) * (V[2, 1] - V[0, 1]) -
+                     (V[2, 0] - V[0, 0]) * (V[1, 1] - V[0, 1]))
+    if area <= 0.0:
+        return 0.0
+    poly = list(V)
+    covered = _sector_polygon_area(poly, outer, azimuth, half_angle)
+    if inner > 0.0:
+        covered -= _sector_polygon_area(poly, inner, azimuth, half_angle)
+    # Round-off on a cell that only touches the sector is not an absorber blend.
+    return 0.0 if covered <= 1e-12 * area else min(covered / area, 1.0)
+
+
+def _drum_absorber_mix(raster, pitch, drums, samples=None):
     """Per-cell volume fraction of each drum's absorber arc (mix_material/weight).
 
     ``drums`` is a list of dicts with ``rc``, ``inner``, ``outer``, ``arc_half``
     (radians), ``arc_az`` (radians) and ``absorber_id``. For every triangle near a
     drum the fraction of its area inside that drum's annular sector -- radius in
     (inner, outer], azimuth within +-arc_half of the (rotated) arc centre -- is
-    estimated by barycentric sub-sampling. The fraction is non-zero even where the
-    thin arc only partly crosses a cell, and varies smoothly as the drum rotates,
-    so it drives the volume-mix (mix a fraction of the absorber into the drum-body
-    cell) rather than a staircase. Returns (mix_material, mix_weight) shaped like
-    the material map (sentinel mix_material = -1 where there is no absorber).
+    computed exactly (:func:`annular_sector_fraction`), so the mixed absorber
+    area equals the analytic sector area at any refinement. The fraction is
+    non-zero even where the thin arc only partly crosses a cell, and varies
+    smoothly as the drum rotates, so it drives the volume-mix (mix a fraction of
+    the absorber into the drum-body cell) rather than a staircase. ``samples``
+    is accepted for compatibility and ignored (it set the resolution of the
+    former, biased, barycentric-lattice estimate). Returns (mix_material,
+    mix_weight) shaped like the material map (sentinel mix_material = -1 where
+    there is no absorber).
     """
     mmap = raster.material_map
     ni, nj, _ = mmap.shape
@@ -1410,9 +1551,6 @@ def _drum_absorber_mix(raster, pitch, drums, samples):
     mix = np.full((ni, nj, 2), -1, dtype=np.int64)
     centres = np.array([hex_site_xy(rc[0], rc[1], pitch) for d in drums for rc in (d["rc"],)])
     outers = np.array([d["outer"] for d in drums])
-    n = samples
-    bary = np.array([(i / n, j / n, (n - i - j) / n)
-                     for i in range(n + 1) for j in range(n + 1 - i)])   # (S, 3)
     for a in range(ni):
         for b in range(nj):
             for t in (0, 1):
@@ -1426,12 +1564,8 @@ def _drum_absorber_mix(raster, pitch, drums, samples):
                 if d2[d] > reach * reach:
                     continue
                 dm = drums[d]
-                pts = bary @ V
-                dx, dy = pts[:, 0] - centres[d, 0], pts[:, 1] - centres[d, 1]
-                rr = np.hypot(dx, dy)
-                dphi = (np.arctan2(dy, dx) - dm["arc_az"] + np.pi) % (2 * np.pi) - np.pi
-                inside = (rr > dm["inner"]) & (rr <= dm["outer"]) & (np.abs(dphi) <= dm["arc_half"])
-                f = float(inside.mean())
+                f = annular_sector_fraction(V, centres[d], dm["inner"], dm["outer"],
+                                            dm["arc_az"], dm["arc_half"])
                 if f > 0.0:
                     weight[a, b, t] = f
                     mix[a, b, t] = dm["absorber_id"]
@@ -1497,7 +1631,11 @@ class HexLattice:
         ``outer_radius`` (cm from the hex centre) spanning ``arc_deg`` degrees.
         ``angle_deg`` rotates it about the hex centre, measured from the inward
         radial direction: 0 points at the core centre (inserted), 180 away from
-        the core (withdrawn). Any number of drums may be placed, each rotated
+        the core (withdrawn). The "core centre" is the lattice origin, the
+        centre of hex site ``(0, 0)``, whether or not a site is placed there
+        and wherever the occupied sites lie: centre the core on ``(0, 0)``
+        (or account for the offset in ``angle_deg``) when building a lattice
+        that is not. Any number of drums may be placed, each rotated
         independently -- the drum-worth curve is swept by rerunning with different
         ``angle_deg``.
         """
@@ -1579,8 +1717,9 @@ class HexLattice:
         """Rasterize once and return a reusable :class:`TriReactor`.
 
         The returned model exposes its grid/maps for inspection and supports
-        steady, transient, thermal, and coupled calculations. ``samples`` sets
-        the control-drum arc area-fraction resolution.
+        steady, transient, thermal, and coupled calculations. Control-drum
+        absorber area fractions are computed exactly; ``samples`` is accepted
+        for compatibility and ignored.
         """
         if not self._sites:
             raise ValueError("place at least one assembly with set_site()")
@@ -1642,7 +1781,13 @@ class HexLattice:
                                          f"in the radial lattice: {missing}")
                     replace_ids = [id_of[id(m)] for m in replace]
                     radial = np.isin(mmap, replace_ids)
-                mmap[radial & zsel[None, None, None, :]] = id_of[id(mat)]
+                painted = radial & zsel[None, None, None, :]
+                mmap[painted] = id_of[id(mat)]
+                if mix_weight is not None:
+                    # A repainted cell is wholly the new material: a drum's
+                    # absorber blend must not survive under an axial reflector.
+                    mix_material[painted] = -1
+                    mix_weight[painted] = 0.0
             grid = TriGrid(shape=mmap.shape, side=raster.side,
                            height=self._height)
             active = mmap > 0

@@ -58,6 +58,26 @@ def test_flux_follows_bessel_mode():
     assert r_half == pytest.approx(R * 1.5211 / J0_ZERO, rel=0.02)
 
 
+def test_scalar_bc_on_cylindrical_grid_leaves_y_and_axis_inert():
+    # A scalar bc on a raw cylindrical Grid (the DiffusionEigenSolver default
+    # is "zero-flux") must apply only to the wall and the end caps: the y faces
+    # are the azimuthal seam and r = 0 is the axis. Applying it on y once
+    # gave k = 0.0067 here (a Dirichlet term on every cell).
+    from garnet import DiffusionEigenSolver
+    k_exact = bare_cylinder_k()
+    for ysize in (1.0, 2 * np.pi):
+        grid = Grid((40, 1, 80), (R, ysize, H), geometry="cylindrical")
+        k_default = DiffusionEigenSolver(grid, MAT, device="cpu").solve(
+            tol_k=1e-9, tol_source=1e-8).k_eff
+        k_scalar = DiffusionEigenSolver(grid, MAT, bc="zero-flux", device="cpu").solve(
+            tol_k=1e-9, tol_source=1e-8).k_eff
+        k_explicit = DiffusionEigenSolver(grid, MAT, bc=BC, device="cpu").solve(
+            tol_k=1e-9, tol_source=1e-8).k_eff
+        assert k_scalar == pytest.approx(k_explicit, abs=1e-12)
+        assert k_default == pytest.approx(k_explicit, abs=1e-12)
+        assert k_scalar == pytest.approx(k_exact, abs=2e-5)   # n=40 error ~1e-5
+
+
 def test_cylindrical_grid_requires_single_y_cell():
     with pytest.raises(ValueError, match="ny must be 1"):
         Grid(shape=(10, 2, 10), size=(10.0, 2.0, 10.0), geometry="cylindrical")

@@ -53,7 +53,19 @@ fuel = Material(
 `sigma_s`, `chi`, and `total` are optional. A material with `nu_sigma_f = 0` is a
 non-fissile reflector/absorber. `total` (Σ_t) supplies the higher angular moments
 in SPN/SDPN. Optional `kappa_fission` supplies energy-release cross sections
-for power shaping.
+for power shaping. Give it to every fissile material or to none: κΣf and νΣf
+have different units, so a power edit that mixes fissile materials with and
+without it raises `ValueError`. Non-fissile materials may omit it.
+
+The library readers follow the same rule. `read_xsec` (FEMFFUSION `.xsec`)
+stores `kappa_fission = energy_per_fission * Sigma_f`, with a default of
+200 MeV in J. This constant cancels when the power is normalised to a rated
+total. For a 3-D file it returns one map per `PLANE n` block in `core_map`,
+bottom first, and reports their number in `n_planes`; a 2-D file has
+`n_planes == 0`. The Griffin readers require `Total`, `Absorption` and
+`Scattering` and raise `KeyError` when one is missing, instead of reading zeros.
+They also reject incomplete fission data, such as a positive `nuFission`
+without a `FissionSpectrum`.
 
 Use `fuel.replace(sigma_a=fuel.sigma_a * 1.01)` to change selected constants.
 It returns a validated copy, retains the other fields (including
@@ -84,7 +96,9 @@ model = (
 Later `add_box` calls overwrite earlier ones. Inspect what you built with
 `model.material_map` (an integer array, squeezed to the model's dimension) and
 `model.materials` (index 0 is the background). Bounds select cell centres;
-a box that selects none raises `ValueError`. Calling `fill` again clears all
+a box that selects none raises `ValueError`, and a `UserWarning` reports a box
+whose painted extent differs from the request by half a cell or more (for
+example `x=(30, 90)` on seven 17.1 cm cells paints 51.4 cm, not 60 cm). Calling `fill` again clears all
 previous assignments and the material list. `model.grid` exposes the underlying
 three-axis grid; unused axes have one cell and a 1 cm extent.
 
@@ -97,7 +111,9 @@ three-axis grid; unused axes have one cell and a 1 cm extent.
 ### Boundary conditions
 
 `set_boundary` takes a face spec by name: `"vacuum"`, `"reflective"`,
-`"zero-flux"`, or a non-negative albedo `α` (the law `J_net = α · φ_surface`).
+`"zero-flux"`, or a finite non-negative albedo `α` (the law
+`J_net = α · φ_surface`). Python and NumPy real scalars are accepted. NaN,
+`inf` and booleans are rejected; use `"zero-flux"` for the Dirichlet limit.
 
 ```python
 model.set_boundary("vacuum")                                    # every face
@@ -108,7 +124,15 @@ A single string applies to all real axes; `x`/`y`/`z` override one axis (a face
 spec, or a `(lo, hi)` pair for the axis's two faces). Collapsed axes of a 1-D/2-D
 model are always reflective. Use `"zero-flux"` (Dirichlet) to compare against the
 analytic bare-reactor buckling; `"vacuum"` (a Robin/Marshak condition) is the
-physical leakage boundary.
+physical leakage boundary. For `method="sp3"` on Cartesian grids, vacuum faces
+use the coupled Brantley–Larsen Marshak condition, which mixes the two
+moments. This includes the vacuum faces of a low-level `active` mask. Before
+2026-10-29 the default was a per-moment Robin term. That term remains
+available as `solver_kwargs={"marshak_vacuum": False}` and is 120–250 pcm off
+on small leaky cores. `sdp1`, `CylindricalModel`, `TriReactor` and hybrid
+blocks keep the per-moment term. The SDPN-family solvers (`sp5`, `sp7`,
+`sdp2`, `sdp3`) apply their own Marshak condition with
+`solver_kwargs={"marshak_vacuum": True}`; masked faces are included.
 
 ### Running
 
@@ -136,7 +160,23 @@ result = model.steady(
 ```
 
 Degree zero is the default Jacobi preconditioner; higher degrees use Neumann
-polynomial preconditioning. Measure the trade-off on the target workload.
+polynomial preconditioning. Its Jacobi sweeps are damped automatically: a
+one-off Lanczos estimate sets the damping before the first application. Odd
+degrees therefore stay positive definite on the SP5/SP7 blocks as well. On
+diffusion the damping is within a few percent of one. Measure the trade-off
+on the target workload. For non-symmetric SDPN blocks, such as SDP3 with
+vacuum faces or any order with Marshak, the default `linear_solver` is GMRES.
+An explicit `"bicgstab"` still works and runs its inner solves a decade
+tighter. If Anderson acceleration keeps restarting without progress, the outer
+loop falls back to plain power iteration.
+
+The stopping test depends on the iteration. With Anderson acceleration (the
+forward default, `anderson_depth=8`), `tol_k` and `tol_source` bound the
+per-outer change. Plain power iteration (`anderson_depth<=1`, and always the
+adjoint) scales both by `(1 − ρ̂)`, where ρ̂ is the dominance ratio estimated
+from the iteration history. They then bound the error, not the last step. The
+scaling costs about 25–80% more outer iterations for an error about 100 times
+smaller.
 Geometry, boundary conditions and device settings stay with the model and
 cannot be overridden inside `solver_kwargs`.
 
@@ -211,7 +251,13 @@ adj.k_eff                        # equals the forward eigenvalue
 ```
 
 The report labels the importance solution and omits the physical balance (an
-importance function is not a neutron population).
+importance function is not a neutron population). Non-symmetric operators are
+solved on their algebraic transpose. These include the SDPN blocks, the r-z
+divergence form (`symmetric_operator=False`), Cartesian ADF diffusion and
+triangular diffusion with discontinuity factors. The block solvers exchange
+their source and scalar-flux moment weights, so for SDPN the returned "flux" is
+the scalar importance. The adjoint uses plain power iteration with the
+error-based stopping test above.
 
 ### Transients
 
@@ -226,7 +272,7 @@ model.set_kinetics(velocities=[1e7, 3e5], beta=[0.0065], decay=[0.08])
 
 result = model.transient(
     t_end=3.0, dt=0.02,
-    materials_at=lambda t: {"fuel": hot_fuel} if t >= 0.5 else {},
+    materials_at=lambda t: {"fuel": hot_fuel} if t > 0.5 else {},
 )
 
 result.k0            # initial eigenvalue (fission source normalised by it)
@@ -262,7 +308,9 @@ prompt production as `chi - sum_i beta_i * chi_delayed[i]` and adds delayed
 emission from the evolving precursor inventories. Omitting `chi_delayed`
 uses each material's `chi` for delayed emission as well. This applies to
 Cartesian, cylindrical, and triangular diffusion transients, including the
-monolithic and group-sweep solution methods.
+monolithic and group-sweep solution methods. The low-level SDP1/SDPN/SPN
+transient solvers use the same delayed-emission weights, per-family tables
+included. The S_N transient accepts one shared `chi_delayed` only.
 
 For moving assignments, `state_at(t)` returns cached `Model` frames with the
 same dimensions, physical size and boundaries. The `at=` escape hatch still
@@ -315,8 +363,11 @@ Steady, adjoint, neutron-transient and coupled methods follow the Cartesian API.
 
 `Model.from_grid(grid, materials, material_map, bc=..., kinetics=...)` wraps an
 existing structured problem and returns `CylindricalModel` when the grid is
-cylindrical. Cartesian input preserves all three explicit boundary axes and
-physical extents, including one-cell directions. See the
+cylindrical. On Cartesian input, trailing one-cell axes are collapsed like a
+model built in 1-D or 2-D: `model.ndim` excludes them and a single `bc` spec
+(the default `"vacuum"` included) leaves them reflective. An explicit per-axis
+or per-face `bc` that closes a one-cell axis keeps it as a real one-cell slab.
+The grid's physical extents are preserved. See the
 [r-z workflow](transient_api.md#cylindrical-r-z-geometry) and
 [runnable example](../examples/cylindrical_transient.py).
 
@@ -350,6 +401,22 @@ selecting no cells raise `ValueError`. Paths may be strings or `pathlib.Path`.
 and the result power/material edits follow the Cartesian API. `MeshModel` is
 steady diffusion-only; it has no mesh transient, adjoint or thermal-coupling
 front end.
+
+The face flux uses normal distances from the cell centres to each face. A
+lagged non-orthogonal correction, built from least-squares cell gradients,
+makes the scheme consistent on skewed meshes such as general triangulations,
+tetrahedra and hanging nodes. There it converges at second order, whereas the
+plain two-point flux was about −320 pcm off and did not converge. Orthogonal
+meshes are unchanged. `solver_kwargs={"nonorthogonal_correction": False}`
+restores the plain two-point flux. Non-conforming interfaces of any ratio,
+not only 2:1, are paired by face overlap in 2-D and 3-D.
+
+`read_gmsh` (and a path given to `MeshModel`) reads Gmsh MSH 2.x ASCII files
+with any number of element tags. The first tag, the physical group, becomes
+the cell tag, and node ids need not be contiguous. MSH 4, binary files,
+higher-order elements and pyramids are refused with a message; export with
+`gmsh -format msh22`. A 2-D mesh drawn outside the xy plane is rotated into
+it, and a non-planar surface mesh is refused.
 
 ---
 
@@ -397,6 +464,21 @@ The compiled object exposes `grid`, `materials`, `material_map`, `active`,
 wrap any compatible `TriGrid` and maps, so the API is not restricted to
 geometries made by `HexLattice`.
 
+Every face that an active cell exposes takes `mask_bc` (default `"vacuum"`).
+This covers in-plane faces toward an inactive cell or off the array edge, and
+axial faces toward an inactive layer, which were reflective before
+2026-10-29. The mask no longer needs a one-cell void border. The low-level
+triangular and hexagonal solvers called without a mask apply `bc` to the
+lattice's outer in-plane edges, using the row (axis 0) and column (axis 1)
+entries. Before 2026-10-29 those edges were silently reflective. Inactive
+cells carry no fission or scattering source, whatever material the map assigns
+there, in steady and transient solves alike.
+
+`garnet.pin_power.reconstruct_pin_powers` and `sample_power_shape` accept a
+3-D prismatic flux with `layer=`: `None` returns one in-plane shape per axial
+layer (trailing `nz` axis), an integer selects one layer, and `"integrate"`
+sums the layers.
+
 ### SPH-corrected constants
 
 SPH generation remains an explicit reference/coarse calculation, but applying
@@ -411,6 +493,10 @@ sph_solution = sph_model.steady(device="gpu")
 The replacement list preserves material count/order; a partial name/index
 mapping is also accepted. Geometry, volume mixing, kinetics, and configured
 thermal data are retained. Maps are copied so edits do not affect the original.
+SPH homogenization keeps `kappa_fission`. On a non-uniform grid, pass the same
+per-cell `cell_volume` array to `flux_weighted_homogenize` and to
+`region_average`, the coarse-solve region average. On r-z grids that array is
+`grid.cell_volumes`. The default of 1 is correct only on a uniform grid.
 
 ### Thermal coupling
 
@@ -472,9 +558,12 @@ fallback, predictor-error, and iteration telemetry.
 `adjoint_residual_tol` independently checks whether a reused adjoint still
 satisfies the current transposed eigenproblem; it can trigger an early adjoint
 refresh while `adjoint_every` remains the hard maximum reuse age.
-Set `iqs_predictor_tol=0.02`, for example, to halve subsequent shape intervals
-after a predictor disagreement above 2%; the maximum interval is restored
-geometrically once the manoeuvre settles.
+Each IQS interval is iterated as a predictor–corrector (`iqs_iteration_tol`,
+`iqs_max_iterations`). Set `iqs_predictor_tol=0.02`, for example, to reject and
+retry an interval with half the width when the corrector's end power differs
+from the accepted power by more than 2%; the maximum interval is restored
+geometrically once the manoeuvre settles. See the
+[transient guide](transient_api.md#thermal-coupling) for the counters.
 `shape_method="adiabatic"` selects instantaneous eigen shapes instead.
 
 ### Control drums
@@ -492,9 +581,13 @@ lat.set_drum((0, 3), body=beryllium, absorber=b4c,
 ```
 
 `angle_deg=0` points the arc inward (inserted) and 180 points it outward
-(withdrawn), so sweeping 0→180 traces the **drum-worth curve**. Any number of
-drums may be placed and rotated independently. `build(samples=8)` controls arc
-sub-sampling resolution. The report's neutron balance accounts for the mixed
+(withdrawn), so sweeping 0→180 traces the **drum-worth curve**. "Inward" means
+toward the lattice origin, the centre of site `(0, 0)`; centre the core there.
+Any number of drums may be placed and rotated independently. The absorber's
+per-triangle area fraction is computed exactly, so the mixed absorber area
+equals the analytic sector area at any `refine`; `build(samples=...)` is kept
+for compatibility and ignored. Axial regions painted over a drum site replace
+the absorber blend in those layers. The report's neutron balance accounts for the mixed
 absorber. This reproduces `garnet.benchmarks.build_hpmr2d`'s polar drum model
 exactly; see `examples/hpmr_hexlattice.py`, which builds the full HP-MR
 microreactor — 55 assemblies and 12 drums — and sweeps the worth curve.

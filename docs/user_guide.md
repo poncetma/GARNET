@@ -127,7 +127,8 @@ SPN/SDPN formulations. Optional `kappa_fission` values are the groupwise
 energy-release cross sections κΣf used to shape thermal power, not κ alone.
 They are retained through SPH scaling. If every material omits them, power
 shaping falls back to `nu_sigma_f` and the requested `total_power` still fixes
-the absolute normalization.
+the absolute normalization. Give them to every fissile material or to none:
+the two cross sections have different units, so a mixture raises an error.
 
 Give thermally coupled materials unique, non-empty names. Name-keyed thermal
 and feedback dictionaries avoid exposing the integer material ordering.
@@ -183,7 +184,7 @@ The main geometry operations are:
 | `extrude(height, nz, boundary=...)` | Turn the 2-D mesh into `nz` prism layers |
 | `add_axial_region(material, z=(lo, hi), replace=...)` | Override selected layers |
 | `set_drum(...)` | Add a rotating annular absorber arc |
-| `build(samples=8, name=...)` | Rasterize once and return a reusable reactor |
+| `build(name=...)` | Rasterize once and return a reusable reactor (`samples` is ignored) |
 
 Each hex contains `6 × refine²` triangles. Increase `refine` until important
 integral results and control worths are insensitive to further refinement.
@@ -215,8 +216,10 @@ lattice.set_drum_angle((0, 2), 90.0)
 drum_state = lattice.build(samples=8)
 ```
 
-An angle of 0° points the absorber toward the core; 180° points it outward.
-`samples` controls sub-cell area sampling for the absorber fraction.
+An angle of 0° points the absorber toward the core centre, taken as the lattice
+origin (site `(0, 0)`); 180° points it outward. The absorber area fraction of
+each triangle is computed exactly; `samples` is accepted for compatibility and
+ignored.
 
 ## 3. Run steady and adjoint calculations
 
@@ -235,6 +238,14 @@ sp3 = core.steady(method="sp3", device="gpu")
 
 On a `TriReactor`, `method` can be `diffusion`, `sp1`, `sp3`, `sp5`, `sp7`,
 `sdp1`, `sdp2`, or `sdp3`. `run` is an alias for `steady`.
+
+The adjoint uses plain power iteration, and its tolerances are scaled by
+`1 − ρ̂` (the estimated dominance ratio) so that they bound the error rather
+than the last step. It therefore takes more outer iterations than the
+Anderson-accelerated forward solve. On Cartesian `Model` grids, `sp3` applies
+the coupled Marshak vacuum condition by default. See the
+[model reference](model_api.md#running) for solver defaults and the
+pre-2026-10-29 options.
 
 The returned `ReactorResult` is deliberately ordinary Python/NumPy data:
 
@@ -415,16 +426,19 @@ fission power with the new shape's time importance. Its result distinguishes
 shape/residual/fallback histories; for a fixed shape the factor is one and
 amplitude equals power.
 `residual_tol` forces an early correction; `fallback_residual` advances an
-unsafe fine interval with the full diffusion equations. `iqs_predictor_tol`
-halves future shape intervals when the coarse predictor disagrees with accepted
-power and restores them after the event settles. Use
+unsafe fine interval with the full diffusion equations. Each IQS interval is
+replayed with the end-shape correction until its end power settles to
+`iqs_iteration_tol`. `iqs_predictor_tol` rejects and retries the current
+interval with half the width when the corrector's end power disagrees with
+the accepted power, and the width is restored after the event settles. Use
 `shape_method="adiabatic"` to select instantaneous eigen shapes.
 For production HP-MR drum transients, guarded adaptive IQS is preferred over
 fixed-cadence IQS. The r4, 11-group GH200 calibration uses
 `residual_tol=2e-3`, `fallback_residual=1e-2`,
 `iqs_predictor_tol=2e-2`, and `adjoint_every=5`: it reduced maximum sampled
 power error against the available full-diffusion reference from 5.708% to
-0.173% at a 25.5% transient-time cost. The HPMR example applies this guard
+0.173% at a 25.5% transient-time cost. That calibration predates the
+2026-10-29 predictor–corrector IQS and must be re-checked. The HPMR example applies this guard
 profile automatically when IQS is selected; pass `--unguarded-iqs` only for
 fixed-cadence benchmark comparisons. See
 [`benchmark-results/hpmr-iqs-gh200`](../benchmark-results/hpmr-iqs-gh200/README.md).
@@ -507,9 +521,13 @@ event_aligned = core.transient(
 print(event_aligned.time_orders)
 ```
 
-BDF order ramps up as accepted history becomes available. A restart discards
-flux and precursor history before the indicated step and forces BDF1 there.
-Use it at discontinuous material/control frames and feedback-law corners.
+BDF order ramps up as accepted history becomes available. A restart time is
+a step end that belongs to the old segment: the callback must return the
+pre-event state there. Flux and precursor history is discarded before the
+step *leaving* it, which uses BDF1. Use restarts at discontinuous
+material/control frames and feedback-law corners. With constant widths,
+BDF3–6 converge only at second order because the startup steps run at full
+width; see the [transient guide](transient_api.md#time-steps-events-and-adaptive-bdf).
 BDF3--6 are A(alpha)-stable, not A-stable, so they require a stability and
 time-step convergence comparison for the intended transient. Explicit step
 schedules remain the deterministic production path. An experimental adaptive
@@ -698,9 +716,9 @@ frames = {
 }
 
 def control_state(t):
-    if t < 1.0:
+    if t <= 1.0:       # an event time returns the pre-event frame
         return frames[180.0]
-    if t < 2.0:
+    if t <= 2.0:
         return frames[90.0]
     return frames[0.0]
 ```
@@ -711,6 +729,8 @@ state supplies the time-dependent material and volume-mix arrays.
 
 For timed controls, `event_times=[...]` on neutron `transient` splits fixed
 BDF schedules or aligns adaptive BDF and restarts history at the listed times.
+The callback's value at an event time is the pre-event state, so switch with
+`t > event`.
 All model grids return `TransientModelResult`, including `power_at(times)`,
 accepted `step_widths`, `precursors_numpy`, and the initial public `steady`
 report. Solver telemetry is forwarded from `raw`; final device fields are
@@ -774,6 +794,10 @@ mesh_model = (
 mesh_solution = mesh_model.run(device="auto")
 ```
 
+`MeshModel` reads Gmsh MSH 2.x ASCII files; export MSH 4 or binary meshes with
+`gmsh -format msh22`. A non-orthogonal correction is applied on skewed or
+locally refined meshes. Both are described in the
+[model reference](model_api.md#meshmodel--unstructured).
 `MeshModel` currently provides steady diffusion. Use `Model` or `TriReactor` for the
 complete SPN/SDPN, transient, and coupled workflow.
 

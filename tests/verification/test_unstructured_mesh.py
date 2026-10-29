@@ -119,8 +119,12 @@ def _dense_operator(mesh, cm, mats, alpha):
     n = mesh.n_cells
     D = np.array([mats[m].diffusion[0] for m in cm])
     A = np.zeros((n, n))
-    for i, j, L, d in mesh.faces:
-        w = 2.0 * D[i] * D[j] / (D[i] + D[j]) * L / d
+    for f, (i, j, L, d) in enumerate(mesh.faces):
+        # series half-cell resistances along the face normal
+        nf, x = mesh.face_normal[f], mesh.face_center[f]
+        di, dj = nf @ (x - mesh.centroid[i]), nf @ (mesh.centroid[j] - x)
+        assert di + dj == pytest.approx(d)
+        w = L / (di / D[i] + dj / D[j])
         A[i, i] += w; A[j, j] += w
         A[i, j] -= w; A[j, i] -= w
     for i, L, db in mesh.bfaces:
@@ -276,3 +280,142 @@ def test_read_gmsh_routes_3d_tets(tmp_path):
     assert mesh.coords.shape[1] == 3
     assert np.all(mesh.area > 0)
     assert len(mesh.faces) == 1                         # the shared face {2,3,4}
+
+
+# ---- non-conforming interfaces (general hanging nodes) ----------------------
+
+def _nonconforming_squares(levels, h=10.0, ny=3):
+    """Columns of squares, column c refined 1:levels[c] (so neighbouring
+    columns meet at 1:3, 1:4, multi-level ... hanging nodes). Returns
+    (coords, cells)."""
+    nodes, coords, cells = {}, [], []
+
+    def node(x, y):
+        k = (round(x, 9), round(y, 9))
+        if k not in nodes:
+            nodes[k] = len(coords)
+            coords.append((x, y))
+        return nodes[k]
+
+    for c, r in enumerate(levels):
+        s = h / r
+        for i in range(r):
+            for j in range(ny * r):
+                x, y = c * h + i * s, j * s
+                cells.append((node(x, y), node(x + s, y), node(x + s, y + s), node(x, y + s)))
+    return np.array(coords), cells
+
+
+def _conforming_equivalent(coords, cells):
+    """Insert every node lying inside a cell edge into that cell's polygon:
+    the same geometry, now conforming (polygons with collinear vertices)."""
+    out = []
+    for ns in cells:
+        poly = []
+        for a in range(len(ns)):
+            p, q = coords[ns[a]], coords[ns[(a + 1) % len(ns)]]
+            e = q - p
+            L2 = e @ e
+            t = (coords - p) @ e / L2
+            cr = np.abs(e[0] * (coords[:, 1] - p[1]) - e[1] * (coords[:, 0] - p[0]))
+            inside = np.where((t > 1e-9) & (t < 1 - 1e-9) & (cr < 1e-9 * L2))[0]
+            poly.append(ns[a])
+            poly += [int(k) for k in inside[np.argsort(t[inside])]]
+        out.append(tuple(poly))
+    return out
+
+
+@pytest.mark.parametrize("levels", [(1, 3), (1, 4), (1, 2, 4), (3, 1, 2), (2, 3)])
+def test_nonconforming_matches_conforming_equivalent_vacuum(levels):
+    # With vacuum boundaries every lost coarse-fine coupling would act as an
+    # internal vacuum surface; the reflective k_inf check cannot see that.
+    # Only 2:1 midpoints used to be matched: 1:3, 1:4, multi-level and 2:3
+    # interfaces were silently cut.
+    coords, cells = _nonconforming_squares(levels)
+    nc_mesh = assemble_mesh(coords, cells, [0] * len(cells))
+    cf_mesh = assemble_mesh(coords, _conforming_equivalent(coords, cells), [0] * len(cells))
+    assert len(nc_mesh.faces) == len(cf_mesh.faces)
+    assert sum(b[1] for b in nc_mesh.bfaces) == pytest.approx(
+        2 * (len(levels) + 3) * 10.0)                   # outer perimeter only
+    cm = np.zeros(len(cells), int)
+    k = [UnstructuredDiffusionSolver(m, [ONE_GROUP_DEMO], cm, alpha_boundary=0.5,
+                                     device="cpu").solve(tol_k=1e-11, tol_source=1e-10).k_eff
+         for m in (nc_mesh, cf_mesh)]
+    assert k[0] == pytest.approx(k[1], abs=1e-9)
+
+
+def _hex_box(x0, x1, nx, y0, y1, ny, z0, z1, nz, nodes, coords):
+    def node(x, y, z):
+        key = (round(x, 9), round(y, 9), round(z, 9))
+        if key not in nodes:
+            nodes[key] = len(coords)
+            coords.append((x, y, z))
+        return nodes[key]
+    xs, ys, zs = (np.linspace(a, b, m + 1) for a, b, m in ((x0, x1, nx), (y0, y1, ny), (z0, z1, nz)))
+    cells = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                a, b = xs[i], xs[i + 1]
+                c, d = ys[j], ys[j + 1]
+                e, f = zs[k], zs[k + 1]
+                cells.append((node(a, c, e), node(b, c, e), node(b, d, e), node(a, d, e),
+                              node(a, c, f), node(b, c, f), node(b, d, f), node(a, d, f)))
+    return cells
+
+
+def test_nonconforming_3d_faces_are_coupled():
+    # A 2x2x2 block of coarse hexes beside a 6x6x6 block of fine ones (1:3 in
+    # both face directions): every coarse face on the interface meets 9 fine
+    # faces through clipped overlaps, conserving area, and no internal
+    # boundary is left. Reflective -> k_inf; vacuum k close to the all-fine one.
+    nodes, coords = {}, []
+    cells = (_hex_box(0, 20, 2, 0, 20, 2, 0, 20, 2, nodes, coords)
+             + _hex_box(20, 40, 6, 0, 20, 6, 0, 20, 6, nodes, coords))
+    mesh = assemble_mesh_3d(coords, cells, [0] * len(cells))
+    coarse_fine = [f for f in mesh.faces if (f[0] < 8) != (f[1] < 8)]
+    assert len(coarse_fine) == 4 * 9
+    assert sum(f[2] for f in coarse_fine) == pytest.approx(400.0)
+    assert sum(b[1] for b in mesh.bfaces) == pytest.approx(2 * (800 + 800 + 400))
+    cm = np.zeros(mesh.n_cells, int)
+    k_inf = UnstructuredDiffusionSolver(mesh, [ONE_GROUP_DEMO], cm, alpha_boundary=0.0,
+                                        device="cpu").solve(tol_k=1e-11).k_eff
+    assert k_inf == pytest.approx(k_infinite(ONE_GROUP_DEMO), abs=1e-8)
+    def k_vac(a, b):
+        nodes, coords = {}, []
+        cells = (_hex_box(0, 20, a, 0, 20, a, 0, 20, a, nodes, coords)
+                 + _hex_box(20, 40, b, 0, 20, b, 0, 20, b, nodes, coords))
+        m = assemble_mesh_3d(coords, cells, [0] * len(cells))
+        return UnstructuredDiffusionSolver(m, [ONE_GROUP_DEMO], np.zeros(m.n_cells, int),
+                                           alpha_boundary=0.5, device="cpu").solve(tol_k=1e-11).k_eff
+    # Vacuum: between the all-coarse and all-fine meshes (a cut interface
+    # would act as an internal vacuum and drop k far below both), and the
+    # mirror image of the mesh gives the same k.
+    k_nc = k_vac(2, 6)
+    assert k_vac(6, 6) < k_nc < k_vac(2, 2)
+    assert k_nc == pytest.approx(k_vac(6, 2), abs=1e-8)
+
+
+# ---- low-severity geometry / boundary items ---------------------------------
+
+def test_infinite_alpha_is_the_zero_flux_limit():
+    mesh = _cartesian_quad_mesh(8, 40.0)
+    cm = np.zeros(mesh.n_cells, int)
+    k_inf_alpha = UnstructuredDiffusionSolver(mesh, [ONE_GROUP_DEMO], cm, alpha_boundary=np.inf,
+                                              device="cpu").solve(tol_k=1e-11).k_eff
+    k_big = UnstructuredDiffusionSolver(mesh, [ONE_GROUP_DEMO], cm, alpha_boundary=1e12,
+                                        device="cpu").solve(tol_k=1e-11).k_eff
+    assert np.isfinite(k_inf_alpha)
+    assert k_inf_alpha == pytest.approx(k_big, abs=1e-8)
+    with pytest.raises(ValueError, match="alpha_boundary"):
+        UnstructuredDiffusionSolver(mesh, [ONE_GROUP_DEMO], cm, alpha_boundary=-1.0)
+
+
+def test_quad_centroid_is_the_area_centroid():
+    # A trapezoid: its vertex mean (1.5, 0.5) is not its centroid.
+    mesh = assemble_mesh([(0, 0), (4, 0), (1, 1), (0, 1)], [(0, 1, 2, 3)], [0])
+    assert mesh.area[0] == pytest.approx(2.5)
+    # composite: rectangle [0,1]x[0,1] (area 1) + triangle (1,0),(4,0),(1,1) (area 1.5)
+    cx = (1 * 0.5 + 1.5 * 2.0) / 2.5
+    cy = (1 * 0.5 + 1.5 * (1 / 3)) / 2.5
+    assert mesh.centroid[0] == pytest.approx([cx, cy])

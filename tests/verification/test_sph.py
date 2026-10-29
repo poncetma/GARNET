@@ -29,6 +29,44 @@ def test_sph_material_keeps_the_fission_energy_power_coefficient():
                                mat.kappa_fission * mu)
 
 
+def test_unknown_d_scaling_is_rejected_not_defaulted():
+    """A typo such as 'Direct' used to fall through silently to 'inverse'."""
+    import pytest
+
+    from garnet.sph import _scale_material
+
+    mat = Material(diffusion=[1.2, 0.3], sigma_a=[0.01, 0.1], nu_sigma_f=[0.0, 0.0])
+    _scale_material(mat, np.array([1.1, 0.9]), d_scaling="direct")
+    with pytest.raises(ValueError, match="d_scaling"):
+        _scale_material(mat, np.array([1.1, 0.9]), d_scaling="Direct")
+
+
+def test_per_cell_volume_array_matches_scalar_volume():
+    """cell_volume may be a (*shape) array (documented); it used to be broadcast
+    against the already-flattened map and crash on any multi-dimensional grid."""
+    rng = np.random.default_rng(3)
+    shape = (5, 4, 1)
+    mats = [PWR_TWO_GROUP, Material(name="refl", diffusion=[1.2, 0.9],
+                                    sigma_a=[2e-4, 5e-3], nu_sigma_f=[0, 0],
+                                    sigma_s=[[0, 0.04], [0, 0]])]
+    mmap = rng.integers(0, 2, size=shape)
+    region = np.zeros(shape, dtype=np.int64)
+    region[2:] = 1
+    flux = rng.uniform(0.5, 2.0, size=(2, *shape))
+    a, fa, va = flux_weighted_homogenize(flux, mats, mmap, region, cell_volume=2.5)
+    b, fb, vb = flux_weighted_homogenize(flux, mats, mmap, region,
+                                         cell_volume=np.full(shape, 2.5))
+    np.testing.assert_allclose(fb, fa, rtol=1e-14)
+    np.testing.assert_allclose(vb, va, rtol=1e-14)
+    for ma, mb in zip(a, b):
+        np.testing.assert_allclose(mb.sigma_a, ma.sigma_a, rtol=1e-14)
+    # a non-uniform volume array is honoured cell by cell
+    vol = rng.uniform(0.5, 1.5, size=shape)
+    c, _, vc = flux_weighted_homogenize(flux, mats, mmap, region, cell_volume=vol)
+    np.testing.assert_allclose(vc, [vol[region == i].sum() for i in range(2)],
+                               rtol=1e-14)
+
+
 def _reference():
     absorber = Material(name="poison", diffusion=[1.1, 0.5], sigma_a=[0.01, 0.20],
                         nu_sigma_f=[0, 0], sigma_s=[[0, 0.03], [0, 0]])
@@ -182,5 +220,90 @@ def test_sph_converges_and_improves_k_on_a_leaky_colorset():
     assert out.converged                              # Anderson tames the oscillation
     assert out.iterations < 40                        # and does so quickly
     assert err_homog > 100.0                          # homogenization is well off
-    assert err_sph < 0.25 * err_homog                 # SPH more than 4x closer
+    # SPH more than 3x closer. Was 0.25 (4x) while the SP3 reference used the
+    # per-moment Robin vacuum (homog 155 pcm -> SPH 18 pcm); with the coupled
+    # Brantley-Larsen Marshak vacuum now default for SP3, the reference keeps
+    # a boundary-layer leakage the diffusion coarse model's alpha=1/2 face
+    # cannot see (homog 231 -> SPH 65 pcm, ratio 0.28) -- exactly the leaky
+    # floor a per-region factor cannot remove.
+    assert err_sph < 0.3 * err_homog
     assert err_sph > 1.0                              # but a leaky floor remains
+
+
+def _rz_three_region_problem():
+    """r-z cylinder with fuel / poisoned ring / fuel radial regions."""
+    from garnet import CylindricalModel
+
+    poison = Material(name="poison", diffusion=[1.15, 0.55], sigma_a=[0.009, 0.12],
+                      nu_sigma_f=[0, 0], sigma_s=[[0, 0.03], [0, 0]])
+    model = (CylindricalModel(radius=90.0, height=60.0, cells=(30, 6))
+             .fill(PWR_TWO_GROUP).add_box(poison, r=(30.0, 60.0)))
+    model.set_boundary(r="vacuum", z="reflective")
+    region = model.material_map.reshape(model.grid.shape)  # one region per material
+    return model, region
+
+
+def test_region_average_uses_the_supplied_cell_volumes_on_rz():
+    # The reference region flux is weighted by the annular volumes; a coarse
+    # average with unit volumes overweights the axis cells, which SPH would
+    # read as a factor (r-z single region: ratio 1.38).
+    model, region = _rz_three_region_problem()
+    res = model.run(device="cpu", tol_k=1e-10, tol_source=1e-9)
+    volumes = model.grid.cell_volumes
+    _, rflux, _ = flux_weighted_homogenize(res.flux_numpy, model.materials,
+                                           region, region, cell_volume=volumes)
+    np.testing.assert_allclose(
+        region_average(res.flux_numpy, region, cell_volume=volumes), rflux,
+        rtol=1e-12)
+    unit = region_average(res.flux_numpy, region)
+    assert np.abs(unit / rflux - 1.0).max() > 0.05     # the bias being fixed
+
+
+def test_rz_sph_with_consistent_volumes_leaves_exact_regions_unchanged():
+    # One material per region and the same discretization: homogenization is
+    # exact, so consistent volume weighting must give mu = 1 and the reference k.
+    from garnet import DiffusionEigenSolver as Solver
+
+    model, region = _rz_three_region_problem()
+    res = model.run(device="cpu", tol_k=1e-11, tol_source=1e-10)
+    volumes = model.grid.cell_volumes
+    hmats, rflux, _ = flux_weighted_homogenize(res.flux_numpy, model.materials,
+                                               region, region, cell_volume=volumes)
+
+    def coarse_solve(materials):
+        r = Solver(model.grid, materials, material_map=region, bc=model._full_bc(),
+                   device="cpu").solve(tol_k=1e-11, tol_source=1e-10)
+        return region_average(r.flux_numpy, region, cell_volume=volumes), r.k_eff
+
+    out = sph_correct(hmats, region, rflux, coarse_solve, tol=1e-9)
+    assert out.converged
+    np.testing.assert_allclose(out.factors, 1.0, atol=1e-6)
+    assert abs(out.k_eff - res.k_eff) < 1e-8
+
+
+def test_unused_region_index_raises_a_clear_error():
+    grid, mats, mmap, region, dV, bc = _leaky_colorset()
+    region = np.where(region == 2, 3, region)           # index 2 never used
+    flux = np.ones((2,) + grid.shape)
+    import pytest
+    with pytest.raises(ValueError, match=r"empty regions: \[2\]"):
+        flux_weighted_homogenize(flux, mats, mmap, region, cell_volume=dV)
+
+
+def test_unconverged_anderson_returns_materials_matching_its_k():
+    # Stopped at max_iter, the result must pair k_eff with the materials it
+    # returns, not with an unsolved pending Anderson update.
+    grid, mats, mmap, region, dV, bc = _leaky_colorset()
+    ref = SP3EigenSolver(grid, mats, material_map=mmap, bc=bc,
+                         device="cpu").solve(tol_k=1e-9, tol_source=1e-8)
+    hmats, rflux, _ = flux_weighted_homogenize(ref.flux_numpy, mats, mmap, region,
+                                               cell_volume=dV)
+
+    def coarse_solve(materials):
+        res = DiffusionEigenSolver(grid, materials, material_map=region, bc=bc,
+                                   device="cpu").solve(tol_k=1e-11, tol_source=1e-10)
+        return region_average(res.flux_numpy, region), res.k_eff
+
+    out = sph_correct(hmats, region, rflux, coarse_solve, tol=1e-12, max_iter=3)
+    assert not out.converged
+    assert abs(coarse_solve(out.corrected_materials)[1] - out.k_eff) < 1e-9

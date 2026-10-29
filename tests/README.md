@@ -19,11 +19,24 @@ without a checkout).
 | `test_diffusion_analytic.py` | Cartesian FV vs exact bare-reactor solutions, 2nd-order convergence |
 | `test_cylindrical.py` | cylindrical (r-z) FV vs the exact bare-cylinder (Bessel-mode) eigenvalue, 2nd-order convergence, inert axis bc |
 | `test_sp3_analytic.py` | SP3 vs the exact analytic SP3 eigenvalue |
+| `test_spn_marshak.py` | dedicated SP3 coupled Marshak vacuum = U-form SP3; Marshak on active-mask faces (embedded box = bare box) |
+| `test_sdpn_adjoint.py` | SP3/SPN/SDPN adjoint k and importance vs an independently assembled dense transpose, Cartesian and r-z |
+| `test_solver_convergence.py` | default and BiCGStab SDP3 converge on BIBLIS; power iteration stops on an error bound; excised cells carry no source |
 | `test_boundary_conditions.py` | bc spec forms; symmetry-plane invariant |
 | `test_hex_lattice.py` | hex topology, k = k∞ invariant, BC ordering |
+| `test_tri_boundaries.py` | unmasked tri/hex outer edges take `bc`; axial active/inactive faces are mask boundaries; discontinuity-factor adjoint = dense left eigenvector |
+| `test_drum_absorber.py` | drum absorber area fractions = exact annular-sector areas (lattice and HP-MR builders) |
+| `test_pin_power_3d.py` | pin powers from 3-D prismatic fluxes: per layer, one layer or axially integrated; bad shapes rejected |
 | `test_tri_prisms.py` | tri-z extrusion: slab limit, order, extruded-2D = 3D |
 | `test_unstructured_mesh.py` | unstructured FV ≡ structured FV on the same mesh |
+| `test_mesh_skewed.py` | second-order convergence on skewed and jittered triangulations with the non-orthogonal correction; uncorrected two-point flux is inconsistent |
+| `test_mesh_gmsh.py` | Gmsh 2.x reader: any tag count, non-contiguous node ids, planar meshes outside xy; MSH 4, binary and higher-order files refused |
+| `test_model_api_audit.py` | `Model.from_grid` on 2-D grids, `add_box` width warning, axial region over a drum clears the absorber blend |
 | `test_transient_point_kinetics.py` | transient stack vs the exact point-kinetics ODE |
+| `test_kinetics_reference.py` | homogeneous transients vs independent `expm`/Radau multigroup kinetics; temporal orders, event and Crank–Nicolson restarts, adaptive startup, BDF3 order cap, S_N with BDF3 |
+| `test_transient_spn_equilibrium.py` | unperturbed diffusion/SPN/SDPN transients hold power, Cartesian and r-z, shared and distinct delayed spectra |
+| `test_transient_events.py` | events snap onto nearby step ends; restarts on the step leaving an event; `on_step` receives retainable copies |
+| `test_quasistatic_accuracy.py` | predictor–corrector IQS vs a full spatial transient: faster than first order in `shape_dt`, exact when `shape_dt = dt` (x-z and r-z) |
 | `test_delayed_spectra.py` | shared and family-specific delayed spectra vs independently assembled two-group neutron/precursor equations, with BDF1/BDF2 and both diffusion step solvers |
 | `test_transient_model_api.py` | shared Cartesian/r-z/triangular histories, event schedules, accepted-step callbacks, initial-state compatibility and cylindrical coupling |
 | `test_exponential_damping.py` | damped transformed BDF2, independent kinetics/stiff-mode references, six precursor families, unequal widths, event/fallback guards and coupled API regression |
@@ -39,8 +52,12 @@ without a checkout).
 | `test_femffusion_io.py` | .xsec/XML readers vs the files' exact contents |
 | `test_conduction.py` | conduction vs the exact sinked-slab `cosh` solution (2nd order, Dirichlet and Robin, Cartesian and tri-prism); the discrete energy balance as an exact identity |
 | `test_power_density.py` | power normalizes to the rated watts; independent of the eigenvalue flux's arbitrary scale; kappa- vs nu-weighting; mixing |
+| `test_kappa_consistency.py` | κΣf in the power edit, SPH homogenization and mixed cells; fissile materials with and without κΣf rejected |
 | `test_feedback.py` | temperature feedback: negative sign, linearity in the coefficient, Doppler/expansion separability, and a zeroed feedback bit-identical to no hook |
+| `test_feedback_mixed_cells.py` | Doppler/expansion in volume-mixed cells evaluated per material, then blended; tabulated reference temperatures |
+| `test_thermal_mixed_cells.py` | heat-pipe sink in mixed cells: blended h·T_sink, h-weighted equilibrium, energy balance |
 | `test_coupling.py` | the coupled fixed point: exact limits (zero feedback, zero power), contraction, conservation, accelerator-independence |
+| `test_coupling_convergence.py` | steady coupling stops on the fixed-point residual and returns one state; `uncoupled_k`, `criticality_search`, `coupling_vertices` |
 
 ## `validation/` — does it reproduce *published reactor problems*?
 

@@ -86,9 +86,10 @@ ap.add_argument("--fallback-residual", type=float, default=None,
                 help="use full diffusion for an interval above this defect "
                      "(guarded IQS default: 0.01)")
 ap.add_argument("--iqs-predictor-tol", type=float, default=None,
-                help="adaptively halve IQS shape intervals when the independent "
-                     "coarse predictor disagrees by this relative amount "
-                     "(guarded IQS default: 0.02)")
+                help="reject and halve an IQS shape interval when the corrector "
+                     "disagrees with the amplitude march by this relative amount "
+                     "(guarded IQS default: 0.02, calibrated under the pre-2026-10-29 "
+                     "semantics; see docs/qa/code_audit_2026-10-28.md item O3)")
 ap.add_argument("--unguarded-iqs", action="store_true",
                 help="disable the preferred HP-MR IQS residual, fallback, and "
                      "predictor guards for fixed-cadence benchmark comparisons")

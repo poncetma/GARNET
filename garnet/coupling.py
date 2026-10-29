@@ -31,6 +31,7 @@ each half and let the couplers differ.
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -254,7 +255,7 @@ def neutronics_step(temperature, ctx: CouplingContext):
         active=ctx.active, mask_bc=ctx.mask_bc,
         mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
         device=ctx.device, dtype=ctx.dtype,
-        xs_update=ctx.feedback.hook(temperature))
+        xs_update=_feedback_hook(ctx, temperature))
 
     kw = dict(ctx.eigen_kwargs)
     if ctx.warm_start and ctx._state is not None:
@@ -282,8 +283,49 @@ def neutronics_step(temperature, ctx: CouplingContext):
                       total_power=ctx.total_power,
                       cell_volume=ctx.thermal_solver().cell_volume,
                       mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
-                      active=ctx.active)
+                      active=ctx.active,
+                      fission_scale=_fission_scale(ctx, solver.fields))
     return q, res
+
+
+def _feedback_hook(ctx, temperature):
+    """``ctx.feedback``'s xs_update at ``temperature``, told the material list
+    when it can use it (a volume-mixed cell weights each component's own
+    change by that component's own cross sections)."""
+    hook = ctx.feedback.hook
+    if "materials" in inspect.signature(hook).parameters:
+        return hook(temperature, materials=ctx.materials)
+    return hook(temperature)
+
+
+def _fission_scale(ctx, fields):
+    """(G, *shape) factor by which the feedback moved nu*Sigma_f in each cell.
+
+    The power edit weights by kappa*Sigma_f from the static material tables,
+    which no feedback touches. But a density law or tabulated branches move
+    Sigma_f -- the HP-MR fuel's nu*Sigma_f changes 1.7-2.5% between 600 and
+    1200 K -- and the energy release moves with it: kappa/nu is a property of
+    the fissioning nuclide, ~constant in temperature. So kappa*Sigma_f takes
+    the same per-cell, per-group ratio the feedback applied to nu*Sigma_f.
+    Cells with no production keep a factor of 1 (they make no power anyway).
+    """
+    from .blend import MaterialBlend
+
+    xp = fields.blend.xp
+    dtype = fields.blend.dtype
+    blend = MaterialBlend(xp, ctx.grid.shape, ctx.material_map,
+                          len(ctx.materials), dtype=dtype,
+                          mix_material=ctx.mix_material,
+                          mix_weight=ctx.mix_weight)
+    table = np.array([np.atleast_1d(m.nu_sigma_f) for m in ctx.materials],
+                     dtype=float)
+    scale = []
+    for g in range(table.shape[1]):
+        base = blend.linear(table[:, g])
+        moved = xp.asarray(fields.nu_sigma_f[g], dtype=dtype)
+        nonzero = base != 0.0
+        scale.append(xp.where(nonzero, moved / xp.where(nonzero, base, 1.0), 1.0))
+    return xp.stack(scale)
 
 
 def thermal_step(power, ctx: CouplingContext, t0=None):
@@ -315,9 +357,13 @@ class CoupledSolver:
               anderson_depth=0, verbose=False) -> CoupledResult:
         """Iterate to a self-consistent (T, phi, k).
 
-        tol        : convergence on max|T_{n+1} - T_n| relative to the
-                     temperature span, so it means the same thing whatever the
-                     absolute level.
+        tol        : convergence on the FIXED-POINT residual
+                     max|G(T) - T| relative to the temperature span, so it
+                     means the same thing whatever the absolute level. Not
+                     the step |T_{n+1} - T_n|: under relaxation omega that is
+                     omega times smaller than the residual (loosening the
+                     tolerance by 1/omega), and an Anderson step can be small
+                     while the residual is not.
 
                      There is a FLOOR, and asking below it hangs rather than
                      errors. The inner eigen solve converges only to
@@ -336,6 +382,12 @@ class CoupledSolver:
                      equivalent ones.
         anderson_depth : > 1 switches to Anderson acceleration over that many
                      iterates. The converged answer is unchanged.
+
+        The result is ONE evaluated state: ``temperature`` is the field the
+        cross sections were evaluated at, and ``k_eff``, ``flux`` and
+        ``power_density`` are the neutronics at exactly that field. The
+        conduction response to that power, G(T), is ``thermal.temperature``;
+        at convergence the two differ by less than ``tol`` times the span.
         """
         ctx = self.ctx
         T = np.asarray(ctx.initial_temperature() if t0 is None else t0, dtype=float)
@@ -345,25 +397,26 @@ class CoupledSolver:
         info = None
         converged = False
         t_start = time.perf_counter()
+        evaluated = T
         for n in range(1, max_iter + 1):
             T_raw, info = coupled_map(T, ctx)
-            T_new = acc.step(T, T_raw)
-            change = float(np.max(np.abs(T_new - T)))
-            span = max(float(np.ptp(T_new)), 1.0)
+            evaluated = T
+            residual = float(np.max(np.abs(T_raw - T)))
+            span = max(float(np.ptp(T_raw)), 1.0)
             k_hist.append(info["neutronics"].k_eff)
-            res_hist.append(change)
+            res_hist.append(residual)
             if verbose:
                 print(f"  coupling {n:3d}  k = {k_hist[-1]:.7f}  "
-                      f"max|dT| = {change:.3e} K  T_peak = {T_new.max():.1f} K",
-                      flush=True)
-            T = T_new
-            if change / span < tol:
+                      f"max|G(T)-T| = {residual:.3e} K  "
+                      f"T_peak = {T_raw.max():.1f} K", flush=True)
+            if residual / span < tol:
                 converged = True
                 break
+            T = acc.step(T, T_raw)
         seconds = time.perf_counter() - t_start
 
         return CoupledResult(
-            k_eff=k_hist[-1], temperature=T, power_density=info["power"],
+            k_eff=k_hist[-1], temperature=evaluated, power_density=info["power"],
             flux=info["neutronics"].flux, iterations=len(k_hist),
             converged=converged, seconds=seconds, device=ctx.device,
             k_history=k_hist, residual_history=res_hist,
@@ -413,6 +466,7 @@ class _CoupledTransientState:
     last_accepted_time: float = 0.0
     feedback_hook: object | None = None
     min_power_integral: object | None = None
+    kappa_xs: object | None = None
     cached_peak: float = 0.0
     cached_mean: float = 0.0
 
@@ -431,7 +485,9 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
     Operator splitting advances neutronics with cross sections evaluated at
     the last accepted thermal state. The resulting power advances conduction
     at the next thermal exchange. The exchange interval controls the splitting
-    error; neutron and thermal equations are solved separately.
+    error; neutron and thermal equations are solved separately. This is
+    explicit Lie splitting, so the coupled result is FIRST order in
+    ``dt_thermal`` even when the neutronics runs BDF2/BDF3 or FTM.
 
     The neutronics step is set by prompt kinetics (milliseconds); the thermal
     response is seconds. Backward Euler on the conduction side is
@@ -546,7 +602,7 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
     steady_temperature = np.asarray(steady.temperature)
     state = _CoupledTransientState(
         temperature=xp.asarray(steady_temperature, dtype=thermal.dtype))
-    state.feedback_hook = ctx.feedback.hook(state.temperature)
+    state.feedback_hook = _feedback_hook(ctx, state.temperature)
     used_source_weights = []
     fuel = _fuel_mask(ctx)
     fuel_mask_device = xp.asarray(fuel)
@@ -563,10 +619,22 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
     # worth having: the host-side power_density would pull the whole flux back
     # every step (11 groups x 12k cells is ~1 MB a step, thousands of steps),
     # and that transfer would sit in series with every solve.
-    kappa_xs = xp.stack(_device_fission_energy(ctx, xp, thermal.dtype))
+    kappa_static = xp.stack(_device_fission_energy(ctx, xp, thermal.dtype))
     active_cells_device = None if ctx.active is None else xp.asarray(ctx.active).astype(bool)
     if active_cells_device is not None:
-        kappa_xs = xp.where(active_cells_device[None, ...], kappa_xs, 0.0)
+        kappa_static = xp.where(active_cells_device[None, ...], kappa_static, 0.0)
+
+    def feedback_kappa(hook):
+        # The same feedback-moved kappa the steady power edit uses, refreshed
+        # whenever the temperature (hence the feedback) moves -- so t = 0 is
+        # the steady state's own power shape, not a frozen-kappa variant.
+        from .solver import Fields
+        fields = Fields(xp, ctx.grid, ctx.materials, ctx.material_map,
+                        thermal.dtype, mix_material=ctx.mix_material,
+                        mix_weight=ctx.mix_weight, xs_update=hook)
+        return kappa_static * _fission_scale(ctx, fields)
+
+    state.kappa_xs = feedback_kappa(state.feedback_hook)
     cell_volumes = thermal.cell_volume
     raw_power = xp.zeros(ctx.shape, dtype=thermal.dtype)
     initial_peak = float(steady_temperature[fuel].max())
@@ -589,7 +657,7 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
                 # consumes the legacy group list directly.
                 phi_power = (phi if not kernels.use_fused(xp, "groups") or
                              hasattr(phi, "shape") else xp.stack(phi))
-                kernels.group_accumulate(xp, raw_power, kappa_xs, phi_power)
+                kernels.group_accumulate(xp, raw_power, state.kappa_xs, phi_power)
                 integral = xp.sum(raw_power * cell_volumes)       # device scalar
                 scale = ctx.total_power * power_ratio / integral
                 power_density_field = raw_power * scale
@@ -640,7 +708,8 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
                 profiler.counters["thermal_diagnostics"] += int(diagnostics)
 
                 with profiler.region("feedback_update"):
-                    state.feedback_hook = ctx.feedback.hook(state.temperature)
+                    state.feedback_hook = _feedback_hook(ctx, state.temperature)
+                    state.kappa_xs = feedback_kappa(state.feedback_hook)
                 profiler.counters["feedback_updates"] += 1
 
                 # One small transfer per thermal window supplies both
@@ -844,7 +913,8 @@ def cell_centroids(grid, raster=None) -> np.ndarray:
 
 
 def coupling_vertices(problem):
-    """(coords, flat_indices) for the ACTIVE cells, in one place.
+    """(coords, flat_indices) for the ACTIVE cells, in one place -- every cell
+    when the problem has no ``active`` mask.
 
     Both preCICE participants must call this on identically-built problems.
     The nearest-neighbour mapping is exact -- the identity permutation,
@@ -854,25 +924,28 @@ def coupling_vertices(problem):
     quietly map each vertex to a nearby wrong cell, and the coupling becomes a
     smoother. That is what the echo test in the preCICE test-suite is for.
     """
-    coords = cell_centroids(problem.grid, problem.raster)
-    active = np.asarray(problem.active).ravel()
-    idx = np.flatnonzero(active)
+    coords = cell_centroids(problem.grid, getattr(problem, "raster", None))
+    active = getattr(problem, "active", None)
+    idx = (np.arange(len(coords)) if active is None
+           else np.flatnonzero(np.asarray(active).ravel()))
     return np.ascontiguousarray(coords[idx]), idx
 
 
 def uncoupled_k(ctx: CouplingContext, temperature=None) -> float:
     """k with the feedback evaluated at a frozen temperature -- the reference
-    the temperature defect is measured against. ``None`` means the reference
-    temperature itself, i.e. the cross sections exactly as tabulated."""
-    if temperature is None:
-        temperature = np.full(ctx.shape,
-                              float(np.max(ctx.feedback.t_ref)))
+    the temperature defect is measured against. ``None`` means each material
+    at its OWN reference temperature, i.e. the cross sections exactly as
+    tabulated -- so no feedback hook at all. (One uniform temperature, such
+    as the largest t_ref, would move every material whose reference differs.)
+    """
+    xs_update = (None if temperature is None
+                 else _feedback_hook(ctx, temperature))
     solver = ctx.solver_cls(
         ctx.grid, ctx.materials, ctx.material_map, bc=ctx.bc,
         active=ctx.active, mask_bc=ctx.mask_bc,
         mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
         device=ctx.device, dtype=ctx.dtype,
-        xs_update=ctx.feedback.hook(temperature))
+        xs_update=xs_update)
     return solver.solve(**ctx.eigen_kwargs).k_eff
 
 
@@ -901,6 +974,10 @@ def criticality_search(rebuild, ctx_kwargs, bracket=(0.0, 180.0), target_k=1.0,
     smooth and monotone in the angle once the absorber is volume-mixed
     ("polar"), so secant lands in ~4 evaluations instead of ~20 -- and each
     evaluation is a full coupled solve.
+
+    Raises RuntimeError unless |k - target_k| < tol at the returned angle:
+    running out of iterations, or a secant step that stalls on a flat stretch
+    of the worth curve (a coarse-mesh staircase), is not an answer.
     """
     solve_kwargs = dict(solve_kwargs or {})
     cache = {}
@@ -928,12 +1005,16 @@ def criticality_search(rebuild, ctx_kwargs, bracket=(0.0, 180.0), target_k=1.0,
             f"the core cannot be made critical by drum rotation alone here")
 
     for _ in range(max_iter):
-        if abs(fb - fa) < 1e-14:
+        if abs(fb) < tol or abs(fb - fa) < 1e-14:
             break
         c = b - fb * (b - a) / (fb - fa)
         c = min(max(c, min(bracket)), max(bracket))
         fc = k_at(c).k_eff - target_k
         a, fa, b, fb = b, fb, c, fc
-        if abs(fc) < tol:
-            break
+    if not abs(fb) < tol:
+        raise RuntimeError(
+            f"criticality search did not converge: k = {fb + target_k:.7f} at "
+            f"{b:.4f} deg, |k - {target_k}| = {abs(fb):.2e} >= tol = {tol:.1e} "
+            f"after {len(cache)} coupled solves (the secant step stalled or "
+            f"max_iter = {max_iter} ran out)")
     return b, cache[b]

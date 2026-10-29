@@ -44,8 +44,9 @@ def parse_args(participant: str) -> argparse.Namespace:
                     help="reuse the previous flux. OFF by default: it makes "
                          "the coupled map depend on its own history, which "
                          "breaks the lockstep comparison with the internal "
-                         "driver (and preCICE's checkpoints restore to the "
-                         "start of a window, not the previous iteration).")
+                         "driver. The flux is kept outside preCICE's "
+                         "checkpoints, which would otherwise restore it to "
+                         "the (cold) start of the window every iteration.")
     return ap.parse_args()
 
 

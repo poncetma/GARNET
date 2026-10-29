@@ -306,3 +306,45 @@ def test_hook_is_inherited_by_the_triangular_and_sp3_solvers():
         hot = cls(p.grid, p.materials, p.material_map, xs_update=hook,
                   **common).solve(tol_k=1e-9, tol_source=1e-8)
         assert hot.k_eff < cold.k_eff, cls.__name__
+
+
+# -- the HP-MR expansion coefficient is a value, not a flag --------------------
+
+def test_hpmr_expansion_coefficient_is_converted_through_the_density_worth():
+    from garnet.benchmarks.hpmr import FUEL
+    from garnet.benchmarks.hpmr_thermal import hpmr_feedback
+
+    # beta = -alpha / W: -1 pcm/K on a 2000 pcm density worth is 5e-4 1/K.
+    fb = hpmr_feedback(7, expansion_pcm_per_K=-1.0, fuel_density_worth_pcm=2000.0)
+    assert fb.expansion[FUEL] == pytest.approx(5e-4, rel=1e-15)
+    assert np.count_nonzero(fb.expansion) == 1
+    fb2 = hpmr_feedback(7, expansion_pcm_per_K=-3.0, fuel_density_worth_pcm=2000.0)
+    assert fb2.expansion[FUEL] == pytest.approx(3.0 * fb.expansion[FUEL], rel=1e-15)
+    with pytest.raises(ValueError, match="fuel_density_worth_pcm"):
+        hpmr_feedback(7, expansion_pcm_per_K=-1.0)
+    with pytest.raises(ValueError, match="LOWER"):
+        hpmr_feedback(7, expansion_pcm_per_K=+1.0, fuel_density_worth_pcm=2000.0)
+
+
+def test_hpmr_expansion_coefficient_reproduces_the_requested_pcm_per_K():
+    """The conversion is first order, so on the core whose worth it quotes the
+    measured coefficient must land on the request."""
+    from garnet import TriDiffusionEigenSolver
+    from garnet.benchmarks.hpmr import build_hpmr2d
+    from garnet.benchmarks.hpmr_thermal import (FUEL_DENSITY_WORTH_PCM,
+                                               hpmr_feedback)
+
+    p = build_hpmr2d(refine=3, drum_angle_deg=180.0, absorber="polar")
+    fb = hpmr_feedback(len(p.materials), doppler_amplitude=0.0,
+                       expansion_pcm_per_K=-1.5,
+                       fuel_density_worth_pcm=FUEL_DENSITY_WORTH_PCM["2-group"])
+
+    def factory(xs_update):
+        return TriDiffusionEigenSolver(
+            p.grid, p.materials, p.material_map, bc=p.bc, active=p.active,
+            mask_bc=p.mask_bc, mix_material=p.mix_material,
+            mix_weight=p.mix_weight, device="cpu", xs_update=xs_update)
+
+    alpha = measure_pcm_per_K(factory, p.grid.shape, fb, t_cal=800.0, dT=20.0,
+                              tol_k=1e-11, tol_source=1e-10)
+    assert alpha == pytest.approx(-1.5, rel=0.02)

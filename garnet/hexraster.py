@@ -61,8 +61,9 @@ class TriRaster:
     """A rasterized core: the material map plus the physical frame.
 
     material_map : (nrows, ncols, 2) int map, 0 = void, padded with a
-                   one-cell void border (required by the tri operator's
-                   boundary handling).
+                   one-cell void border (kept so every core-surface face is
+                   an active/void interface; the tri operator no longer
+                   requires it).
     side         : triangle edge length, cm.
     origin       : (i0, j0) lattice offsets such that cell (a, b) of the
                    padded map has corner  O = (i0+a-1)*b_vec + (j0+b-1)*a_vec
@@ -99,8 +100,9 @@ def rasterize_hex_sites(site_material: dict, pitch: float, refine: int,
                     site is in the map, to override the site's material with
                     sub-hex detail (e.g. a control-drum absorber arc).
 
-    The raster covers all sites plus a two-hex margin, and carries the
-    one-cell void border the tri operator requires.
+    The raster covers all sites plus a two-hex margin, and carries a
+    one-cell void border, so every core-surface face is an active/void
+    interface.
     """
     r = int(refine)
     h = pitch / (_SQRT3 * r)

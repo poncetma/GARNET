@@ -283,17 +283,22 @@ def absorber_fraction_map(raster: TriRaster, drum_angle_deg, samples: int = 10):
     The absorber is a polar region -- an annular sector r in
     [DRUM_ABSORBER_INNER, DRUM_RADIUS], azimuth within +-DRUM_ARC_HALF_DEG of
     the (rotated) arc centre. For every triangle within reach of a drum, the
-    fraction of the cell area covered by that region is estimated by
-    barycentric sub-sampling. Unlike the centroid raster this is *exact in the
-    limit* and, crucially, non-zero for cells the thin (1 cm) annulus only
-    partly crosses -- so the arc is represented (diluted) even when it is
-    thinner than a triangle, and the fraction varies smoothly as the drum
-    rotates. Feed the result as ``mix_weight`` with ``mix_material`` =
-    DRUM_ABSORBER to volume-mix the absorber into the drum-body cells.
+    fraction of the cell area covered by that region is computed exactly
+    (closed-form triangle / annular-sector intersection, see
+    :func:`garnet.model.annular_sector_fraction`), so the total absorber area is
+    the analytic sector area at every refinement. Unlike the centroid raster it
+    is non-zero for cells the thin (1 cm) annulus only partly crosses -- so the
+    arc is represented (diluted) even when it is thinner than a triangle, and
+    the fraction varies smoothly as the drum rotates. Feed the result as
+    ``mix_weight`` with ``mix_material`` = DRUM_ABSORBER to volume-mix the
+    absorber into the drum-body cells.
 
-    samples : barycentric sub-sampling order; (samples+1)(samples+2)/2 points
-    per cell (10 -> 66). Higher = finer area/rotation resolution.
+    samples : retained for compatibility and ignored. It was the order of a
+    barycentric sub-sampling lattice whose vertex/edge points biased the
+    absorber area by up to -17%.
     """
+    from ..model import annular_sector_fraction
+
     mmap = raster.material_map
     ni, nj, _ = mmap.shape
     frac = np.zeros((ni, nj, 2), dtype=float)
@@ -302,10 +307,6 @@ def absorber_fraction_map(raster: TriRaster, drum_angle_deg, samples: int = 10):
     arc_az = np.asarray(arc_az)
     arc_half = math.radians(DRUM_ARC_HALF_DEG)
     reach2 = (DRUM_RADIUS + raster.side) ** 2
-
-    n = samples
-    bary = np.array([(i / n, j / n, (n - i - j) / n)
-                     for i in range(n + 1) for j in range(n + 1 - i)])  # (S, 3)
 
     for a in range(ni):
         for b in range(nj):
@@ -318,14 +319,9 @@ def absorber_fraction_map(raster: TriRaster, drum_angle_deg, samples: int = 10):
                 d = int(d2.argmin())
                 if d2[d] > reach2:
                     continue
-                pts = bary @ V                              # (S, 2)
-                dx = pts[:, 0] - drum_xy[d, 0]
-                dy = pts[:, 1] - drum_xy[d, 1]
-                rr = np.hypot(dx, dy)
-                dphi = (np.arctan2(dy, dx) - arc_az[d] + np.pi) % (2 * np.pi) - np.pi
-                inside = ((rr > DRUM_ABSORBER_INNER) & (rr <= DRUM_RADIUS)
-                          & (np.abs(dphi) <= arc_half))
-                frac[a, b, t] = inside.mean()
+                frac[a, b, t] = annular_sector_fraction(
+                    V, drum_xy[d], DRUM_ABSORBER_INNER, DRUM_RADIUS,
+                    arc_az[d], arc_half)
     return frac
 
 
@@ -447,7 +443,8 @@ def build_hpmr2d(refine: int = 4, drum_angle_deg=0.0,
                      problem -- pass them to the solver). The polar path
                      represents the arc's area and rotation smoothly and works
                      below the raster's refine>=4 floor.
-    samples        : sub-sampling order for the polar area fractions.
+    samples        : ignored (the polar area fractions are exact); kept for
+                     compatibility.
 
     Use with TriDiffusionEigenSolver, e.g.::
 

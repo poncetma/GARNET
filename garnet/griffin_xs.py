@@ -139,23 +139,54 @@ def read_material(path, mid, grid_index="3 3", name=None) -> Material:
 
     grid_index : the temperature-grid node "i j" to read (1-based Tfuel/Tmod
                  indices as a string, e.g. "3 3" for the 3rd node of each).
+
+    Required tags: ``Total``, ``Absorption`` and ``Scattering``; a missing one
+    raises ``KeyError`` instead of being read as zeros (a zero Total would make
+    D infinite, a zero Absorption a non-absorbing material). Optional tags:
+    ``nuFission``, ``FissionSpectrum`` and ``kappaFission`` -- non-fissile
+    materials omit all three (the VTB HP-MR library does so for 225 of its 250
+    tables) and are read as non-fissile. A material carrying
+    ``FissionSpectrum`` or ``kappaFission`` without ``nuFission``, or a
+    positive ``nuFission`` without ``FissionSpectrum``, is rejected as
+    incomplete fission data.
     """
     iso, G = _isotope(path, mid, grid_index)
 
-    def vec(tag):
+    def vec(tag, required=False):
         el = iso.find(tag)
-        return np.array([float(x) for x in el.text.split()]) if el is not None \
-            else np.zeros(G)
+        if el is None:
+            if required:
+                raise KeyError(f"{path} material {mid} grid {grid_index!r} lacks the "
+                               f"required <{tag}> data")
+            return None
+        values = np.array([float(x) for x in el.text.split()])
+        if values.size != G:
+            raise ValueError(f"<{tag}> of material {mid} has {values.size} "
+                             f"entries, expected NGroup={G}")
+        return values
 
-    total = vec("Total")
-    sigma_a = vec("Absorption")
+    total = vec("Total", required=True)
+    sigma_a = vec("Absorption", required=True)
     nu_sigma_f = vec("nuFission")
     kappa_fission = vec("kappaFission")
     chi = vec("FissionSpectrum")
+    if nu_sigma_f is None:
+        if chi is not None or kappa_fission is not None:
+            raise KeyError(f"{path} material {mid} carries FissionSpectrum/"
+                           f"kappaFission but no nuFission")
+        nu_sigma_f = np.zeros(G)
+    elif np.any(nu_sigma_f > 0) and (chi is None or not chi.sum() > 0):
+        raise KeyError(f"{path} material {mid} is fissile but has no "
+                       f"FissionSpectrum")
+    kappa_fission = np.zeros(G) if kappa_fission is None else kappa_fission
+    chi = np.zeros(G) if chi is None else chi
 
     # P0 scattering: first G rows of the profile/value blocks. Profile row g
     # (sink) gives the source-group range; GARNET wants sigma_s[source, sink].
     sc = iso.find("Scattering")
+    if sc is None or sc.find("Profile") is None or sc.find("Value") is None:
+        raise KeyError(f"{path} material {mid} grid {grid_index!r} lacks the "
+                       f"required <Scattering> Profile/Value data")
     prof = [ln.split() for ln in sc.find("Profile").text.split("\n") if ln.strip()]
     val = [ln.split() for ln in sc.find("Value").text.split("\n") if ln.strip()]
     sigma_s = np.zeros((G, G))
