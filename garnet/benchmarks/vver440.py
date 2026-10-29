@@ -2,8 +2,12 @@
 
 Two-group hexagonal core (Chao & Shatilla, Nucl. Sci. Eng. 121, 210-225
 (1995)): 349 fuel assemblies plus a reflector ring, 14.7 cm hex pitch, vacuum
-boundary. Eight compositions (1-3 fuel, 4 absorber, 5/7 radial reflector,
-6/8 axial reflector). This is the hexagonal-geometry case: it runs on the
+boundary. Eight compositions: 1-3 fuel, 4 the radial reflector (the outer
+ring; nuSigma_f = 0), and 5-8 in-core assemblies with nuSigma_f > 0 -- 6/7 are
+near-copies of fuel 2/1, 5 the high-absorption control-assembly positions
+(centre + six), and 8 a copy of 5 on two of those six, the ones perturbed by
+the "ramp_hex" transient (so the static map is 60-degree symmetric only up to
+8 -> 5). This is the hexagonal-geometry case: it runs on the
 structured *hex* solver (one finite-volume cell per assembly, axial
 coordinates), not the Cartesian one.
 
@@ -65,7 +69,7 @@ def _material(mid: int) -> Material:
 
 
 def _material8_ramp(sigma_a2_thermal: float) -> Material:
-    """Material 8 (axial reflector) with a perturbed thermal absorption."""
+    """Material 8 (perturbed control-assembly copy of 5) with a new thermal absorption."""
     tr1, a1, nsf1, s12, tr2, _, nsf2 = _XS[8]
     return Material(
         name=f"vver-8 (Sa2={sigma_a2_thermal:.6f})",
@@ -107,22 +111,28 @@ def _material1_bulk(factor: float) -> Material:
 def _hex_sites() -> dict:
     """Assembly map as {(R, C) axial site: material id}.
 
-    Each .xsec row is centred AND counter-sheared by -R/2 so the core is a true
-    hexagon (not the sheared parallelogram the naive placement produces).
+    Site (R, C) sits at x = C + R/2 pitches (hexraster.hex_site_xy), so each
+    .xsec row is centred on a common x AND counter-sheared by -R/2, making the
+    core a true hexagon (not the sheared parallelogram of naive placement).
+    The centring is done in half-pitch units so it is exact: row r of n sites
+    is centred when 2*C0 = 2*X0 - r - (n - 1), which the map's stagger keeps
+    even on every row. (Rounding each row separately with // shifted every
+    odd row a full pitch and broke the hexagon.)
     """
     raw = []
     for row in _OFFSET:
         vals = [0 if ch == "." else int(ch) for ch in row]
         nz = [i for i, v in enumerate(vals) if v > 0]
         raw.append([vals[i] for i in range(nz[0], nz[-1] + 1)])
-    W = max(len(r) for r in raw)
-    NR = len(raw)
+    x0_2 = max(r + len(rowvals) - 1 for r, rowvals in enumerate(raw))  # 2*X0, C >= 0
     sites = {}
     for r, rowvals in enumerate(raw):
-        start = (W - len(rowvals)) // 2 - r // 2 + NR
+        start2 = x0_2 - r - (len(rowvals) - 1)
+        if start2 % 2:
+            raise ValueError(f"VVER-440 map row {r} cannot be centred on the lattice")
         for c, mid in enumerate(rowvals):
             if mid > 0:
-                sites[(r, start + c)] = mid
+                sites[(r, start2 // 2 + c)] = mid
     return sites
 
 

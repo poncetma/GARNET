@@ -50,28 +50,37 @@ participant.initialize()
 trace = Trace(args.csv, ["iteration", "k_eff", "T_max", "T_mean", "power_max",
                          "outer_iterations", "seconds"])
 iteration = 0
-saved = None
+
+# The participant carries no physical state: a steady eigenvalue solve is a
+# pure function of the temperature it reads, so a read-checkpoint has nothing
+# to restore. The warm-start flux is only an initial GUESS, and it is kept
+# deliberately OUTSIDE the checkpoint. Restoring it to the window start -- as
+# an earlier version did, saving (ctx._state, ctx._k) at the write-checkpoint
+# -- silently made --warm-start a no-op: the one-window steady scheme writes
+# its checkpoint before the first solve, so every iteration was rolled back to
+# the empty cache and solved cold. Carrying the latest converged flux into the
+# next iteration does not change the fixed point, only how fast each solve
+# reaches it.
+warm = (ctx._state, ctx._k)
 
 while participant.is_coupling_ongoing():
     if participant.requires_writing_checkpoint():
-        # Stateless by default (warm_start off), so there is nothing to save
-        # but the warm-start cache. preCICE restores to the START of a window,
-        # not to the previous iteration, so keeping this honest matters as soon
-        # as warm starting is switched on.
-        saved = (ctx._state, ctx._k)
+        pass                      # nothing to save: see above
 
     dt = participant.get_max_time_step_size()
     t_vertices = participant.read_data(MESH, "Temperature", vertex_ids, dt)
     temperature = scatter(t_vertices, flat_idx, ctx.shape, ctx.ambient_temperature)
 
+    ctx._state, ctx._k = warm
     power, result = neutronics_step(temperature, ctx)
+    warm = (ctx._state, ctx._k)
     iteration += 1
 
     participant.write_data(MESH, "Power", vertex_ids, gather(power, flat_idx))
     participant.advance(dt)
 
     if participant.requires_reading_checkpoint():
-        ctx._state, ctx._k = saved
+        pass                      # the warm-start flux survives on purpose
 
     trace.add(iteration=iteration, k_eff=f"{result.k_eff:.12f}",
               T_max=f"{temperature.max():.9f}", T_mean=f"{temperature.mean():.9f}",

@@ -49,6 +49,7 @@ the operator). CPU/numpy reference, not the GPU path.
 from __future__ import annotations
 
 import time
+from typing import NamedTuple
 
 import numpy as np
 import scipy.sparse as sp
@@ -75,6 +76,79 @@ _EDGES = [
     (1, 1, 0, 0, (0.0, 1.0)),
     (1, 0, 1, 0, (_SQRT3_2, -0.5)),
 ]
+
+
+class _StepLevel(NamedTuple):
+    cell_indices: object
+    angular_indices: object
+    upwind_indices: object
+    inflow_weights: object
+
+
+class _CornerLevel(NamedTuple):
+    cell_indices: object
+    angular_cell_indices: object
+    angular_indices: object
+    upwind_indices: object
+    inflow_weights: object
+
+
+class _StepWork(NamedTuple):
+    gathered_inflow: object
+    incoming_sum: object
+    cell_source: object
+
+
+class _CornerWork(NamedTuple):
+    gathered_inflow: object
+    corner_rhs: object
+    cell_source: object
+    interface_source: object
+    matrix_products: object
+    corner_flux: object
+
+
+def _topological_sweep_levels(dependency_sources, dependency_targets, active_cells):
+    """Kahn levels for each direction's acyclic upwind dependency graph.
+
+    A cell is ready after all its upstream cells have been evaluated. Cells
+    in the same level have no dependencies on one another and can run in parallel.
+    """
+    directions = len(dependency_sources)
+    cells = active_cells.size
+    level_by_direction = np.full((directions, cells), -1, np.int64)
+    active_count = int(active_cells.sum())
+    for direction in range(directions):
+        sources = (np.concatenate(dependency_sources[direction])
+                   if dependency_sources[direction] else np.zeros(0, np.int64))
+        targets = (np.concatenate(dependency_targets[direction])
+                   if dependency_targets[direction] else np.zeros(0, np.int64))
+        incoming_count = np.zeros(cells, np.int64)
+        np.add.at(incoming_count, targets, 1)
+        order = np.argsort(sources, kind="stable")
+        sorted_sources, sorted_targets = sources[order], targets[order]
+        row_offsets = np.searchsorted(sorted_sources, np.arange(cells + 1))
+        ready = active_cells & (incoming_count == 0)
+        completed = level = 0
+        while completed < active_count:
+            ready_cells = np.where(ready)[0]
+            if ready_cells.size == 0:
+                raise RuntimeError("sweep dependency cycle (unexpected for vacuum bc)")
+            level_by_direction[direction, ready_cells] = level
+            completed += ready_cells.size
+            ready[ready_cells] = False
+            counts = row_offsets[ready_cells + 1] - row_offsets[ready_cells]
+            edge_count = int(counts.sum())
+            if edge_count:
+                starts = np.repeat(row_offsets[ready_cells], counts)
+                offsets = np.arange(edge_count) - np.repeat(
+                    np.concatenate(([0], np.cumsum(counts)[:-1])), counts)
+                downstream = sorted_targets[starts + offsets]
+                np.subtract.at(incoming_count, downstream, 1)
+                newly_ready = downstream[incoming_count[downstream] == 0]
+                ready[newly_ready[level_by_direction[direction, newly_ready] < 0]] = True
+            level += 1
+    return level_by_direction
 
 
 class TriSNTransportSolver:
@@ -355,7 +429,8 @@ class TriSNTransportSolver:
                     ii, jj = np.meshgrid(np.arange(nr), np.arange(nc), indexing="ij")
                     ni, nj = ii + di, jj + dj
                     if self.bc == "periodic":
-                        ni %= nr; nj %= nc
+                        ni %= nr
+                        nj %= nc
                         inb = np.ones_like(ni, bool)
                     else:
                         inb = (ni >= 0) & (ni < nr) & (nj >= 0) & (nj < nc)
@@ -370,14 +445,17 @@ class TriSNTransportSolver:
                         d = np.where(src_act, On, 0.0)
                         np.add.at(diag, src.reshape(-1), d.reshape(-1))
                     else:                                    # inflow: psi_face = psi_nbr
-                        s = src[valid]; n = nbr[valid]
-                        rows.append(s); cols.append(n)
+                        s = src[valid]
+                        n = nbr[valid]
+                        rows.append(s)
+                        cols.append(n)
                         vals.append(np.full(s.size, On))
                         # inflow across a vacuum/void boundary contributes 0.
                 # inactive cells: identity rows (psi = 0)
                 inact = ~self._act_flat
                 diag = np.where(inact, 1.0, diag)
-                rows.append(np.arange(self.N)); cols.append(np.arange(self.N))
+                rows.append(np.arange(self.N))
+                cols.append(np.arange(self.N))
                 vals.append(diag)
                 A = sp.csr_matrix((np.concatenate(vals),
                                    (np.concatenate(rows), np.concatenate(cols))),
@@ -397,7 +475,8 @@ class TriSNTransportSolver:
         elif On < 0.0:
             valid = src_act & nbr_act
             s = src[valid]
-            rows.append(s); cols.append(nbr[valid])
+            rows.append(s)
+            cols.append(nbr[valid])
             vals.append(np.full(s.size, On))
 
     def _prefactor_step_3d(self, groups=None):
@@ -424,7 +503,8 @@ class TriSNTransportSolver:
                     On = (mu * nx + eta * ny) * (h * dz)
                     ni, nj = ii + di, jj + dj
                     if rad_per:
-                        inb = np.ones((nr, nc), bool); ni2, nj2 = ni % nr, nj % nc
+                        inb = np.ones((nr, nc), bool)
+                        ni2, nj2 = ni % nr, nj % nc
                     else:
                         inb = (ni >= 0) & (ni < nr) & (nj >= 0) & (nj < nc)
                         ni2, nj2 = np.clip(ni, 0, nr - 1), np.clip(nj, 0, nc - 1)
@@ -439,9 +519,11 @@ class TriSNTransportSolver:
                     On = (xi if dk > 0 else -xi) * area
                     nk = kk + dk
                     if ax_per:
-                        inbz = np.ones(nz, bool); nk2 = nk % nz
+                        inbz = np.ones(nz, bool)
+                        nk2 = nk % nz
                     else:
-                        inbz = (nk >= 0) & (nk < nz); nk2 = np.clip(nk, 0, nz - 1)
+                        inbz = (nk >= 0) & (nk < nz)
+                        nk2 = np.clip(nk, 0, nz - 1)
                     nbr = np.full((nr, nc, 2, nz), -1)
                     nbr_act = np.zeros((nr, nc, 2, nz), bool)
                     nbr[:, :, :, inbz] = cell[:, :, :, nk2[inbz]]
@@ -449,7 +531,8 @@ class TriSNTransportSolver:
                     self._add_face(On, cell, act, nbr, nbr_act,
                                    diag, rows, cols, vals)
                 diag = np.where(~self._act_flat, 1.0, diag)   # excised: identity
-                rows.append(np.arange(N)); cols.append(np.arange(N))
+                rows.append(np.arange(N))
+                cols.append(np.arange(N))
                 vals.append(diag)
                 A = sp.csr_matrix(
                     (np.concatenate([np.atleast_1d(v) for v in vals]),
@@ -472,13 +555,13 @@ class TriSNTransportSolver:
         cell, act = self._cell, self.active
         act_flat = self._act_flat
         ii, jj = np.meshgrid(np.arange(nr), np.arange(nc), indexing="ij")
-        NIN = 5
-        outsum = np.zeros((M, N))
-        in_nbr = np.zeros((M, N, NIN), np.int64)
-        in_coef = np.zeros((M, N, NIN))
-        in_cnt = np.zeros((M, N), np.int64)
-        es = [[] for _ in range(M)]
-        ed = [[] for _ in range(M)]
+        max_inflow_faces = 5
+        outflow_sum = np.zeros((M, N))
+        upwind_neighbors = np.zeros((M, N, max_inflow_faces), np.int64)
+        inflow_weights = np.zeros((M, N, max_inflow_faces))
+        inflow_count = np.zeros((M, N), np.int64)
+        dependency_sources = [[] for _ in range(M)]
+        dependency_targets = [[] for _ in range(M)]
         # (s_all outflow ids, sv/nv inflow src/nbr ids, kind, g1, g2) per face
         faces = []
         for (t, di, dj, tn, (nx, ny)) in _EDGES:              # lateral
@@ -502,58 +585,28 @@ class TriSNTransportSolver:
             nbr_act[:, :, :, inbz] = act[:, :, :, nk2[inbz]]
             valid = act & nbr_act
             faces.append((cell[act], cell[valid], nbr[valid], "ax", dk, None))
-        for (s_all, sv, nv, kind, g1, g2) in faces:
+        for (outflow_cells, downstream_cells, upstream_cells, kind, g1, g2) in faces:
             for m in range(M):
                 if kind == "lat":
-                    On = (self.mu[m] * g1 + self.eta[m] * g2) * (h * dz)
+                    normal_streaming = (self.mu[m] * g1 + self.eta[m] * g2) * (h * dz)
                 else:
-                    On = (self.xi[m] if g1 > 0 else -self.xi[m]) * area
-                if On > 0.0:
-                    outsum[m][s_all] += On
-                elif On < 0.0:
-                    es[m].append(nv); ed[m].append(sv)
-                    slot = in_cnt[m][sv]
-                    in_nbr[m, sv, slot] = nv
-                    in_coef[m, sv, slot] = -On
-                    in_cnt[m][sv] += 1
-        # Kahn's algorithm per ordinate (identical to the 2D engine).
-        lvl_of = np.full((M, N), -1, np.int64)
-        n_act = int(act_flat.sum())
-        for m in range(M):
-            se = np.concatenate(es[m]) if es[m] else np.zeros(0, np.int64)
-            de = np.concatenate(ed[m]) if ed[m] else np.zeros(0, np.int64)
-            indeg = np.zeros(N, np.int64)
-            np.add.at(indeg, de, 1)
-            perm = np.argsort(se, kind="stable")
-            se_s, de_s = se[perm], de[perm]
-            indptr = np.searchsorted(se_s, np.arange(N + 1))
-            ready = act_flat & (indeg == 0)
-            done = l = 0
-            while done < n_act:
-                ids = np.where(ready)[0]
-                if ids.size == 0:
-                    raise RuntimeError("sweep dependency cycle (unexpected for "
-                                       "vacuum bc)")
-                lvl_of[m, ids] = l
-                done += ids.size
-                ready[ids] = False
-                counts = indptr[ids + 1] - indptr[ids]
-                tot = int(counts.sum())
-                if tot:
-                    starts = np.repeat(indptr[ids], counts)
-                    offs = (np.arange(tot) - np.repeat(
-                        np.concatenate(([0], np.cumsum(counts)[:-1])), counts))
-                    deps = de_s[starts + offs]
-                    np.subtract.at(indeg, deps, 1)
-                    hit = deps[indeg[deps] == 0]
-                    ready[hit[lvl_of[m, hit] < 0]] = True
-                l += 1
+                    normal_streaming = (self.xi[m] if g1 > 0 else -self.xi[m]) * area
+                if normal_streaming > 0.0:
+                    outflow_sum[m][outflow_cells] += normal_streaming
+                elif normal_streaming < 0.0:
+                    dependency_sources[m].append(upstream_cells)
+                    dependency_targets[m].append(downstream_cells)
+                    slot = inflow_count[m][downstream_cells]
+                    upwind_neighbors[m, downstream_cells, slot] = upstream_cells
+                    inflow_weights[m, downstream_cells, slot] = -normal_streaming
+                    inflow_count[m][downstream_cells] += 1
+        level_by_direction = _topological_sweep_levels(dependency_sources, dependency_targets, act_flat)
         # per-level width-5 tables (same layout as the 2D step branch)
-        mm, cc = np.where(lvl_of >= 0)
-        lv = lvl_of[mm, cc]
-        order = np.argsort(lv, kind="stable")
-        mm, cc, lv = mm[order], cc[order], lv[order]
-        bounds = np.searchsorted(lv, np.arange(int(lv.max()) + 2))
+        direction_indices, cell_indices = np.where(level_by_direction >= 0)
+        levels = level_by_direction[direction_indices, cell_indices]
+        order = np.argsort(levels, kind="stable")
+        direction_indices, cell_indices, levels = direction_indices[order], cell_indices[order], levels[order]
+        bounds = np.searchsorted(levels, np.arange(int(levels.max()) + 2))
         spans = list(zip(bounds[:-1], bounds[1:]))
         i32 = np.int32
         self._w_xp = xp.asarray(self.w)
@@ -564,17 +617,21 @@ class TriSNTransportSolver:
         self._fused_reduce = kernels.use_fused(xp, "block")   # latched, see _run_levels
         self._act_flat_dev = xp.asarray(act_flat)
         if self.scheme == "scb":
-            self._setup_levels_scb_tables_3d(mm, cc, spans)
+            self._setup_levels_scb_tables_3d(direction_indices, cell_indices, spans)
             return
-        pidx = mm * N + cc
+        pidx = direction_indices * N + cell_indices
         off = (np.arange(M) * N)[:, None, None]
-        nbr_f = np.where(in_coef > 0.0, off + in_nbr, 0).reshape(M * N, NIN)
-        coef = in_coef.reshape(M * N, NIN)
-        self._lv_out = outsum
+        nbr_f = np.where(
+            inflow_weights > 0.0,
+            off + upwind_neighbors,
+            0,
+        ).reshape(M * N, max_inflow_faces)
+        coef = inflow_weights.reshape(M * N, max_inflow_faces)
+        self._lv_out = outflow_sum
         self._levels = []
         for a, b in spans:
             p = pidx[a:b]
-            self._levels.append((xp.asarray(cc[a:b].astype(i32)),
+            self._levels.append(_StepLevel(xp.asarray(cell_indices[a:b].astype(i32)),
                                  xp.asarray(p.astype(i32)),
                                  xp.asarray(nbr_f[p].astype(i32)),
                                  xp.asarray(coef[p])))
@@ -583,10 +640,10 @@ class TriSNTransportSolver:
             phiM=xp.zeros(N), psiw=self._reduce_buf((M, N)),
             wcol=xp.asarray(self.w[:, None]),
             wvec=xp.asarray(self.w),
-            work=[(xp.zeros((n, NIN)), xp.zeros(n), xp.zeros(n))
+            work=[_StepWork(xp.zeros((n, max_inflow_faces)), xp.zeros(n), xp.zeros(n))
                   for n in (b - a for a, b in spans)])
 
-    def _setup_levels_scb_tables_3d(self, mm, cc, spans):
+    def _setup_levels_scb_tables_3d(self, direction_indices, cell_indices, spans):
         """SCB per-level tables for the prism levels engine: the corner external
         inflow gather (width 4 = 2 lateral half-edges + 2 axial caps) + buffers
         for the batched 3x3 corner-block sweep. The within-cell block (internal
@@ -598,8 +655,8 @@ class TriSNTransportSolver:
         ac, K = d["ac"], d["K"]
         aidx = np.full(N, -1, np.int64)
         aidx[ac] = np.arange(K)
-        rr = aidx[cc]
-        pidx = mm * K + rr
+        rr = aidx[cell_indices]
+        pidx = direction_indices * K + rr
         h2d, Acap = (h / 2.0) * dz, area / 3.0
         off = (np.arange(M) * (3 * K))[:, None, None, None]
         extn, enbr = d["ext_n"], d["ext_nbr"]
@@ -618,7 +675,7 @@ class TriSNTransportSolver:
         for a, b in spans:
             p = pidx[a:b]
             sidx = ((p[:, None] * 3) + np.arange(3)).ravel()
-            self._levels.append((xp.asarray(rr[a:b].astype(np.int32)),
+            self._levels.append(_CornerLevel(xp.asarray(rr[a:b].astype(np.int32)),
                                  xp.asarray(p.astype(np.int32)),
                                  xp.asarray(sidx.astype(np.int32)),
                                  xp.asarray(nbr_f[p].astype(np.int32)),
@@ -630,7 +687,7 @@ class TriSNTransportSolver:
             mk_w=self._reduce_buf((M, K)),
             w3col=xp.asarray(self.w[:, None] / 3.0),
             w3vec=xp.asarray(self.w / 3.0),
-            work=[(xp.zeros((n, 3, 4)), xp.zeros((n, 3)), xp.zeros(n),
+            work=[_CornerWork(xp.zeros((n, 3, 4)), xp.zeros((n, 3)), xp.zeros(n),
                    xp.zeros((n, 3)), self._reduce_buf((n, 3, 3)),
                    xp.zeros((n, 3)))
                   for n in (b - a for a, b in spans)])
@@ -663,74 +720,41 @@ class TriSNTransportSolver:
         cell, act = self._cell, self._act_flat
         scb = self.scheme == "scb"
         if not scb:
-            outsum = np.zeros((M, N))
-            in_nbr = np.zeros((M, N, 3), np.int64)
-            in_coef = np.zeros((M, N, 3))
-            in_cnt = np.zeros((M, N), np.int64)
-        es = [[] for _ in range(M)]
-        ed = [[] for _ in range(M)]
+            outflow_sum = np.zeros((M, N))
+            upwind_neighbors = np.zeros((M, N, 3), np.int64)
+            inflow_weights = np.zeros((M, N, 3))
+            inflow_count = np.zeros((M, N), np.int64)
+        dependency_sources = [[] for _ in range(M)]
+        dependency_targets = [[] for _ in range(M)]
         for (t, tn, nic, njc, nbr_act, src_act, (nxv, nyv)) in self._nbr_maps:
             src = cell[:, :, t]
             nbr = cell[nic, njc, tn]
             valid = src_act & nbr_act
-            s_all = src[src_act]
-            sv, nv = src[valid], nbr[valid]
+            outflow_cells = src[src_act]
+            downstream_cells, upstream_cells = src[valid], nbr[valid]
             for m in range(M):
-                On = (self.mu[m] * nxv + self.eta[m] * nyv) * h
-                if On > 0.0:
+                normal_streaming = (self.mu[m] * nxv + self.eta[m] * nyv) * h
+                if normal_streaming > 0.0:
                     if not scb:
-                        outsum[m][s_all] += On
-                elif On < 0.0:
-                    es[m].append(nv)
-                    ed[m].append(sv)
+                        outflow_sum[m][outflow_cells] += normal_streaming
+                elif normal_streaming < 0.0:
+                    dependency_sources[m].append(upstream_cells)
+                    dependency_targets[m].append(downstream_cells)
                     if not scb:
-                        slot = in_cnt[m][sv]
-                        in_nbr[m, sv, slot] = nv
-                        in_coef[m, sv, slot] = -On
-                        in_cnt[m][sv] += 1
-        # Kahn's algorithm per ordinate, vectorized over each level.
-        lvl_of = np.full((M, N), -1, np.int64)
-        n_act = int(act.sum())
-        for m in range(M):
-            se = (np.concatenate(es[m]) if es[m] else np.zeros(0, np.int64))
-            de = (np.concatenate(ed[m]) if ed[m] else np.zeros(0, np.int64))
-            indeg = np.zeros(N, np.int64)
-            np.add.at(indeg, de, 1)
-            perm = np.argsort(se, kind="stable")
-            se_s, de_s = se[perm], de[perm]
-            indptr = np.searchsorted(se_s, np.arange(N + 1))
-            ready = act & (indeg == 0)
-            done = 0
-            l = 0
-            while done < n_act:
-                ids = np.where(ready)[0]
-                if ids.size == 0:
-                    raise RuntimeError("sweep dependency cycle (unexpected "
-                                       "for vacuum bc)")
-                lvl_of[m, ids] = l
-                done += ids.size
-                ready[ids] = False
-                counts = indptr[ids + 1] - indptr[ids]
-                tot = int(counts.sum())
-                if tot:
-                    starts = np.repeat(indptr[ids], counts)
-                    offs = (np.arange(tot)
-                            - np.repeat(np.concatenate(
-                                ([0], np.cumsum(counts)[:-1])), counts))
-                    deps = de_s[starts + offs]
-                    np.subtract.at(indeg, deps, 1)
-                    hit = deps[indeg[deps] == 0]
-                    ready[hit[lvl_of[m, hit] < 0]] = True
-                l += 1
+                        slot = inflow_count[m][downstream_cells]
+                        upwind_neighbors[m, downstream_cells, slot] = upstream_cells
+                        inflow_weights[m, downstream_cells, slot] = -normal_streaming
+                        inflow_count[m][downstream_cells] += 1
+        level_by_direction = _topological_sweep_levels(dependency_sources, dependency_targets, act)
         # (m, cell) pairs grouped by level, concatenated across ordinates.
         # Everything below is stored PER LEVEL, pre-gathered, so the sweep loop
         # is a short fixed sequence of allocation-free out= kernels per level
         # (few launches, and safe to record into a CUDA graph on cupy).
-        mm, cc = np.where(lvl_of >= 0)
-        lv = lvl_of[mm, cc]
-        order = np.argsort(lv, kind="stable")
-        mm, cc, lv = mm[order], cc[order], lv[order]
-        bounds = np.searchsorted(lv, np.arange(int(lv.max()) + 2))
+        direction_indices, cell_indices = np.where(level_by_direction >= 0)
+        levels = level_by_direction[direction_indices, cell_indices]
+        order = np.argsort(levels, kind="stable")
+        direction_indices, cell_indices, levels = direction_indices[order], cell_indices[order], levels[order]
+        bounds = np.searchsorted(levels, np.arange(int(levels.max()) + 2))
         spans = list(zip(bounds[:-1], bounds[1:]))
         i32 = np.int32
         self._w_xp = xp.asarray(self.w)
@@ -747,8 +771,8 @@ class TriSNTransportSolver:
             ac, K = d["ac"], d["K"]
             aidx = np.full(N, -1, np.int64)
             aidx[ac] = np.arange(K)
-            rr = aidx[cc]
-            pidx = mm * K + rr
+            rr = aidx[cell_indices]
+            pidx = direction_indices * K + rr
             # inflow gather tables per (m, corner-cell, corner, face)
             extn, nbr = d["ext_n"], d["ext_nbr"]
             oe = (self.mu[:, None, None, None] * extn[None, ..., 0]
@@ -764,7 +788,7 @@ class TriSNTransportSolver:
             for a, b in spans:
                 p = pidx[a:b]
                 sidx = ((p[:, None] * 3) + np.arange(3)).ravel()
-                self._levels.append((xp.asarray(rr[a:b].astype(i32)),
+                self._levels.append(_CornerLevel(xp.asarray(rr[a:b].astype(i32)),
                                      xp.asarray(p.astype(i32)),
                                      xp.asarray(sidx.astype(i32)),
                                      xp.asarray(nbr_f[p].astype(i32)),
@@ -777,22 +801,22 @@ class TriSNTransportSolver:
                 mk_w=self._reduce_buf((M, K)),
                 w3col=xp.asarray(self.w[:, None] / 3.0),
                 w3vec=xp.asarray(self.w / 3.0),
-                work=[(xp.zeros((n, 3, 2)), xp.zeros((n, 3)), xp.zeros(n),
+                work=[_CornerWork(xp.zeros((n, 3, 2)), xp.zeros((n, 3)), xp.zeros(n),
                        xp.zeros((n, 3)), self._reduce_buf((n, 3, 3)),
                        xp.zeros((n, 3)))
                       for n in (b - a for a, b in spans)])
             self._ac_dev = xp.asarray(ac)
             self._bufs["phiN"] = xp.zeros(N)          # full-N device phi scatter
         else:
-            pidx = mm * N + cc
+            pidx = direction_indices * N + cell_indices
             off = (np.arange(M) * N)[:, None, None]
-            nbr_f = np.where(in_coef > 0.0, off + in_nbr, 0).reshape(M * N, 3)
-            coef = in_coef.reshape(M * N, 3)
-            self._lv_out = outsum                              # host, per-group denom
+            nbr_f = np.where(inflow_weights > 0.0, off + upwind_neighbors, 0).reshape(M * N, 3)
+            coef = inflow_weights.reshape(M * N, 3)
+            self._lv_out = outflow_sum                              # host, per-group denom
             self._levels = []
             for a, b in spans:
                 p = pidx[a:b]
-                self._levels.append((xp.asarray(cc[a:b].astype(i32)),
+                self._levels.append(_StepLevel(xp.asarray(cell_indices[a:b].astype(i32)),
                                      xp.asarray(p.astype(i32)),
                                      xp.asarray(nbr_f[p].astype(i32)),
                                      xp.asarray(coef[p])))
@@ -801,7 +825,7 @@ class TriSNTransportSolver:
                 phiM=xp.zeros(N), psiw=self._reduce_buf((M, N)),
                 wcol=xp.asarray(self.w[:, None]),
                 wvec=xp.asarray(self.w),
-                work=[(xp.zeros((n, 3)), xp.zeros(n), xp.zeros(n))
+                work=[_StepWork(xp.zeros((n, 3)), xp.zeros(n), xp.zeros(n))
                       for n in (b - a for a, b in spans)])
 
     def _lv_tables(self, g):
@@ -814,7 +838,7 @@ class TriSNTransportSolver:
         if self.scheme == "step":
             denom = (self.st[g].reshape(-1)[None, :] * self._measure
                      + self._lv_out).reshape(-1)
-            out = [xp.asarray(denom[asnumpy(lev[1])]) for lev in self._levels]
+            out = [xp.asarray(denom[asnumpy(lev.angular_indices)]) for lev in self._levels]
         else:
             d = self._scb
             K = d["K"]
@@ -841,7 +865,7 @@ class TriSNTransportSolver:
                         B[rK, lc, wloc[:, lc, f]] += oi[m, :, lc, f] * hi * 0.5
                 Binv[m] = np.linalg.inv(B)
             Binv = Binv.reshape(M * K, 3, 3)
-            out = [xp.asarray(Binv[asnumpy(lev[1])]) for lev in self._levels]
+            out = [xp.asarray(Binv[asnumpy(lev.angular_cell_indices)]) for lev in self._levels]
         self._lv_group[g] = out
         return out
 
@@ -859,29 +883,14 @@ class TriSNTransportSolver:
         return self.xp.zeros(0) if self._fused_reduce else self.xp.zeros(shape)
 
     def _run_levels(self, g, iface):
-        """The level loop proper: a fixed sequence of allocation-free out=
-        kernels on the persistent buffers (recordable into a CUDA graph).
-        Inputs are read from bufs['rhs'] (+ bufs['IF']); outputs land in
-        bufs['psi'] and the phi reduction buffer.
+        """Apply the scheduled sweep using persistent, allocation-free buffers.
 
-        Three of these steps are weighted contractions -- the two flux
-        reductions and the per-cell 3x3 corner matvec. The natural spelling is
-        a matmul, but cuBLAS cannot be recorded into a CUDA graph, so they used
-        to be written as broadcast-multiply into a full-size temporary followed
-        by a reduction: capturable, but ~3x the memory traffic of the
-        contraction it computes, on every level of every sweep. Since memory
-        traffic is what dominates *large* problems and launch overhead is what
-        capture saves on *small* ones, that traded the large-case path away for
-        the small-case one.
-
-        With ``_fused_reduce`` each of the three is instead a single
-        hand-written kernel (:mod:`garnet.kernels`): one pass, no temporary, and
-        still capturable -- so the penalty is removed rather than traded. The
-        broadcast form is kept as the fallback when the fused kernels are off,
-        because it is allocation-free and therefore capture-safe, which the
-        generic NumPy-style fallbacks inside ``garnet.kernels`` are not.
-        ``_fused_reduce`` is latched once at setup: it must not change between
-        capturing a graph and replaying it."""
+        The fused contractions and their broadcast fallbacks both support
+        CUDA graph capture. The choice is latched during setup so graph
+        capture and replay execute the same kernels on the same buffers.
+        Source arrays live in ``rhs`` and ``IF``; results in ``psi`` and the
+        scalar-flux reduction buffers.
+        """
         xp = self.xp
         bufs = self._bufs
         tab = self._lv_tables(g)
@@ -889,15 +898,16 @@ class TriSNTransportSolver:
         psi.fill(0.0)
         if self.scheme == "step":
             rhs = bufs["rhs"]
-            for (cc, pidx, nbr, coef), den, (gl, red, rg) in zip(
+            for level, denominator, work in zip(
                     self._levels, tab, bufs["work"]):
-                xp.take(psi, nbr, out=gl)
-                xp.multiply(gl, coef, out=gl)
-                xp.sum(gl, axis=1, out=red)
-                xp.take(rhs, cc, out=rg)
-                xp.add(red, rg, out=red)
-                xp.divide(red, den, out=red)
-                xp.put(psi, pidx, red)
+                xp.take(psi, level.upwind_indices, out=work.gathered_inflow)
+                xp.multiply(work.gathered_inflow, level.inflow_weights,
+                            out=work.gathered_inflow)
+                xp.sum(work.gathered_inflow, axis=1, out=work.incoming_sum)
+                xp.take(rhs, level.cell_indices, out=work.cell_source)
+                xp.add(work.incoming_sum, work.cell_source, out=work.incoming_sum)
+                xp.divide(work.incoming_sum, denominator, out=work.incoming_sum)
+                xp.put(psi, level.angular_indices, work.incoming_sum)
             # phi_n = sum_m w_m psi[m, n].
             if self._fused_reduce:
                 kernels.moment_gather(xp, psi.reshape(self.M, self.N),
@@ -909,23 +919,27 @@ class TriSNTransportSolver:
             return
         base = bufs["rhs"]
         IF = bufs["IF"]
-        for (rr, pidx, sidx, nbr, coef), Binv, (gl, b2, bb, ifl, bm, p3) in zip(
+        for level, inverse_corner_block, work in zip(
                 self._levels, tab, bufs["work"]):
-            xp.take(psi, nbr, out=gl)
-            xp.multiply(gl, coef, out=gl)
-            xp.sum(gl, axis=2, out=b2)
-            xp.take(base, rr, out=bb)
-            xp.add(b2, bb[:, None], out=b2)
+            xp.take(psi, level.upwind_indices, out=work.gathered_inflow)
+            xp.multiply(work.gathered_inflow, level.inflow_weights,
+                        out=work.gathered_inflow)
+            xp.sum(work.gathered_inflow, axis=2, out=work.corner_rhs)
+            xp.take(base, level.cell_indices, out=work.cell_source)
+            xp.add(work.corner_rhs, work.cell_source[:, None], out=work.corner_rhs)
             if iface:
-                xp.take(IF, pidx, axis=0, out=ifl)
-                xp.add(b2, ifl, out=b2)
-            # p3 = Binv @ b2, a batch of 3x3 matvecs.
+                xp.take(IF, level.angular_cell_indices, axis=0,
+                        out=work.interface_source)
+                xp.add(work.corner_rhs, work.interface_source, out=work.corner_rhs)
+            # Solve each cell's three coupled corner equations in one matvec.
             if self._fused_reduce:
-                kernels.batched_matvec(xp, p3, Binv, b2)
+                kernels.batched_matvec(xp, work.corner_flux, inverse_corner_block,
+                                      work.corner_rhs)
             else:
-                xp.multiply(Binv, b2[:, None, :], out=bm)
-                xp.sum(bm, axis=2, out=p3)
-            xp.put(psi, sidx, p3)
+                xp.multiply(inverse_corner_block, work.corner_rhs[:, None, :],
+                            out=work.matrix_products)
+                xp.sum(work.matrix_products, axis=2, out=work.corner_flux)
+            xp.put(psi, level.angular_indices, work.corner_flux)
         K = self._scb["K"]
         xp.sum(psi.reshape(self.M, K, 3), axis=2, out=bufs["mk"])
         # phi_k = sum_m (w_m/3) mk[m, k].
@@ -1235,13 +1249,15 @@ class TriSNTransportSolver:
                     nbr_ok = inside and (act is None or bool(act[ii, jj, tn]))
                     if not nbr_ok:                      # outer / masked boundary
                         b = boundaries.setdefault(rs, [0.0, 0.0])
-                        b[0] += o; b[1] += n
+                        b[0] += o
+                        b[1] += n
                         continue
                     rn = int(reg[ii, jj, tn])
                     if rn == rs:                        # interior to a region
                         continue
                     e = interfaces.setdefault((rs, rn), [0.0, 0.0])
-                    e[0] += o; e[1] += n
+                    e[0] += o
+                    e[1] += n
         return interfaces, boundaries
 
     def _currents_from_psi(self, g, psi):
@@ -1508,13 +1524,17 @@ class TriSNTransportSolver:
                 diag = diag + (np.where(oe > 0, oe, 0.0) * h2).sum(2)
                 diag = diag + (oi * hi * 0.5).sum(2)
                 rid = (np.arange(K)[:, None] * 3 + np.arange(3)[None, :]).ravel()
-                rows = [rid]; cols = [rid]; vals = [diag.ravel()]
+                rows = [rid]
+                cols = [rid]
+                vals = [diag.ravel()]
                 # external inflow -> neighbour corner (skip vacuum/void boundary)
                 inflow = (oe < 0) & (d["ext_nbr"] >= 0)
-                rows.append(row[inflow]); cols.append(d["ext_nbr"][inflow])
+                rows.append(row[inflow])
+                cols.append(d["ext_nbr"][inflow])
                 vals.append((oe * h2)[inflow])
                 # internal faces -> other-corner share
-                rows.append(row.ravel()); cols.append(d["int_w"].ravel())
+                rows.append(row.ravel())
+                cols.append(d["int_w"].ravel())
                 vals.append((oi * hi * 0.5).ravel())
                 Amat = sp.csr_matrix((np.concatenate(vals),
                                       (np.concatenate(rows), np.concatenate(cols))),
@@ -1584,8 +1604,10 @@ class TriSNTransportSolver:
         ax_nbr = np.full((K, 3, 2), -1)                      # [corner, lc, up/down]
         for r in range(K):
             c = ac[r]
-            k = c % nz; t = (c // nz) % 2
-            j = (c // (nz * 2)) % nc; i = c // (nz * 2 * nc)
+            k = c % nz
+            t = (c // nz) % 2
+            j = (c // (nz * 2)) % nc
+            i = c // (nz * 2 * nc)
             for lc in range(3):
                 for f, (nrm, (di, dj, tn), nbr_lc) in enumerate(ext_tab[(t, lc)]):
                     ext_n[r, lc, f] = nrm
@@ -1646,15 +1668,20 @@ class TriSNTransportSolver:
                 diag = diag + (np.where(oe > 0, oe, 0.0) * h2).sum(2)
                 diag = diag + (oi * hi * 0.5).sum(2)
                 diag = diag + (np.where(oz > 0, oz, 0.0) * Acap).sum()  # axial outflow
-                rows = [rid]; cols = [rid]; vals = [diag.ravel()]
+                rows = [rid]
+                cols = [rid]
+                vals = [diag.ravel()]
                 inflow = (oe < 0) & (d["ext_nbr"] >= 0)       # lateral inflow
-                rows.append(row[inflow]); cols.append(d["ext_nbr"][inflow])
+                rows.append(row[inflow])
+                cols.append(d["ext_nbr"][inflow])
                 vals.append((oe * h2)[inflow])
-                rows.append(row.ravel()); cols.append(d["int_w"].ravel())  # internal
+                rows.append(row.ravel())
+                cols.append(d["int_w"].ravel())  # internal
                 vals.append((oi * hi * 0.5).ravel())
                 azin = (oz < 0)[None, None, :] & (d["ax_nbr"] >= 0)  # axial inflow
                 coef = np.broadcast_to(oz * Acap, (K, 3, 2))
-                rows.append(arow[azin]); cols.append(d["ax_nbr"][azin])
+                rows.append(arow[azin])
+                cols.append(d["ax_nbr"][azin])
                 vals.append(coef[azin])
                 Amat = sp.csr_matrix((np.concatenate(vals),
                                       (np.concatenate(rows), np.concatenate(cols))),
@@ -1765,7 +1792,9 @@ class TriSNTransportSolver:
             both = src_act & nbr_act                     # interior coupled face
             if both.any():
                 w = harmonic_mean(Dv[src[both]], Dv[nbr[both]]) * kf
-                rows.append(src[both]); cols.append(nbr[both]); vals.append(-w)
+                rows.append(src[both])
+                cols.append(nbr[both])
+                vals.append(-w)
                 np.add.at(diag, src[both], w)
             vac = src_act & ~both                        # zero-incoming error face
             if vac.any():
@@ -1774,7 +1803,9 @@ class TriSNTransportSolver:
                         / (h * (h * alpha + 2.0 * np.sqrt(3.0) * Dc)))
                 np.add.at(diag, src[vac], term)
         diag = np.where(self._act_flat, diag, 1.0)       # excised: unit diagonal
-        rows.append(np.arange(N)); cols.append(np.arange(N)); vals.append(diag)
+        rows.append(np.arange(N))
+        cols.append(np.arange(N))
+        vals.append(diag)
         return sp.csr_matrix((np.concatenate([np.atleast_1d(v) for v in vals]),
                              (np.concatenate([np.atleast_1d(r) for r in rows]),
                               np.concatenate([np.atleast_1d(c) for c in cols]))),
@@ -1804,7 +1835,8 @@ class TriSNTransportSolver:
             src_act = act[:, :, t, :]
             ni, nj = ii + di, jj + dj
             if rad_per:
-                inb = np.ones((nr, nc), bool); ni2, nj2 = ni % nr, nj % nc
+                inb = np.ones((nr, nc), bool)
+                ni2, nj2 = ni % nr, nj % nc
             else:
                 inb = (ni >= 0) & (ni < nr) & (nj >= 0) & (nj < nc)
                 ni2, nj2 = np.clip(ni, 0, nr - 1), np.clip(nj, 0, nc - 1)
@@ -1815,7 +1847,9 @@ class TriSNTransportSolver:
             both = src_act & nbr_act
             if both.any():
                 w = harmonic_mean(Dv[src[both]], Dv[nbr[both]]) * kf
-                rows.append(src[both]); cols.append(nbr[both]); vals.append(-w)
+                rows.append(src[both])
+                cols.append(nbr[both])
+                vals.append(-w)
                 np.add.at(diag, src[both], w)
             vac = src_act & ~both
             if vac.any():
@@ -1826,9 +1860,11 @@ class TriSNTransportSolver:
         for dk in (+1, -1):                             # axial caps
             nk = kk + dk
             if ax_per:
-                inbz = np.ones(nz, bool); nk2 = nk % nz
+                inbz = np.ones(nz, bool)
+                nk2 = nk % nz
             else:
-                inbz = (nk >= 0) & (nk < nz); nk2 = np.clip(nk, 0, nz - 1)
+                inbz = (nk >= 0) & (nk < nz)
+                nk2 = np.clip(nk, 0, nz - 1)
             nbr = np.full((nr, nc, 2, nz), -1)
             nbr_act = np.zeros((nr, nc, 2, nz), bool)
             nbr[:, :, :, inbz] = cell[:, :, :, nk2[inbz]]
@@ -1836,7 +1872,9 @@ class TriSNTransportSolver:
             both = act & nbr_act
             if both.any():
                 wz = harmonic_mean(Dv[cell[both]], Dv[nbr[both]]) / (dz * dz)
-                rows.append(cell[both]); cols.append(nbr[both]); vals.append(-wz)
+                rows.append(cell[both])
+                cols.append(nbr[both])
+                vals.append(-wz)
                 np.add.at(diag, cell[both], wz)
             vac = act & ~both
             if vac.any():
@@ -1844,7 +1882,9 @@ class TriSNTransportSolver:
                 np.add.at(diag, cell[vac],
                           2.0 * Dc * alpha / (dz * (dz * alpha + 2.0 * Dc)))
         diag = np.where(self._act_flat, diag, 1.0)       # excised: identity
-        rows.append(np.arange(N)); cols.append(np.arange(N)); vals.append(diag)
+        rows.append(np.arange(N))
+        cols.append(np.arange(N))
+        vals.append(diag)
         return sp.csr_matrix((np.concatenate([np.atleast_1d(v) for v in vals]),
                              (np.concatenate([np.atleast_1d(r) for r in rows]),
                               np.concatenate([np.atleast_1d(c) for c in cols]))),
@@ -1955,13 +1995,19 @@ class TriSNTransportSolver:
                 beta = beta + 0.25 * np.maximum(0.0, 1.0 - 1.0 / np.maximum(tau, tiny))
                 gh = (J6[k][both] + beta * (p[n_] - p[s_])) \
                     / np.maximum(p[s_] + p[n_], tiny)
-                rows.append(s_); cols.append(s_); vals.append(Lv * (beta + gh))
-                rows.append(s_); cols.append(n_); vals.append(Lv * (-beta + gh))
+                rows.append(s_)
+                cols.append(s_)
+                vals.append(Lv * (beta + gh))
+                rows.append(s_)
+                cols.append(n_)
+                vals.append(Lv * (-beta + gh))
             bnd = src_act & ~both                # vacuum / excised face
             if bnd.any():
                 s_ = src[bnd]
                 gb = J6[k][bnd] / np.maximum(p[s_], tiny)
-                rows.append(s_); cols.append(s_); vals.append(Lv * gb)
+                rows.append(s_)
+                cols.append(s_)
+                vals.append(Lv * gb)
         A = sp.csr_matrix((np.concatenate(vals),
                            (np.concatenate(rows), np.concatenate(cols))),
                           shape=(N, N))
@@ -1999,9 +2045,11 @@ class TriSNTransportSolver:
         for dk in (+1, -1):                                   # axial caps
             nk = kk + dk
             if ax_per:
-                inbz = np.ones(nz, bool); nk2 = nk % nz
+                inbz = np.ones(nz, bool)
+                nk2 = nk % nz
             else:
-                inbz = (nk >= 0) & (nk < nz); nk2 = np.clip(nk, 0, nz - 1)
+                inbz = (nk >= 0) & (nk < nz)
+                nk2 = np.clip(nk, 0, nz - 1)
             nbr = np.full((nr, nc, 2, nz), -1)
             nbr_act = np.zeros((nr, nc, 2, nz), bool)
             nbr[:, :, :, inbz] = cell[:, :, :, nk2[inbz]]
@@ -2126,13 +2174,19 @@ class TriSNTransportSolver:
                                                 / np.maximum(tau, tiny))
                 gh = (J[both] + beta * (p[n_] - p[s_])) \
                     / np.maximum(p[s_] + p[n_], tiny)
-                rows.append(s_); cols.append(s_); vals.append(Lv * (beta + gh))
-                rows.append(s_); cols.append(n_); vals.append(Lv * (-beta + gh))
+                rows.append(s_)
+                cols.append(s_)
+                vals.append(Lv * (beta + gh))
+                rows.append(s_)
+                cols.append(n_)
+                vals.append(Lv * (-beta + gh))
             bnd = src_act & ~both
             if bnd.any():
                 s_ = src[bnd]
                 gb = J[bnd] / np.maximum(p[s_], tiny)
-                rows.append(s_); cols.append(s_); vals.append(Lv * gb)
+                rows.append(s_)
+                cols.append(s_)
+                vals.append(Lv * gb)
         return sp.csr_matrix((np.concatenate(vals),
                               (np.concatenate(rows), np.concatenate(cols))),
                              shape=(N, N))

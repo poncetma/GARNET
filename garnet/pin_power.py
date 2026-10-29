@@ -57,25 +57,62 @@ def tri_cell_centroids(raster):
     return cen
 
 
+def _layer_density(dens, raster, layer):
+    """Select the (nr, nc, 2[, nz]) power density the centroids index.
+
+    A 2-D density is returned as (n_cells,); a 3-D prismatic one as
+    (n_cells, nz) for ``layer=None``, (n_cells,) for an integer layer or the
+    axial sum for ``layer="integrate"``. Any other shape is rejected rather
+    than flattened against the 2-D centroid indices.
+    """
+    nr, nc = np.asarray(raster.material_map).shape[:2]
+    if dens.shape[:3] != (nr, nc, 2) or dens.ndim not in (3, 4):
+        raise ValueError(f"flux cell shape {dens.shape} matches neither the 2-D "
+                         f"raster ({nr}, {nc}, 2) nor its 3-D extrusion "
+                         f"({nr}, {nc}, 2, nz)")
+    if dens.ndim == 3:
+        if layer is not None:
+            raise ValueError("layer applies only to a 3-D (prismatic) flux")
+        return dens.reshape(-1)
+    nz = dens.shape[3]
+    if layer is None:
+        return dens.reshape(-1, nz)
+    if isinstance(layer, str):
+        if layer != "integrate":
+            raise ValueError(f"layer must be None, an int or 'integrate', got {layer!r}")
+        # Uniform extrusion: the layer sum is the axial integral / dz.
+        return dens.sum(axis=3).reshape(-1)
+    if isinstance(layer, bool) or int(layer) != layer or not -nz <= layer < nz:
+        raise ValueError(f"layer must be an integer in [0, {nz}), got {layer!r}")
+    return dens[..., int(layer)].reshape(-1)
+
+
 def sample_power_shape(raster, flux, materials, material_map, points,
-                       mix_material=None, mix_weight=None, active=None):
+                       mix_material=None, mix_weight=None, active=None,
+                       layer=None):
     """Homogeneous fission-power density sampled at arbitrary points.
 
     Nearest-cell lookup on the triangular mesh. Returns one value per point;
     points falling on an inactive cell return 0. This is ``S`` above -- the
     smooth shape the reconstruction rides on, and it varies WITHIN an assembly
     because the core mesh resolves sub-assembly detail.
+
+    A 3-D (prismatic, ``(G, nr, nc, 2, nz)``) flux is sampled in-plane:
+    ``layer=None`` returns ``(n_points, nz)`` (one radial shape per axial
+    layer), an integer selects that layer, and ``"integrate"`` sums the
+    layers (the axially integrated shape on the uniform extrusion). For a 2-D
+    flux ``layer`` must be None.
     """
     # kappa*Sigma_f, not nu*Sigma_f -- see garnet.power.fission_energy_xs. Power
     # lives only in the fuel (both vanish elsewhere); the difference is the
     # group weighting. Unnormalized: this is a shape, and it is the caller's
     # form-function normalization that fixes the scale.
-    dens = power_density(flux, materials, material_map,
-                         mix_material=mix_material, mix_weight=mix_weight,
-                         active=active)
+    dens = asnumpy(power_density(flux, materials, material_map,
+                                 mix_material=mix_material, mix_weight=mix_weight,
+                                 active=active))
+    val = _layer_density(np.asarray(dens), raster, layer)
 
     cen = tri_cell_centroids(raster).reshape(-1, 2)
-    val = dens.reshape(-1)
     try:
         from scipy.spatial import cKDTree
         _, idx = cKDTree(cen).query(np.asarray(points))
@@ -87,14 +124,18 @@ def sample_power_shape(raster, flux, materials, material_map, points,
 
 def reconstruct_pin_powers(raster, flux, materials, material_map, sites,
                            pin_centres, form, pin_kind=None,
-                           mix_material=None, mix_weight=None, active=None):
+                           mix_material=None, mix_weight=None, active=None,
+                           layer=None):
     """Reconstruct pin powers across a whole core.
 
     sites       : (n_sites, 2) xy of each assembly centre to reconstruct.
     pin_centres : (n_pins, 2) pin positions relative to an assembly centre.
     form        : (n_pins,) intra-assembly form function, mean 1 over fuel pins.
+    layer       : 3-D flux only, as in :func:`sample_power_shape`; None gives
+                  per-layer pin powers with a trailing ``nz`` axis.
 
-    Returns (power, xy) with shape (n_sites, n_pins) and
+    Returns (power, xy) with shape (n_sites, n_pins) -- or
+    (n_sites, n_pins, nz) for a 3-D flux with ``layer=None`` -- and
     (n_sites, n_pins, 2) -- absolute pin positions, so the result can be
     mapped or reduced without recomputing geometry.
 
@@ -109,11 +150,13 @@ def reconstruct_pin_powers(raster, flux, materials, material_map, sites,
     flat = xy.reshape(-1, 2)
     S = sample_power_shape(raster, flux, materials, material_map, flat,
                            mix_material=mix_material, mix_weight=mix_weight,
-                           active=active)
-    power = S.reshape(len(sites), len(pin_centres)) * form[None, :]
+                           active=active, layer=layer)
+    S = S.reshape((len(sites), len(pin_centres)) + S.shape[1:])
+    extra = (None,) * (S.ndim - 2)
+    power = S * form[(None, slice(None)) + extra]
     if pin_kind is not None:
         fuel = np.array([k == "fuel" for k in pin_kind])
-        power = np.where(fuel[None, :], power, 0.0)
+        power = np.where(fuel[(None, slice(None)) + extra], power, 0.0)
     return power, xy
 
 

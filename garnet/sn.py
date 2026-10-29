@@ -90,6 +90,7 @@ import time
 from dataclasses import dataclass, field
 
 import numpy as np
+from .linalg import mix_source_history
 import scipy.sparse as sp
 from scipy.linalg import solve_banded
 from scipy.sparse.linalg import factorized
@@ -196,7 +197,8 @@ def diffusion_matrix(D, removal, hx, hy, bc, active=None):
     act = np.ones((nx, ny), bool) if active is None else active
 
     def add(r, c, v):
-        rows.append(np.atleast_1d(r)); cols.append(np.atleast_1d(c))
+        rows.append(np.atleast_1d(r))
+        cols.append(np.atleast_1d(c))
         vals.append(np.atleast_1d(v))
 
     # x faces (only where both cells are active)
@@ -204,13 +206,15 @@ def diffusion_matrix(D, removal, hx, hy, bc, active=None):
     wx = np.where(act[:-1, :] & act[1:, :], wx, 0.0)
     add(idx[:-1, :].ravel(), idx[1:, :].ravel(), -wx.ravel())
     add(idx[1:, :].ravel(), idx[:-1, :].ravel(), -wx.ravel())
-    diag[:-1, :] += wx; diag[1:, :] += wx
+    diag[:-1, :] += wx
+    diag[1:, :] += wx
     # y faces
     wy = harmonic_mean(D[:, :-1], D[:, 1:]) / hy**2
     wy = np.where(act[:, :-1] & act[:, 1:], wy, 0.0)
     add(idx[:, :-1].ravel(), idx[:, 1:].ravel(), -wy.ravel())
     add(idx[:, 1:].ravel(), idx[:, :-1].ravel(), -wy.ravel())
-    diag[:, :-1] += wy; diag[:, 1:] += wy
+    diag[:, :-1] += wy
+    diag[:, 1:] += wy
     # outer boundary Robin terms
     faces = [(bc[0][0], (0, slice(None)), hx), (bc[0][1], (-1, slice(None)), hx),
              (bc[1][0], (slice(None), 0), hy), (bc[1][1], (slice(None), -1), hy)]
@@ -230,31 +234,8 @@ def diffusion_matrix(D, removal, hx, hy, bc, active=None):
 
 
 def _anderson(hist, xp=np):
-    """Anderson-accelerated next iterate from (input, raw_output) pairs (latest
-    last): the residual-minimizing affine combination that collapses the slow
-    fixed-point modes. Falls back to the plain iterate with < 2 pairs. Runs on
-    the backend ``xp`` (the small normal-equations solve stays on the host --
-    the m<=6 dot products reduce to host scalars)."""
-    raw = hist[-1][1]
-    if len(hist) < 2:
-        return raw
-    res = [gj - sj for sj, gj in hist]
-    dres = [res[i] - res[-1] for i in range(len(res) - 1)]
-    m = len(dres)
-    A = np.array([[float(xp.sum(dres[i] * dres[j])) for j in range(m)]
-                  for i in range(m)])
-    b = np.array([-float(xp.sum(dres[i] * res[-1])) for i in range(m)])
-    A[np.diag_indices(m)] += 1e-12 * (np.trace(A) + 1e-300)
-    try:
-        gamma = np.linalg.solve(A, b)
-    except np.linalg.LinAlgError:
-        return raw
-    if not np.all(np.abs(gamma) < 1e4):
-        return raw
-    out = raw.copy()
-    for j in range(m):
-        out += float(gamma[j]) * (hist[j][1] - hist[-1][1])
-    return out
+    """Mix source pairs while preserving independent storage for the result."""
+    return mix_source_history(hist, hist[-1][1], xp, copy_raw=True)
 
 
 def _cmfd_power(facs, nsf, chi, scatter, phi0, k0, xp=np):
@@ -334,7 +315,7 @@ def _pair(xp, a, b):
     return tuple(float(v) for v in asnumpy(xp.stack([a, b])))
 
 
-def _row_solve(q_ang, st_eff, c, binc, forward):
+def _row_solve(q_ang, st_eff, streaming_x, incoming_boundary_flux, forward):
     """One row's 1D diamond-difference sweep along x (the 1D reference recurrence).
 
     st_eff already folds the y-leakage and Sigma_t; c = 2|mu|/hx; q_ang the row's
@@ -342,23 +323,27 @@ def _row_solve(q_ang, st_eff, c, binc, forward):
     Returns the row's cell fluxes (physical order) and the far-wall outgoing edge.
     """
     idx = slice(None) if forward else slice(None, None, -1)
-    st = st_eff[idx]
-    q = q_ang[idx]
-    denom = st + c
-    alpha = (c - st) / denom
-    beta = 2.0 * q / denom
-    n = st.size
-    ab = np.zeros((2, n))
-    ab[0] = 1.0
-    ab[1, :-1] = -alpha[1:]
-    b = beta.copy()
-    b[0] += alpha[0] * binc
-    e = solve_banded((1, 0), ab, b)              # outgoing edge of each cell
-    e_in = np.empty(n)
-    e_in[0] = binc
-    e_in[1:] = e[:-1]
-    psi = (q + c * e_in) / denom
-    return psi[idx], e[-1]
+    effective_total_xs = st_eff[idx]
+    angular_source = q_ang[idx]
+    denom = effective_total_xs + streaming_x
+    alpha = (streaming_x - effective_total_xs) / denom
+    beta = 2.0 * angular_source / denom
+    n = effective_total_xs.size
+    banded_matrix = np.zeros((2, n))
+    banded_matrix[0] = 1.0
+    banded_matrix[1, :-1] = -alpha[1:]
+    rhs = beta.copy()
+    rhs[0] += alpha[0] * incoming_boundary_flux
+    outgoing_edge_flux = solve_banded(
+        (1, 0),
+        banded_matrix,
+        rhs,
+    )              # outgoing edge of each cell
+    incoming_edge_flux = np.empty(n)
+    incoming_edge_flux[0] = incoming_boundary_flux
+    incoming_edge_flux[1:] = outgoing_edge_flux[:-1]
+    psi = (angular_source + streaming_x * incoming_edge_flux) / denom
+    return psi[idx], outgoing_edge_flux[-1]
 
 
 @dataclass
@@ -606,18 +591,18 @@ class SNTransportSolver:
         (numpy or cupy). Extra return values are appended in the order
         (currents, psi)."""
         xp, nx, ny = self.xp, self.nx, self.ny
-        Mq = self.M // 4
-        qf = xp.asarray(q).ravel()
-        stf = xp.asarray(st_g).ravel()
+        directions_per_quadrant = self.M // 4
+        source_flat = xp.asarray(q).ravel()
+        total_xs_flat = xp.asarray(st_g).ravel()
         phi_sw = xp.zeros((4, nx * ny))
-        ex = xp.empty((4, Mq, ny))                # x-edge flux at the wavefront, per row
-        ey = xp.empty((4, Mq, nx))                # y-edge flux at the wavefront, per column
+        x_edge_flux = xp.empty((4, directions_per_quadrant, ny))  # per row
+        y_edge_flux = xp.empty((4, directions_per_quadrant, nx))  # per column
         for qd, (fx, fy) in enumerate(_QUADS):
             sel = self._qsel[qd]
             xin = np.asarray(inc["x0" if fx else "x1"])[sel]
             yin = np.asarray(inc["y0" if fy else "y1"])[sel]
-            ex[qd] = xp.asarray(np.ascontiguousarray(xin[:, ::1 if fy else -1]))
-            ey[qd] = xp.asarray(np.ascontiguousarray(yin[:, ::1 if fx else -1]))
+            x_edge_flux[qd] = xp.asarray(np.ascontiguousarray(xin[:, ::1 if fy else -1]))
+            y_edge_flux[qd] = xp.asarray(np.ascontiguousarray(yin[:, ::1 if fx else -1]))
         qa_sw = None
         if q_ang is not None:
             # Per-quadrant flip into swept coords: physical (i, j) = (isw or
@@ -628,31 +613,33 @@ class SNTransportSolver:
                 xp.ascontiguousarray(
                     qa[xp.asarray(self._qsel[qd])][:, ::(1 if fx else -1),
                                                    ::(1 if fy else -1)]
-                ).reshape(Mq, nx * ny)
+                ).reshape(directions_per_quadrant, nx * ny)
                 for qd, (fx, fy) in enumerate(_QUADS)])
-        psi_sw = xp.zeros((4, Mq, nx * ny)) if want_psi else None
-        a, b, w = self._aq, self._bq, self._wq
+        psi_sw = xp.zeros((4, directions_per_quadrant, nx * ny)) if want_psi else None
+        streaming_x, streaming_y, w = self._aq, self._bq, self._wq
         if currents:
             wmu, weta = self._wmuq, self._wetaq
             jx_sw = xp.zeros((4, nx + 1, ny))     # per-quadrant faces, swept coords
             jy_sw = xp.zeros((4, nx, ny + 1))
-            jx_sw[:, 0, :] = (wmu * ex).sum(axis=1)   # incoming boundary faces
-            jy_sw[:, :, 0] = (weta * ey).sum(axis=1)
-        for isw, jsw, fsw, fph in self._diags:
-            qv = qf[fph][:, None, :]              # (4, 1, nd)
+            jx_sw[:, 0, :] = (wmu * x_edge_flux).sum(axis=1)   # incoming boundary faces
+            jy_sw[:, :, 0] = (weta * y_edge_flux).sum(axis=1)
+        for isw, jsw, sweep_flat_indices, physical_flat_indices in self._diags:
+            cell_source = source_flat[physical_flat_indices][:, None, :]              # (4, 1, nd)
             if qa_sw is not None:
-                qv = qv + qa_sw[:, :, fsw]        # (4, Mq, nd)
-            stv = stf[fph][:, None, :]
-            exv = ex[:, :, jsw]                   # (4, Mq, nd)
-            eyv = ey[:, :, isw]
-            psi = (qv + a * exv + b * eyv) / (stv + a + b)
-            exn = 2.0 * psi - exv
-            eyn = 2.0 * psi - eyv
-            ex[:, :, jsw] = exn
-            ey[:, :, isw] = eyn
-            phi_sw[:, fsw] = (w * psi).sum(axis=1)
+                cell_source = cell_source + qa_sw[:, :, sweep_flat_indices]        # (4, Mq, nd)
+            cell_total_xs = total_xs_flat[physical_flat_indices][:, None, :]
+            incoming_x_flux = x_edge_flux[:, :, jsw]                   # (4, Mq, nd)
+            incoming_y_flux = y_edge_flux[:, :, isw]
+            psi = ((cell_source + streaming_x * incoming_x_flux
+                    + streaming_y * incoming_y_flux)
+                   / (cell_total_xs + streaming_x + streaming_y))
+            exn = 2.0 * psi - incoming_x_flux
+            eyn = 2.0 * psi - incoming_y_flux
+            x_edge_flux[:, :, jsw] = exn
+            y_edge_flux[:, :, isw] = eyn
+            phi_sw[:, sweep_flat_indices] = (w * psi).sum(axis=1)
             if want_psi:
-                psi_sw[:, :, fsw] = psi
+                psi_sw[:, :, sweep_flat_indices] = psi
             if currents:
                 jx_sw[:, isw + 1, jsw] = (wmu * exn).sum(axis=1)
                 jy_sw[:, isw, jsw + 1] = (weta * eyn).sum(axis=1)
@@ -660,7 +647,7 @@ class SNTransportSolver:
         pq = phi_sw.reshape(4, nx, ny)
         out = {"x0": np.zeros((self.M, ny)), "x1": np.zeros((self.M, ny)),
                "y0": np.zeros((self.M, nx)), "y1": np.zeros((self.M, nx))}
-        exh, eyh = asnumpy(ex), asnumpy(ey)       # final wavefront = far-wall edges
+        exh, eyh = asnumpy(x_edge_flux), asnumpy(y_edge_flux)       # final wavefront = far-wall edges
         if currents:
             Jx = xp.zeros((nx + 1, ny))
             Jy = xp.zeros((nx, ny + 1))
@@ -674,7 +661,7 @@ class SNTransportSolver:
             out["y1" if fy else "y0"][sel] = eyh[qd][:, ::sx]
             if want_psi:
                 psi_out[xp.asarray(sel)] = \
-                    psi_sw[qd].reshape(Mq, nx, ny)[:, ::sx, ::sy]
+                    psi_sw[qd].reshape(directions_per_quadrant, nx, ny)[:, ::sx, ::sy]
             if currents:
                 Jx = Jx + jx_sw[qd][::sx, ::sy]   # swept face s -> physical nx - s
                 Jy = Jy + jy_sw[qd][::sx, ::sy]
@@ -801,7 +788,7 @@ class SNTransportSolver:
         return self._apply_diff_solver(self._dsa_factor(g), r)
 
     # ---- CMFD outer acceleration ------------------------------------------
-    def _cmfd_factor(self, g, p, Jx, Jy, shift=0.0):
+    def _cmfd_factor(self, g, reference_flux, Jx, Jy, shift=0.0):
         """LU of the group-g drift-corrected diffusion operator built from the
         transport flux p and face net currents (Jx, Jy): interior face current
         model J = -beta (phi_R - phi_L) + gamma (phi_R + phi_L) with beta the
@@ -834,33 +821,47 @@ class SNTransportSolver:
         rows, cols, vals = [], [], []
 
         def add(r, c, v):
-            rows.append(np.asarray(r).ravel()); cols.append(np.asarray(c).ravel())
+            rows.append(np.asarray(r).ravel())
+            cols.append(np.asarray(c).ravel())
             vals.append(np.asarray(v).ravel())
 
         for axis, (J, h) in enumerate(((Jx, hx), (Jy, hy))):
             if axis == 0:
-                beta = (harmonic_mean(D[:-1, :], D[1:, :]) / h
+                diffusion_coupling = (harmonic_mean(D[:-1, :], D[1:, :]) / h
                         + theta(st[:-1, :] * h, st[1:, :] * h))
-                pL, pR = p[:-1, :], p[1:, :]
-                L, R = idx[:-1, :], idx[1:, :]
-                Jin = J[1:nx, :]
-                b0, b1 = J[0, :], J[nx, :]
-                c0, c1 = idx[0, :], idx[-1, :]
-                p0, p1 = p[0, :], p[-1, :]
+                flux_low, flux_high = reference_flux[:-1, :], reference_flux[1:, :]
+                low_cells, high_cells = idx[:-1, :], idx[1:, :]
+                interior_current = J[1:nx, :]
+                current_low, current_high = J[0, :], J[nx, :]
+                boundary_low_cells, boundary_high_cells = idx[0, :], idx[-1, :]
+                boundary_low_flux, boundary_high_flux = reference_flux[0, :], reference_flux[-1, :]
             else:
-                beta = (harmonic_mean(D[:, :-1], D[:, 1:]) / h
+                diffusion_coupling = (harmonic_mean(D[:, :-1], D[:, 1:]) / h
                         + theta(st[:, :-1] * h, st[:, 1:] * h))
-                pL, pR = p[:, :-1], p[:, 1:]
-                L, R = idx[:, :-1], idx[:, 1:]
-                Jin = J[:, 1:ny]
-                b0, b1 = J[:, 0], J[:, ny]
-                c0, c1 = idx[:, 0], idx[:, -1]
-                p0, p1 = p[:, 0], p[:, -1]
-            gh = (Jin + beta * (pR - pL)) / np.maximum(pL + pR, tiny)
-            add(L, L, (beta + gh) / h); add(L, R, (-beta + gh) / h)
-            add(R, R, (beta - gh) / h); add(R, L, (-beta - gh) / h)
-            add(c0, c0, -(b0 / np.maximum(p0, tiny)) / h)      # boundary leakage
-            add(c1, c1, (b1 / np.maximum(p1, tiny)) / h)
+                flux_low, flux_high = reference_flux[:, :-1], reference_flux[:, 1:]
+                low_cells, high_cells = idx[:, :-1], idx[:, 1:]
+                interior_current = J[:, 1:ny]
+                current_low, current_high = J[:, 0], J[:, ny]
+                boundary_low_cells, boundary_high_cells = idx[:, 0], idx[:, -1]
+                boundary_low_flux, boundary_high_flux = reference_flux[:, 0], reference_flux[:, -1]
+            # Fit the drift so this face reproduces the reference transport current.
+            drift_coefficient = (
+                interior_current + diffusion_coupling * (flux_high - flux_low)
+            ) / np.maximum(flux_low + flux_high, tiny)
+            add(low_cells, low_cells, (diffusion_coupling + drift_coefficient) / h)
+            add(low_cells, high_cells, (-diffusion_coupling + drift_coefficient) / h)
+            add(high_cells, high_cells, (diffusion_coupling - drift_coefficient) / h)
+            add(high_cells, low_cells, (-diffusion_coupling - drift_coefficient) / h)
+            add(
+                boundary_low_cells,
+                boundary_low_cells,
+                -(current_low / np.maximum(boundary_low_flux, tiny)) / h,
+            )      # boundary leakage
+            add(
+                boundary_high_cells,
+                boundary_high_cells,
+                (current_high / np.maximum(boundary_high_flux, tiny)) / h,
+            )
         add(idx, idx, rem)
         A = sp.csr_matrix((np.concatenate(vals),
                            (np.concatenate(rows), np.concatenate(cols))),

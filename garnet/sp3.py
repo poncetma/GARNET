@@ -14,7 +14,19 @@ doi:10.1016/j.anucene.2024.110675; its coefficient changes are noted below.
 
 from __future__ import annotations
 
-from .stencil import BC_REFLECTIVE, BC_VACUUM, BC_ZERO_FLUX, GroupOperator
+from .spn import _SPN_G, _apply_marshak, _marshak_faces, _strip_vacuum
+from .stencil import (BC_REFLECTIVE, BC_VACUUM, BC_ZERO_FLUX, GroupOperator,
+                      _face_valid, normalize_bc)
+
+# Coupled Marshak vacuum matrix of the SP3 block in its (Phi1, phi2) moments
+# with the second row scaled by 5 -- Brantley & Larsen's
+#     J1 = 1/2 Phi1 - 3/8 phi2,     J2 = -3/40 Phi1 + 21/40 phi2
+# (J_k = -n.D_k grad of moment k) with the J2 row times 5. It is the U-form
+# SP3 matrix _SPN_G[1] = [[1/2, -1/8], [-1/8, 7/24]] carried through the same
+# congruence T = diag(1, 3) (U = T (Phi1, phi2)) that maps the U-form block
+# onto this one, so it is symmetric (and positive definite) like the block.
+_SP3_MARSHAK_G = [[_SPN_G[1][0][0], 3.0 * _SPN_G[1][0][1]],
+                  [3.0 * _SPN_G[1][1][0], 9.0 * _SPN_G[1][1][1]]]
 
 
 class SP3GroupOperator:
@@ -39,8 +51,23 @@ class SP3GroupOperator:
 
     Boundary conditions: "reflective" is exact for SPN; "zero-flux" imposes
     phi = 0 on the surface for both moments (a good approximation whenever the
-    physical vacuum boundary sits behind a reflector; Marshak vacuum
-    conditions, which couple the moments at the boundary, are not implemented).
+    physical vacuum boundary sits behind a reflector). "vacuum" is the coupled
+    Marshak condition of Brantley & Larsen (``marshak``, below), which mixes
+    the two moments on the surface and keeps the block symmetric; the older
+    per-moment Robin approximation (alpha = 1/2 on each moment separately,
+    120-250 pcm off on small leaky cores) remains available as
+    ``marshak=False``.
+
+    marshak : None (default) applies the coupled Marshak condition on every
+    vacuum face -- box faces with bc "vacuum" and, with an ``active`` mask and
+    ``mask_bc="vacuum"``, the core/void faces -- whenever it is available:
+    the "sp3" variant on a Cartesian ``GroupOperator`` grid without a
+    ``hybrid_mask``. Elsewhere it falls back to the per-moment Robin term: the
+    SDP1 Marshak matrix is not symmetric in this basis (use
+    ``SDPNEigenSolver`` order 1 with ``marshak_vacuum=True`` for it), the
+    triangular/cylindrical stencils have no coupled face term, and a hybrid
+    block must stay pure diffusion outside its mask. True requires it (raises
+    where unavailable); False selects the per-moment Robin term.
 
     The spatial discretization of both moment operators is supplied by
     ``op_cls`` (default :class:`~garnet.stencil.GroupOperator`, the structured
@@ -54,8 +81,28 @@ class SP3GroupOperator:
     def __init__(self, xp, grid, D1, sigma_t, removal, bc=BC_ZERO_FLUX,
                  active=None, mask_bc=BC_VACUUM, op_cls=None, variant="sp3",
                  theta=None, hybrid_mask=None, hybrid_mask_bc=BC_REFLECTIVE,
-                 hybrid_confine=False):
+                 hybrid_confine=False, marshak=None):
         self.xp = xp
+        cartesian = (op_cls in (None, GroupOperator) and getattr(
+            grid, "cylindrical_metrics", lambda: None)() is None)
+        marshak_ok = variant == "sp3" and cartesian and hybrid_mask is None
+        if marshak and not marshak_ok:
+            raise ValueError("the coupled Marshak vacuum is available only for "
+                             "the 'sp3' variant on a Cartesian GroupOperator "
+                             "grid without hybrid_mask")
+        self.marshak_vacuum = False
+        if marshak_ok and marshak is not False:
+            bc_n = normalize_bc(bc)
+            mask_vacuum = (active is not None
+                           and _face_valid(mask_bc) == BC_VACUUM)
+            self.marshak_vacuum = (mask_vacuum or any(
+                f == BC_VACUUM for axis in bc_n for f in axis))
+        if self.marshak_vacuum:
+            # The coupled term below takes over the vacuum leakage, so the
+            # moment operators see those faces as reflective.
+            bc = _strip_vacuum(bc_n)
+            if mask_vacuum:
+                mask_bc = BC_REFLECTIVE
         op_cls = op_cls or GroupOperator
         # Hybrid SP3/diffusion: run transport (the second moment phi2) only where
         # a per-cell mask marks it -- e.g. the control-drum absorber -- and plain
@@ -159,8 +206,27 @@ class SP3GroupOperator:
         if hm is not None:
             self.hybrid_mask = hm.astype(self.coupling.dtype)
             self.coupling = self.coupling * self.hybrid_mask
+        # Excised cells: unit diagonal in both moment operators and no moment
+        # coupling, so a zero source keeps them exactly zero.
+        if active is not None:
+            self.coupling = xp.where(xp.asarray(active).astype(bool),
+                                     self.coupling, 0.0)
         self.rhs_weight = w
-        self.inv_diag = xp.stack([self.moment1.inv_diag, self.moment2.inv_diag / 5.0])
+        self.marshak = None
+        if self.marshak_vacuum:
+            # Leakage per volume on each vacuum-face cell, in the 5x-scaled
+            # row form (D2 enters as 5*D2), added after the coupling kernel.
+            self.marshak = _marshak_faces(
+                xp, grid, bc_n, [D1, 5.0 * D2], _SP3_MARSHAK_G, active=active,
+                mask_bc=BC_VACUUM if mask_vacuum else None)
+            diag = xp.stack([self.moment1.diag, 5.0 * self.moment2.diag])
+            for index, K in self.marshak:
+                for i in range(2):
+                    diag[i][index] += K[:, i, i]
+            self.inv_diag = 1.0 / diag
+        else:
+            self.inv_diag = xp.stack([self.moment1.inv_diag,
+                                      self.moment2.inv_diag / 5.0])
 
     def apply(self, u):
         """Return the block operator applied to u = (Phi1, phi2).
@@ -181,4 +247,7 @@ class SP3GroupOperator:
         else:
             out[0] = self.moment1.apply(u[0])
             out[1] = self.moment2.apply(u[1])
-        return kernels.sp3_couple(self.xp, out, u, self.coupling)
+        out = kernels.sp3_couple(self.xp, out, u, self.coupling)
+        if self.marshak is not None:
+            _apply_marshak(self.xp, out, u, self.marshak)   # K symmetric
+        return out

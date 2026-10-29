@@ -24,34 +24,15 @@ sensitivities and weak perturbations; use a direct re-solve (or SPH-corrected
 constants) for drum worth.
 
 Works for the diffusion-family solvers (DiffusionEigenSolver and its Hex/Tri
-subclasses), whose group state is the scalar flux; SP3's moment-pair state is
-not supported here.
+subclasses), whose group state is the scalar flux; the moment-vector state of
+the SP3/SPN/SDPN solvers is not supported here (TypeError). On cylindrical
+grids the loss and fission operators carry the solver's volume weight, the
+same discrete convention the eigen-solve and :mod:`garnet.quasistatic` use.
 """
 
 from __future__ import annotations
 
-
-def _loss_apply(solver, flux):
-    """(A phi)_g = op_g.apply(phi_g) - sum_{g'!=g} Sigma_s[g'->g] phi_{g'}."""
-    G = solver.n_groups
-    out = []
-    for g in range(G):
-        a = solver.ops[g].apply(flux[g])
-        for gf in range(G):
-            s = solver.sigma_s[gf][g]
-            if gf != g and s is not None:
-                a = a - s * flux[gf]
-        out.append(a)
-    return out
-
-
-def _fission_apply(solver, flux):
-    """(F phi)_g = chi_g * sum_{g'} nuSigma_f,g' phi_{g'}."""
-    G = solver.n_groups
-    production = solver.nu_sigma_f[0] * flux[0]
-    for g in range(1, G):
-        production = production + solver.nu_sigma_f[g] * flux[g]
-    return [solver.chi[g] * production for g in range(G)]
+from .quasistatic import _fission_apply, _loss_apply, _require_scalar_flux
 
 
 def first_order_reactivity(ref_solver, forward, adjoint, perturbed_solver) -> float:
@@ -70,6 +51,9 @@ def first_order_reactivity(ref_solver, forward, adjoint, perturbed_solver) -> fl
     the diffusion coefficient's effect on leakage -- because it applies the
     perturbed operators directly to the reference flux.
     """
+    _require_scalar_flux(ref_solver, "ref_solver", "first_order_reactivity")
+    _require_scalar_flux(perturbed_solver, "perturbed_solver",
+                         "first_order_reactivity")
     if perturbed_solver.n_groups != ref_solver.n_groups:
         raise ValueError("reference and perturbed solvers differ in group count")
     if perturbed_solver.grid.shape != ref_solver.grid.shape:

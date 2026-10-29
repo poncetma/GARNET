@@ -19,8 +19,10 @@ iterations cost only a handful of stencil applications.
 
 The same outer loop solves the adjoint (importance) problem via
 ``solve(adjoint=True)``. The fission and scattering couplings transpose; the
-Cartesian ADF leakage operator also uses its algebraic transpose. The adjoint
-flux weights first-order perturbation theory and adjoint kinetics parameters.
+Cartesian ADF leakage operator and the non-symmetric SDPN blocks also use their
+algebraic transpose, and the block solvers swap their source and flux-read-out
+moment weights. The adjoint flux weights first-order perturbation theory and
+adjoint kinetics parameters.
 
 Everything — fluxes, coupling coefficients, sources — lives on the device for
 the entire solve; only per-iteration convergence scalars cross the PCIe bus.
@@ -38,41 +40,13 @@ from .backend import asnumpy, device_name, get_backend, synchronize
 from .blend import MaterialBlend
 from .grid import Grid
 from . import kernels
-from .linalg import get_linear_solver, neumann_preconditioner, pcg
+from .linalg import (bicgstab, get_linear_solver, neumann_preconditioner, pcg,
+                     mix_source_history as _anderson_source)
 from .materials import Material
 from .sp3 import SP3GroupOperator
 from .spn import (CongruentSDPNOperator, SDPNGroupOperator, _SDPN_C, _SDPN_G,
                   _SPN_C, _SPN_G, _congruence_available, _diag_similarity)
 from .stencil import BC_VACUUM, BC_ZERO_FLUX, GroupOperator
-
-
-def _anderson_source(hist, raw, xp):
-    """Anderson-accelerated next iterate from a history of (input, raw_output).
-
-    Given the recent (S_j, G(S_j)) pairs (latest last) and the latest raw iterate
-    G(S), return the residual-minimizing affine combination that collapses the
-    slow fixed-point modes. With fewer than two pairs it is the plain iterate.
-    A tiny diagonal regularization and a magnitude guard on the coefficients keep
-    it robust; the fixed point (and hence the eigenpair) is unchanged.
-    """
-    if len(hist) < 2:
-        return raw
-    res = [Gj - Sj for Sj, Gj in hist]                    # residuals f_j = G_j - S_j
-    dres = [res[i] - res[-1] for i in range(len(res) - 1)]
-    m = len(dres)
-    A = np.array([[float(xp.sum(dres[i] * dres[j])) for j in range(m)] for i in range(m)])
-    b = np.array([-float(xp.sum(dres[i] * res[-1])) for i in range(m)])
-    A[np.diag_indices(m)] += 1e-12 * (np.trace(A) + 1e-300)
-    try:
-        gamma = np.linalg.solve(A, b)
-    except np.linalg.LinAlgError:
-        return raw
-    if not np.all(np.abs(gamma) < 1e4):
-        return raw
-    out = raw
-    for j in range(m):
-        out = out + float(gamma[j]) * (hist[j][1] - hist[-1][1])
-    return out
 
 
 @dataclass
@@ -101,21 +75,21 @@ class Result:
 
 
 def scatter_stack(xp, sigma_s, G, adjoint, shape, dtype):
-    """Dense (G, G, \\*shape) in-scatter matrix: ``S[g][gf]`` is the g' -> g
-    coupling, diagonal zeroed and absent couplings materialized as zeros.
+    """Dense in-scatter fields with shape (target groups, source groups, *shape).
 
-    Forward that is ``sigma_s[gf][g]``; the adjoint transposes to
-    ``sigma_s[g][gf]``. Kept a module-level function so the transpose -- the
-    part that a batched rewrite can silently get backwards, and that only the
-    adjoint solves would notice -- is testable without a GPU.
+    The diagonal and absent couplings are zero. Forward assembly reads
+    sigma_s[source][target]; adjoint assembly reads sigma_s[target][source].
+    Explicit axis names make this transpose testable independently of GPU
+    source contractions.
     """
-    S = xp.zeros((G, G) + tuple(shape), dtype=dtype)
-    for g in range(G):
-        for gf in range(G):
-            sc = sigma_s[g][gf] if adjoint else sigma_s[gf][g]
-            if gf != g and sc is not None:
-                S[g, gf] = sc
-    return S
+    scatter_to_from = xp.zeros((G, G) + tuple(shape), dtype=dtype)
+    for target_group in range(G):
+        for source_group in range(G):
+            scatter = (sigma_s[target_group][source_group] if adjoint
+                       else sigma_s[source_group][target_group])
+            if source_group != target_group and scatter is not None:
+                scatter_to_from[target_group, source_group] = scatter
+    return scatter_to_from
 
 
 class Fields:
@@ -216,8 +190,32 @@ class Fields:
         self.sigma_s = [[lin(sig_s[:, gf, gt]) if np.any(sig_s[:, gf, gt]) else None
                          for gt in range(G)] for gf in range(G)]
 
+        # The per-material tables, for xs_update hooks that evaluate each
+        # material's law separately before blending (ThermalFeedback).
+        self.materials = mats
         if xs_update is not None:
             xs_update(self)
+
+    def exclude_inactive(self, active):
+        """Remove the group-coupling sources of excised (inactive) cells.
+
+        The operators decouple an excised cell and give it a unit diagonal,
+        which keeps its flux at zero only if nothing sources it. Whatever
+        material the map assigns there, its fission production and emission
+        (nu_sigma_f, chi) and in-scatter would otherwise drive an isolated
+        one-cell eigenproblem phi = (nu_sigma_f / k) phi -- a fuel material
+        with nu_sigma_f = 1.5 under the mask reported k = 1.5. The arrays are
+        replaced (not modified in place), so shared tables stay untouched.
+        """
+        xp = kernels.module_of(self.nu_sigma_f[0])
+        keep = xp.asarray(active).astype(bool)
+        mask = lambda field: xp.where(keep, field, 0.0).astype(field.dtype)
+        self.nu_sigma_f = [mask(f) for f in self.nu_sigma_f]
+        self.chi = [mask(f) for f in self.chi]
+        self.sigma_s = [[None if f is None else mask(f) for f in row]
+                        for row in self.sigma_s]
+        self.fissile = bool(any(float(xp.max(f)) > 0.0
+                                for f in self.nu_sigma_f))
 
     def fission_source(self, phi_by_group):
         """Sum_g nuSigma_f,g * phi_g over an iterable of per-group fluxes."""
@@ -253,9 +251,11 @@ class _PowerIterationSolver:
                    inner CG (0 = plain Jacobi, the default). Each degree adds
                    one stencil apply per CG iteration but cuts the iteration
                    count -- and with it the global reductions that are the
-                   GPU's only synchronization points. Degree 2-3 is a good
+                   GPU's only synchronization points. Degree 1 or 3 is a good
                    setting (cf. E et al., NED 320 (2017), where degree-3
-                   Neumann-PCG was the fastest GPU solver for 2e4-3e6 cells).
+                   Neumann-PCG was the fastest GPU solver for 2e4-3e6 cells);
+                   the splitting is damped automatically so odd degrees stay
+                   SPD on the SP5/SP7 blocks too (see neumann_preconditioner).
     linear_solver : "cg" (default), "gmres", or "bicgstab" -- the within-group
                    Krylov solver. CG applies to symmetric positive definite
                    operators; nonsymmetric ADF or cylindrical divergence
@@ -294,6 +294,13 @@ class _PowerIterationSolver:
         self.hybrid_confine = bool(hybrid_confine)
         self.symmetric_operator = bool(symmetric_operator)
         self._linsolve = get_linear_solver(linear_solver)
+        # BiCGStab's residual is non-monotone: it stops anywhere below rtol, so
+        # its solve-to-solve error is irregular at the rtol level. That noise
+        # is invisible to plain power iteration but poisons the Anderson
+        # history of the outer loop (default SDP3 on BIBLIS stalled at
+        # src_err ~3e-4 for 2000 outers); one decade of extra inner accuracy
+        # restores the GMRES outer count (BIBLIS SDP3: 28 outers vs 30).
+        self._inner_rtol_scale = 0.1 if self._linsolve is bicgstab else 1.0
         self._precond_degree = int(precond_degree)
         if (not self.symmetric_operator and self._linsolve is pcg
                 and getattr(grid, "geometry", "cartesian") == "cylindrical"):
@@ -309,6 +316,8 @@ class _PowerIterationSolver:
         f = Fields(xp, grid, materials, material_map, self.dtype,
                    mix_material=mix_material, mix_weight=mix_weight,
                    xs_update=xs_update)
+        if active is not None:
+            f.exclude_inactive(active)
         if not f.fissile:
             raise ValueError("no fissile material: k-eigenvalue problem is undefined")
         self.fields = f
@@ -337,16 +346,23 @@ class _PowerIterationSolver:
         """Per-group solution state, as a list of device arrays."""
         raise NotImplementedError
 
-    def _rhs(self, g, q0):
-        """Within-group right-hand side from the isotropic source q0."""
+    def _rhs(self, g, q0, adjoint=False):
+        """Within-group right-hand side from the isotropic source q0.
+
+        The block solvers couple groups through a rank-one map: the scalar
+        source enters the moment rows by one weight vector (``_rhs``) and the
+        scalar flux is read back by another (``_phi``). The transposed
+        (adjoint) problem exchanges the two, hence the ``adjoint`` flag.
+        """
         raise NotImplementedError
 
-    def _phi(self, state_g):
-        """Scalar flux phi0 of one group's state (view or expression)."""
+    def _phi(self, state_g, adjoint=False):
+        """Scalar flux phi0 of one group's state (view or expression); with
+        ``adjoint`` the scalar importance read by the transposed coupling."""
         raise NotImplementedError
 
     # -----------------------------------------------------------------------
-    def _make_group_batch(self, state, adjoint, prod):
+    def _make_group_batch(self, state, adjoint, production_weights):
         r"""Stacked group data for the batched source assembly, or None.
 
         The per-group Python loops in ``solve`` cost O(G^2) kernel launches per
@@ -366,7 +382,7 @@ class _PowerIterationSolver:
         xp, G = self.xp, self.n_groups
         if not kernels.use_fused(xp, "groups") or G < 3:
             return None
-        phi0 = self._phi(state[0])
+        phi0 = self._phi(state[0], adjoint)
         nbytes = G * G * phi0.size * phi0.dtype.itemsize
         try:
             free = xp.cuda.Device().mem_info[0]
@@ -374,12 +390,13 @@ class _PowerIterationSolver:
             free = 0
         if free and nbytes > free // 8:
             return None                       # not worth the footprint
-        S = scatter_stack(xp, self.sigma_s, G, adjoint, phi0.shape, phi0.dtype)
-        W = xp.stack([prod[g] for g in range(G)])
-        phi = xp.stack([self._phi(state[g]) for g in range(G)])
-        return {"S": S, "W": W, "phi": phi}
+        scatter_to_from = scatter_stack(xp, self.sigma_s, G, adjoint, phi0.shape, phi0.dtype)
+        production_stack = xp.stack([production_weights[g] for g in range(G)])
+        phi = xp.stack([self._phi(state[g], adjoint) for g in range(G)])
+        return {"scatter_to_from": scatter_to_from,
+                "production_weights": production_stack, "phi": phi}
 
-    def _fission_source(self, state, weight):
+    def _fission_source(self, state, weight, adjoint=False):
         """Sum_g weight[g] * phi0_g -- the field that drives the outer loop.
 
         Forward: weight = nu_sigma_f (fission neutron production per cell).
@@ -387,9 +404,9 @@ class _PowerIterationSolver:
         nu_sigma_f and collects it against chi, so the driving field is the
         chi-weighted importance).
         """
-        src = weight[0] * self._phi(state[0])
+        src = weight[0] * self._phi(state[0], adjoint)
         for g in range(1, self.n_groups):
-            src += weight[g] * self._phi(state[g])
+            src += weight[g] * self._phi(state[g], adjoint)
         return src
 
     def solve(self, tol_k: float = 1e-7, tol_source: float = 1e-6,
@@ -406,6 +423,16 @@ class _PowerIterationSolver:
         near 1 for a loosely-coupled core (hundreds of outers), whereas Anderson
         collapses the slow modes into a handful. ``anderson_depth`` <= 1 recovers
         the plain power iteration; the converged eigenpair is identical either way.
+        If Anderson keeps restarting without progress (a map made noisy by its
+        inner solves) the loop falls back to plain power iteration.
+
+        Stopping test: with Anderson it is on the per-outer change (|dk|,
+        src_err). Plain power iteration (anderson_depth <= 1, and always for
+        the adjoint) converges geometrically at the dominance ratio rho, so its
+        remaining error is ~ change / (1 - rho); there both tolerances are
+        multiplied by (1 - rho_hat), rho_hat estimated from the src_err history,
+        so tol_source bounds the error rather than the step (floored at what
+        the dtype / inner_rtol_floor can resolve).
 
         adjoint : solve the adjoint (importance) k-eigenproblem M* phi* =
         (1/k) F* phi* instead of the forward one. Fission swaps the production
@@ -413,7 +440,11 @@ class _PowerIterationSolver:
         (sigma_s[g'->g] becomes sigma_s[g->g']). The dominant eigenvalue is
         identical to the forward k; the eigenvector is the adjoint flux, used
         for adjoint-weighted kinetics and first-order perturbation theory.
-        Cartesian ADF diffusion also transposes the nonsymmetric leakage.
+        Cartesian ADF diffusion and the non-symmetric SDPN blocks (SDP3 with
+        vacuum faces, any order with Marshak) also transpose the within-group
+        operator, and the block solvers exchange their source and scalar-flux
+        moment weights; for them the returned flux is the scalar importance
+        src_weights . U*.
         """
         xp, G = self.xp, self.n_groups
         synchronize(xp)
@@ -428,8 +459,8 @@ class _PowerIterationSolver:
         # Fission couples groups as F[g,g'] = chi_g * nu_sigma_f_g'. Its
         # transpose F* moves chi to the production weight and nu_sigma_f to the
         # emission spectrum; scattering transposes independently (below).
-        prod = self.chi if adjoint else self.nu_sigma_f
-        emit = self.nu_sigma_f if adjoint else self.chi
+        production_weights = self.chi if adjoint else self.nu_sigma_f
+        emission_spectrum = self.nu_sigma_f if adjoint else self.chi
 
         # state0 warm-starts the power iteration from a previous solve's group
         # state -- the payoff in an outer coupling loop, where each iteration
@@ -439,14 +470,14 @@ class _PowerIterationSolver:
         # the cold start every existing caller gets.
         state = self._initial_state() if state0 is None else [
             self.xp.asarray(s, dtype=self.dtype).copy() for s in state0]
-        batch = self._make_group_batch(state, adjoint, prod)
+        batch = self._make_group_batch(state, adjoint, production_weights)
 
         def fission_source():
-            """Sum_g prod[g] * phi0_g, batched into one kernel when available."""
+            """Sum production_weights[g] * phi0_g with optional group batching."""
             if batch is None:
-                return self._fission_source(state, prod)
+                return self._fission_source(state, production_weights, adjoint)
             out = xp.zeros_like(batch["phi"][0])
-            return kernels.group_accumulate(xp, out, batch["W"], batch["phi"])
+            return kernels.group_accumulate(xp, out, batch["production_weights"], batch["phi"])
 
         fsrc = fission_source()
         total = xp.sum(fsrc)
@@ -459,41 +490,58 @@ class _PowerIterationSolver:
         src_err = prev_src_err = 1.0
         converged = False
         hist = []                                # (fsrc_in, raw_iterate) for Anderson
+        # Anderson safeguard: restarts that make no progress (the source error
+        # at a restart not at least halved since the previous restart) mean the
+        # map is too noisy for extrapolation; after a few the outer loop falls
+        # back to plain power iteration, which always converges.
+        restart_err, stalled_restarts = None, 0
+        # Plain power iteration contracts the error by the dominance ratio rho
+        # per outer, so the error left after a step of size src_err is
+        # ~ src_err * rho / (1 - rho): the step alone overstates convergence by
+        # 1/(1 - rho) (~100x on a 400 cm PWR). On the un-accelerated path the
+        # stopping test is therefore scaled by an estimate of rho from the
+        # src_err sequence (Anderson's error is not a geometric sequence, so
+        # its test is left as is). The tightened tolerances never go below
+        # what the inner solves / arithmetic can resolve.
+        rho_hat = 0.0
+        resolvable = 10.0 * max(float(np.finfo(self.dtype).eps), inner_rtol_floor)
 
         for outer in range(1, max_outer + 1):
             # Inner tolerance tracks the *outer residual* (src_err): cheap early,
             # tight late. Not tied to tol_source (that pinned the inner solve loose
             # when converging on k alone, stalling k and letting Anderson drift).
-            rtol = min(1e-3, max(0.1 * src_err, inner_rtol_floor))
+            # A non-monotone inner solver (BiCGStab) runs a decade tighter.
+            rtol = max(self._inner_rtol_scale * min(1e-3, 0.1 * src_err),
+                       inner_rtol_floor)
             fsrc_in = fsrc                       # this iteration's input (for Anderson)
 
             for g in range(G):
                 # Keep an FP32 solve genuinely FP32. Host kinetics/eigenvalue
                 # scalars may otherwise promote the seeded source before the
                 # fused group contraction sees it.
-                q0 = xp.asarray((emit[g] / k) * fsrc, dtype=self.dtype)
+                q0 = xp.asarray((emission_spectrum[g] / k) * fsrc, dtype=self.dtype)
                 if batch is not None:
                     # One kernel for the whole in-scatter row. batch["phi"] is
                     # kept current group by group below, so this reads the
                     # updated flux for g' < g and the previous one for g' > g --
                     # the same Gauss-Seidel sweep the Python loop performed.
-                    kernels.group_accumulate(xp, q0, batch["S"][g], batch["phi"])
+                    kernels.group_accumulate(xp, q0, batch["scatter_to_from"][g], batch["phi"])
                 else:
-                    for gf in range(G):
+                    for source_group in range(G):
                         # forward: in-scatter g'->g uses sigma_s[g'][g];
                         # adjoint transposes to sigma_s[g][g'].
-                        s = self.sigma_s[g][gf] if adjoint else self.sigma_s[gf][g]
-                        if gf != g and s is not None:
-                            q0 += s * self._phi(state[gf])
+                        s = self.sigma_s[g][source_group] if adjoint else self.sigma_s[source_group][g]
+                        if source_group != g and s is not None:
+                            q0 += s * self._phi(state[source_group], adjoint)
                 if self._src_weight is not None:
                     q0 = q0 * self._src_weight
                 apply_A, precond = self._linear_components(g, adjoint)
                 state[g], n_it = self._linsolve(
-                    apply_A, self._rhs(g, q0), state[g],
+                    apply_A, self._rhs(g, q0, adjoint), state[g],
                     self.ops[g].inv_diag, xp, rtol=rtol,
                     precond=precond)
                 if batch is not None:
-                    batch["phi"][g] = self._phi(state[g])
+                    batch["phi"][g] = self._phi(state[g], adjoint)
                 inner_total += n_it
 
             fsrc_new = fission_source()
@@ -510,7 +558,7 @@ class _PowerIterationSolver:
                 state[g] *= scale
             if batch is not None:
                 batch["phi"] *= scale         # phi0 is linear in the state
-            g_fsrc = fsrc_new * scale                     # raw power iterate, mean 1
+            raw_fission_source = fsrc_new * scale                     # raw power iterate, mean 1
             k = k_new
 
             k_hist.append(k)
@@ -518,20 +566,50 @@ class _PowerIterationSolver:
             if verbose:
                 print(f"  outer {outer:4d}  k = {k:.8f}  dk = {dk:.2e}  src_err = {src_err:.2e}")
 
-            if dk < tol_k and src_err < tol_source:
-                fsrc = g_fsrc
+            # Dominance-ratio estimate for the un-accelerated stopping test:
+            # the ratio of successive three-outer sums of src_err (smoother than
+            # one step ratio). A non-contracting window (noise at the inner
+            # tolerance floor, or the transient of a restart) keeps the last
+            # trustworthy estimate.
+            tol_k_eff, tol_source_eff = tol_k, tol_source
+            if anderson_depth <= 1:
+                if len(err_hist) >= 4:
+                    num, den = sum(err_hist[-3:]), sum(err_hist[-4:-1])
+                    if 0.0 < num < den:
+                        rho_hat = min(num / den, 0.999)
+                tol_k_eff = max(tol_k * (1.0 - rho_hat), min(tol_k, resolvable))
+                tol_source_eff = max(tol_source * (1.0 - rho_hat),
+                                     min(tol_source, resolvable))
+
+            # Accept only if this outer's inner solves were at least as tight as
+            # the source tolerance (or at the floor). A loose warm-started inner
+            # solve can return in zero iterations; when that hits every group
+            # that drives the source (e.g. the adjoint, driven by chi = fast
+            # group only) the source is bit-identical, dk = src_err = 0, and
+            # the loop would stop short. src_err is then tiny, so the next
+            # outer runs tight inners and settles it honestly.
+            if (dk < tol_k_eff and src_err < tol_source_eff
+                    and rtol <= max(tol_source, inner_rtol_floor)):
+                fsrc = raw_fission_source
                 converged = True
                 break
 
             # Anderson update of the fission source (state stays the plain iterate).
-            fsrc = g_fsrc
+            fsrc = raw_fission_source
+            if anderson_depth > 1 and src_err > 1.1 * prev_src_err:
+                hist = []                                 # last mix overshot -> restart
+                if restart_err is not None and src_err > 0.5 * restart_err:
+                    stalled_restarts += 1
+                else:
+                    stalled_restarts = 0
+                restart_err = src_err
+                if stalled_restarts >= 3:
+                    anderson_depth = 1                    # noisy map: plain power
             if anderson_depth > 1:
-                if src_err > 1.1 * prev_src_err:          # last mix overshot -> restart
-                    hist = []
-                hist.append((fsrc_in, g_fsrc))
+                hist.append((fsrc_in, raw_fission_source))
                 if len(hist) > anderson_depth:
                     hist.pop(0)
-                fsrc = _anderson_source(hist, g_fsrc, xp)
+                fsrc = _anderson_source(hist, raw_fission_source, xp)
                 fsrc = fsrc * (self.grid.n_cells / float(xp.sum(fsrc)))
             prev_src_err = src_err
             total = xp.sum(fsrc)
@@ -542,7 +620,7 @@ class _PowerIterationSolver:
         self.state = state
         return Result(
             k_eff=k,
-            flux=xp.stack([self._phi(state[g]) for g in range(G)]),
+            flux=xp.stack([self._phi(state[g], adjoint) for g in range(G)]),
             converged=converged,
             outer_iterations=outer,
             inner_iterations=inner_total,
@@ -551,6 +629,17 @@ class _PowerIterationSolver:
             k_history=k_hist,
             source_error_history=err_hist,
         )
+
+
+def _conjugated_by_row_scale(op):
+    """Transpose of a row-scaled symmetric operator diag(s) A_w: A_w diag(s)
+    = diag(s)^-1 (diag(s) A_w) diag(s), applied through ``op.apply``."""
+    scale = op.row_scale
+
+    def apply_transpose(phi):
+        return op.apply(phi * scale) / scale
+
+    return apply_transpose
 
 
 class DiffusionEigenSolver(_PowerIterationSolver):
@@ -571,13 +660,24 @@ class DiffusionEigenSolver(_PowerIterationSolver):
         super().__init__(*args, **kwargs)
         if adf is not None and self._linsolve is pcg:
             raise ValueError("ADF may produce a nonsymmetric operator; use linear_solver='gmres' or 'bicgstab'")
+        # Non-symmetric within-group operators solve the adjoint on their
+        # algebraic transpose: the Cartesian ADF stencil has its own; the r-z
+        # divergence form (symmetric_operator=False) is W^-1 A_w with A_w
+        # symmetric, whose transpose is W (W^-1 A_w) W^-1 -- the same operator
+        # conjugated by the row scale 1/W. The Jacobi diagonal is unchanged.
+        self._adjoint_ops = None
         if adf is not None:
+            self._adjoint_ops = [op.apply_transpose for op in self.ops]
+        elif getattr(self.ops[0], "row_scale", None) is not None:
+            self._adjoint_ops = [_conjugated_by_row_scale(op) for op in self.ops]
+        if self._adjoint_ops is not None:
             self._adjoint_preconds = [neumann_preconditioner(
-                op.apply_transpose, op.inv_diag, self._precond_degree) for op in self.ops]
+                apply_t, op.inv_diag, self._precond_degree)
+                for apply_t, op in zip(self._adjoint_ops, self.ops)]
 
     def _linear_components(self, g, adjoint):
-        if adjoint and self.adf is not None:
-            return self.ops[g].apply_transpose, self._adjoint_preconds[g]
+        if adjoint and self._adjoint_ops is not None:
+            return self._adjoint_ops[g], self._adjoint_preconds[g]
         return super()._linear_components(g, adjoint)
 
     def _build_operators(self, grid, diffusion, sigma_t, removal, bc):
@@ -606,10 +706,10 @@ class DiffusionEigenSolver(_PowerIterationSolver):
         return [self.xp.ones(self.grid.shape, dtype=self.dtype)
                 for _ in range(self.n_groups)]
 
-    def _rhs(self, g, q0):
+    def _rhs(self, g, q0, adjoint=False):
         return q0
 
-    def _phi(self, state_g):
+    def _phi(self, state_g, adjoint=False):
         return state_g
 
 
@@ -625,6 +725,17 @@ class SP3EigenSolver(_PowerIterationSolver):
     # "sdp1" (simplified double-P1); see SP3GroupOperator. Same solve otherwise.
     _sp_variant = "sp3"
 
+    def __init__(self, *args, marshak_vacuum: bool | None = None, **kwargs):
+        # marshak_vacuum: vacuum-face treatment of the block (see
+        # SP3GroupOperator's ``marshak``). None (default) = the coupled
+        # Brantley-Larsen Marshak condition wherever it is available (SP3 on
+        # Cartesian grids, also on active-mask vacuum faces) and the per-moment
+        # alpha = 1/2 Robin term elsewhere (SDP1, hybrid); True = require the
+        # coupled form; False = per-moment Robin everywhere (the pre-2026
+        # behaviour). The coupled form is symmetric, so CG is unaffected.
+        self._marshak = marshak_vacuum
+        super().__init__(*args, **kwargs)
+
     def _build_operators(self, grid, diffusion, sigma_t, removal, bc):
         if not self.symmetric_operator:
             raise ValueError("symmetric_operator=False is diffusion-only: the "
@@ -633,7 +744,8 @@ class SP3EigenSolver(_PowerIterationSolver):
                                      removal[g], bc=bc, variant=self._sp_variant,
                                      active=self.active, mask_bc=self.mask_bc,
                                      hybrid_mask=self.hybrid_mask,
-                                     hybrid_confine=self.hybrid_confine)
+                                     hybrid_confine=self.hybrid_confine,
+                                     marshak=self._marshak)
                     for g in range(self.n_groups)]
 
     def _initial_state(self):
@@ -644,18 +756,23 @@ class SP3EigenSolver(_PowerIterationSolver):
             state.append(u)
         return state
 
-    def _rhs(self, g, q0):
+    def _rhs(self, g, q0, adjoint=False):
         # Symmetrized block RHS: (q0, 5 * (-2/5) q0). Hybrid: the phi2 source is
         # confined to the phi2 subdomain (zero elsewhere), so phi2 stays exactly
-        # zero outside it and the first row is pure diffusion there.
+        # zero outside it and the first row is pure diffusion there. The block
+        # is symmetric and the source/flux weights coincide, so the adjoint
+        # differs only in where that mask sits: the transpose of (masked
+        # source, unmasked read-out) is (unmasked source, masked read-out).
         rhs = self.xp.empty((2,) + self.grid.shape, dtype=self.dtype)
         rhs[0] = q0
         rhs[1] = -2.0 * q0
-        if self.hybrid_mask is not None:
+        if self.hybrid_mask is not None and not adjoint:
             rhs[1] = rhs[1] * self.hybrid_mask
         return rhs
 
-    def _phi(self, state_g):
+    def _phi(self, state_g, adjoint=False):
+        if adjoint and self.hybrid_mask is not None:
+            return state_g[0] - 2.0 * (self.hybrid_mask * state_g[1])
         return state_g[0] - 2.0 * state_g[1]
 
 
@@ -697,7 +814,7 @@ class SDPNEigenSolver(_PowerIterationSolver):
     The group state is the M = N+1 even-moment vector U; the block reaction
     matrix is non-symmetric (the double-PN closure), so the within-group solve
     runs on CG in a symmetrizing basis whenever the tables and boundary
-    conditions admit one (see ``symmetrize`` below) and on BiCGStab otherwise. Successive orders match
+    conditions admit one (see ``symmetrize`` below) and on GMRES otherwise. Successive orders match
     the degrees of freedom of SP3/SP5/SP7 respectively and, for strongly
     heterogeneous media, converge toward the transport solution from fewer
     moments. Order 1 is equivalent to :class:`SDP1EigenSolver`, which is kept as
@@ -727,7 +844,12 @@ class SDPNEigenSolver(_PowerIterationSolver):
         # break the symmetry, so those problems keep the plain non-symmetric
         # form. The SPN family is symmetric as-is -- including its Marshak g
         # -- and takes CG without any transform. linear_solver=None resolves
-        # to "cg" for a symmetric block and "bicgstab" otherwise.
+        # to "cg" for a symmetric block and "gmres" otherwise: GMRES's
+        # monotone true-residual stop gives the Anderson-accelerated outer loop
+        # a smooth map, whereas BiCGStab's irregular error stalled it (default
+        # SDP3 on vacuum-bounded BIBLIS: NOT converged after 2000 outers with
+        # BiCGStab, 30 outers with GMRES). An explicit "bicgstab" still works
+        # (the outer loop then tightens its inner tolerance a decade).
         #
         # spn_precondition: for the blocks that stay non-symmetric (SDP3 with
         # vacuum faces, any SDPN order with Marshak), precondition BiCGStab/
@@ -737,13 +859,15 @@ class SDPNEigenSolver(_PowerIterationSolver):
         # D_i, same boundary structure; with Marshak it carries SPN's own
         # symmetric g). The sweeps are a fixed linear operator, so both
         # BiCGStab and right-preconditioned GMRES remain valid. 0/False = off
-        # (plain Jacobi, the default); True = 2 sweeps. Use EVEN sweep counts:
-        # the block's moment coupling makes Jacobi non-contractive, so an
-        # odd-degree Neumann polynomial is indefinite and stalls the Krylov
-        # solve (measured: degree 1 is 10x WORSE than plain Jacobi). Degree 2
-        # roughly halves the Krylov applies (Brantley-Larsen SDP3/vacuum and
-        # SDP2/Marshak) but each sweep costs one block apply, so on CPU it is
-        # net-slower than Jacobi; it is aimed at GPU runs, where applies are
+        # (plain Jacobi, the default); True = 2 sweeps. The block's moment
+        # coupling makes undamped Jacobi non-contractive (lambda_max(D^-1 A)
+        # > 2), which made odd sweep counts indefinite (degree 1 was 10x
+        # WORSE than plain Jacobi); the sweeps are now damped automatically
+        # (see linalg.neumann_preconditioner), so every count helps. 1-3
+        # sweeps cut the Krylov applies by 40-60% (Brantley-Larsen SDP3/vacuum
+        # and SDP2/Marshak, GMRES: 568 -> 347/328/264) but each sweep costs one
+        # block apply, so on CPU it is roughly break-even with Jacobi; it is
+        # aimed at GPU runs, where applies are
         # streaming kernels and the saved iterations remove global reductions
         # (cf. the same trade-off for precond_degree / Neumann-PCG).
         # Meaningless on a path that already runs symmetric/CG (the companion
@@ -785,12 +909,27 @@ class SDPNEigenSolver(_PowerIterationSolver):
                              "non-symmetric SDPN path; this block is "
                              "symmetric(-ized) and already runs CG")
         if linear_solver is None:
-            linear_solver = "cg" if symmetric else "bicgstab"
+            linear_solver = "cg" if symmetric else "gmres"
         super().__init__(*args, linear_solver=linear_solver, **kwargs)
         if self._spn_precond:
             self.preconds = [neumann_preconditioner(op.apply, op.inv_diag,
                                                     self._spn_precond)
                              for op in self._precond_ops]
+        # Adjoint solve of a non-symmetric block runs on its algebraic
+        # transpose, so the Neumann preconditioner must sweep the transpose
+        # too (the Jacobi diagonal is shared). The SPN companion is symmetric,
+        # hence equally close to the SDPN block and to its transpose: reuse it.
+        self._adjoint_preconds = None
+        if not all(op.symmetric for op in self.ops):
+            self._adjoint_preconds = (self.preconds if self._spn_precond else [
+                neumann_preconditioner(op.apply_transpose, op.inv_diag,
+                                       self._precond_degree)
+                for op in self.ops])
+
+    def _linear_components(self, g, adjoint):
+        if adjoint and not self.ops[g].symmetric:
+            return self.ops[g].apply_transpose, self._adjoint_preconds[g]
+        return super()._linear_components(g, adjoint)
 
     def _build_operators(self, grid, diffusion, sigma_t, removal, bc):
         if not self.symmetric_operator:
@@ -837,26 +976,42 @@ class SDPNEigenSolver(_PowerIterationSolver):
             state.append(u)
         return state
 
-    def _rhs(self, g, q0):
+    def _moment_weights(self, g, adjoint):
+        """(source weights, flux read-out weights) of group g's block.
+
+        Group coupling enters the block as the rank-one map src (x) phi0; its
+        transpose is phi0 (x) src, so the adjoint swaps the two. For SDPN they
+        genuinely differ (SDP2: src = c1[:, 0], phi0 = c1[0, :]).
+        """
+        op = self.ops[g]
+        if adjoint:
+            return op.phi0_weights, op.src_weights
+        return op.src_weights, op.phi0_weights
+
+    def _rhs(self, g, q0, adjoint=False):
         # Isotropic source (fission/k + in-scatter into phi0) distributed over
         # the moment rows by the first column of c^(1).
-        w = self.ops[g].src_weights
+        w, _ = self._moment_weights(g, adjoint)
         M = self._order + 1
         rhs = self.xp.empty((M,) + self.grid.shape, dtype=self.dtype)
         for i in range(M):
             rhs[i] = w[i] * q0
             # Hybrid: confine the higher-moment source to the subdomain so those
-            # moments stay exactly zero (pure diffusion) outside it.
-            if i > 0 and self.hybrid_mask is not None:
+            # moments stay exactly zero (pure diffusion) outside it. The
+            # adjoint carries this mask on the read-out instead (transpose).
+            if i > 0 and self.hybrid_mask is not None and not adjoint:
                 rhs[i] = rhs[i] * self.hybrid_mask
         return rhs
 
-    def _phi(self, state_g):
-        w = self.ops[0].phi0_weights
+    def _phi(self, state_g, adjoint=False):
+        _, w = self._moment_weights(0, adjoint)
         phi = w[0] * state_g[0]
         for j in range(1, len(w)):
             if w[j] != 0.0:
-                phi = phi + w[j] * state_g[j]
+                u = state_g[j]
+                if adjoint and self.hybrid_mask is not None:
+                    u = self.hybrid_mask * u
+                phi = phi + w[j] * u
         return phi
 
 

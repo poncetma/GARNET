@@ -19,8 +19,10 @@ class Material:
     sigma_s     : scattering matrix Sigma_s[g_from, g_to], shape (G, G).
                   The diagonal (within-group scattering) is ignored: it cancels
                   identically between the removal term and the in-scatter source.
-    chi         : fission emission spectrum, shape (G,); defaults to all fission
-                  neutrons born in group 0. Must sum to 1 if fissile.
+    chi         : total equilibrium fission spectrum (prompt plus delayed),
+                  shape (G,); defaults to all fission neutrons born in group 0.
+                  Must sum to 1 if fissile. Kinetics.chi_delayed may specify
+                  separate delayed emission spectra for transient calculations.
     total       : optional total cross section Sigma_t,g, shape (G,). Used by
                   the SP3 solver for the higher angular moments; if omitted,
                   1/(3 D_g) is used (exact for transport-corrected data with
@@ -123,7 +125,12 @@ class Kinetics:
                   incompatible between regions).
     chi_delayed : delayed emission spectrum: shape (G,) for a single spectrum,
                   (I, G) for one spectrum per precursor family, or None to
-                  default to the prompt spectrum of each material.
+                  default to the total fission spectrum of each material.
+
+    ``Material.chi`` is the total equilibrium (prompt plus delayed) spectrum.
+    A distinct delayed spectrum implies the prompt production weight
+    ``chi - sum_i beta_i * chi_delayed[i]``; delayed emission is added from
+    each family's evolving precursor inventory during the transient.
 
     Per-material tables (2D velocities/beta) index the materials list passed
     to the transient solver's problem_at, whose order must therefore be stable

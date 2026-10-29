@@ -197,7 +197,14 @@ class ConductionSolver:
 
         k = blend.field(np.array([m.conductivity for m in mats], dtype=float))
         h = blend.field(np.array([m.sink_coeff for m in mats], dtype=float))
-        t_sink = blend.field(np.array([m.sink_temperature for m in mats], dtype=float))
+        # The sink SOURCE in a mixed cell is sum_i w_i h_i T_sink,i, so blend
+        # the product, not h and T_sink separately: a cell half heat-pipe fuel
+        # (T_sink 750 K) and half reflector (h = 0) must still relax to 750 K,
+        # not to the 375 K that blending h and T_sink separately gave.
+        h_t_sink = blend.field(np.array([m.sink_coeff * m.sink_temperature
+                                         for m in mats], dtype=float))
+        t_sink_volume = blend.field(np.array([m.sink_temperature for m in mats],
+                                             dtype=float))
         rho_cp = blend.field(np.array([m.heat_capacity for m in mats], dtype=float))
         if float(xp.min(k)) <= 0.0:
             raise ValueError("conductivity must be positive in every cell "
@@ -211,8 +218,13 @@ class ConductionSolver:
             # a unit diagonal and no couplings, so they end up at exactly T_inf
             # -- inert, and they drop out of the energy balance identically.
             h = xp.where(self.active, h, 0.0)
+            h_t_sink = xp.where(self.active, h_t_sink, 0.0)
             rho_cp = xp.where(self.active, rho_cp, 0.0)
-        self.k, self.h, self.t_sink = k, h, t_sink
+        # Effective sink temperature, h_t_sink / h: the T a cell relaxes to with
+        # no source. Exposed for callers; the solve itself uses h_t_sink.
+        t_sink = xp.where(h > 0.0, h_t_sink / xp.where(h > 0.0, h, 1.0),
+                          t_sink_volume)
+        self.k, self.h, self.t_sink, self.h_t_sink = k, h, t_sink, h_t_sink
         self.rho_cp = rho_cp
 
         # Backward Euler in one line of algebra: rho*cp dT/dt costs the
@@ -255,8 +267,8 @@ class ConductionSolver:
         # cylindrical-weighted, triangular, extruded) and whichever faces are
         # exposed. That avoids re-deriving robin_face_term here and getting the
         # metric weights subtly wrong.
-        w = getattr(self.op, "rhs_weight", None)
-        self._w = 1.0 if w is None else w
+        rhs_weight = getattr(self.op, "rhs_weight", None)
+        self._rhs_weight = 1.0 if rhs_weight is None else rhs_weight
         # The identity below subtracts the operator's FULL removal, which in a
         # transient includes the capacity term -- otherwise the leftover would
         # be mistaken for a boundary source and grow as dt shrinks.
@@ -267,10 +279,10 @@ class ConductionSolver:
         # do not have that luxury -- and neither does the power density, which
         # divides a rated wattage by this volume, so getting it wrong scales
         # the whole temperature field. One constant factor fixes both.
-        met = getattr(grid, "cylindrical_metrics", lambda: None)()
-        self._geom_scale = 1.0 if met is None else 2.0 * math.pi / grid.spacing[1]
-        self._bnd = (self.op.apply(xp.ones(grid.shape, dtype=self.dtype))
-                     - self._removal * self._w)
+        cylindrical_metrics = getattr(grid, "cylindrical_metrics", lambda: None)()
+        self._physical_volume_scale = 1.0 if cylindrical_metrics is None else 2.0 * math.pi / grid.spacing[1]
+        self._boundary_leakage = (self.op.apply(xp.ones(grid.shape, dtype=self.dtype))
+                     - self._removal * self._rhs_weight)
 
         if self._is_singular():
             raise ValueError(
@@ -292,8 +304,8 @@ class ConductionSolver:
         if self.time_step is not None and float(self.xp.max(self.rho_cp)) > 0.0:
             return False
         xp = self.xp
-        bnd = (self._bnd if self.active is None
-               else xp.where(self.active, self._bnd, 0.0))
+        bnd = (self._boundary_leakage if self.active is None
+               else xp.where(self.active, self._boundary_leakage, 0.0))
         return float(xp.max(self.h)) <= 0.0 and float(xp.max(xp.abs(bnd))) <= 0.0
 
     @property
@@ -305,7 +317,7 @@ class ConductionSolver:
         :func:`garnet.power.power_density` so the rated wattage is divided by a
         physical volume.
         """
-        return self.grid.cell_volume * self._w * self._geom_scale
+        return self.grid.cell_volume * self._rhs_weight * self._physical_volume_scale
 
     def step(self, power_density, temperature, rtol=1e-12, maxiter=20000,
              check_every=1, diagnostics=True,
@@ -351,14 +363,14 @@ class ConductionSolver:
         if self.active is not None:
             q = xp.where(self.active, q, 0.0)
 
-        source = q + self.h * self.t_sink
+        source = q + self.h_t_sink
         if _previous is not None:
             source = source + self._capacity_over_dt * xp.asarray(
                 _previous, dtype=self.dtype)
         elif self.time_step is not None:
             raise ValueError("a transient solver needs the previous "
                              "temperature; call step(q, T_old)")
-        rhs = self._w * source + self.ambient_temperature * self._bnd
+        rhs = self._rhs_weight * source + self.ambient_temperature * self._boundary_leakage
         x0 = (xp.full(self.grid.shape, self.ambient_temperature, dtype=self.dtype)
               if t0 is None else xp.asarray(t0, dtype=self.dtype).copy())
 
@@ -398,13 +410,13 @@ class ConductionSolver:
         xp = self.xp
         T = xp.asarray(temperature, dtype=self.dtype)
         q = xp.asarray(power_density, dtype=self.dtype)
-        dV = self.grid.cell_volume * self._geom_scale
-        vol = dV * self._w
+        dV = self.grid.cell_volume * self._physical_volume_scale
+        vol = dV * self._rhs_weight
         source = float(xp.sum(vol * q))
-        sink = float(xp.sum(vol * self.h * (T - self.t_sink)))
-        # _bnd already carries the geometry's metric weight (it came out of the
-        # operator), so it pairs with the bare cell volume, not the weighted one.
-        leak = float(xp.sum(dV * self._bnd * (T - self.ambient_temperature)))
+        sink = float(xp.sum(vol * (self.h * T - self.h_t_sink)))
+        # _boundary_leakage already carries the operator's metric weight, so it
+        # pairs with the bare cell volume.
+        leak = float(xp.sum(dV * self._boundary_leakage * (T - self.ambient_temperature)))
         # Transient: what did not leave went into raising the temperature.
         storage = 0.0
         if previous is not None and self.time_step is not None:

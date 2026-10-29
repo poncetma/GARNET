@@ -109,13 +109,13 @@ class ExponentialStep:
         """
         if not math.isfinite(decay) or decay < 0.0:
             raise ValueError("precursor decay must be finite and non-negative")
-        lh = decay * self.width
-        wh = self.frequency * self.width
-        z = lh + wh
+        decay_times_width = decay * self.width
+        frequency_times_width = self.frequency * self.width
+        z = decay_times_width + frequency_times_width
         source_weight = self.width * phi1(-z)
         removed = (1.0 - decay * source_weight if abs(z) < 1e-5 else
-                   (wh + lh * math.exp(-z)) / z)
-        return math.exp(-lh), source_weight, removed
+                   (frequency_times_width + decay_times_width * math.exp(-z)) / z)
+        return math.exp(-decay_times_width), source_weight, removed
 
 
 @dataclass(frozen=True)
@@ -149,17 +149,17 @@ class ExponentialThetaStep(ExponentialStep):
         """
         if not math.isfinite(decay) or decay < 0.0:
             raise ValueError("precursor decay must be finite and non-negative")
-        lh, wh = decay * self.width, self.frequency * self.width
-        z = -(lh + wh)
+        decay_times_width, frequency_times_width = decay * self.width, self.frequency * self.width
+        z = -(decay_times_width + frequency_times_width)
         new_weight = self.width * phi2(z)
         # The old moment decays as 1/z**2. Do not subtract the nearly equal
         # phi_1 and phi_2 when a precursor family is very stiff.
         old_moment = (phi1(z) - phi2(z) if abs(z) < 0.5 else
                       (((z - 1.0) * math.exp(z) + 1.0) / z) / z)
-        old_weight = math.exp(wh) * self.width * old_moment
+        old_weight = math.exp(frequency_times_width) * self.width * old_moment
         removed = (1.0 - decay * new_weight if abs(z) < 0.5 else
-                   (wh + lh * phi1(z)) / (-z))
-        return math.exp(-lh), old_weight, new_weight, removed
+                   (frequency_times_width + decay_times_width * phi1(z)) / (-z))
+        return math.exp(-decay_times_width), old_weight, new_weight, removed
 
 
 @dataclass(frozen=True)

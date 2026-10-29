@@ -84,5 +84,8 @@ they built, and say which is which rather than failing obscurely.
   smoother. That is what the exact-mapping test exists to catch.
 - **XML comments cannot contain `--`.**
 - **`--warm-start` is off by default.** It makes the coupled map depend on its
-  own history, which breaks the lockstep comparison (and preCICE's checkpoints
-  restore to the start of a window, not to the previous iteration).
+  own history, which breaks the lockstep comparison. When it is on, the
+  neutronics participant keeps the latest flux *outside* its preCICE
+  checkpoint: a read-checkpoint restores to the start of the window, which in
+  this one-window steady scheme is before the first solve, so checkpointing
+  the flux would roll every iteration back to a cold start.

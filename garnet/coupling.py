@@ -31,6 +31,7 @@ each half and let the couplers differ.
 
 from __future__ import annotations
 
+import inspect
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -254,7 +255,7 @@ def neutronics_step(temperature, ctx: CouplingContext):
         active=ctx.active, mask_bc=ctx.mask_bc,
         mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
         device=ctx.device, dtype=ctx.dtype,
-        xs_update=ctx.feedback.hook(temperature))
+        xs_update=_feedback_hook(ctx, temperature))
 
     kw = dict(ctx.eigen_kwargs)
     if ctx.warm_start and ctx._state is not None:
@@ -282,8 +283,49 @@ def neutronics_step(temperature, ctx: CouplingContext):
                       total_power=ctx.total_power,
                       cell_volume=ctx.thermal_solver().cell_volume,
                       mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
-                      active=ctx.active)
+                      active=ctx.active,
+                      fission_scale=_fission_scale(ctx, solver.fields))
     return q, res
+
+
+def _feedback_hook(ctx, temperature):
+    """``ctx.feedback``'s xs_update at ``temperature``, told the material list
+    when it can use it (a volume-mixed cell weights each component's own
+    change by that component's own cross sections)."""
+    hook = ctx.feedback.hook
+    if "materials" in inspect.signature(hook).parameters:
+        return hook(temperature, materials=ctx.materials)
+    return hook(temperature)
+
+
+def _fission_scale(ctx, fields):
+    """(G, *shape) factor by which the feedback moved nu*Sigma_f in each cell.
+
+    The power edit weights by kappa*Sigma_f from the static material tables,
+    which no feedback touches. But a density law or tabulated branches move
+    Sigma_f -- the HP-MR fuel's nu*Sigma_f changes 1.7-2.5% between 600 and
+    1200 K -- and the energy release moves with it: kappa/nu is a property of
+    the fissioning nuclide, ~constant in temperature. So kappa*Sigma_f takes
+    the same per-cell, per-group ratio the feedback applied to nu*Sigma_f.
+    Cells with no production keep a factor of 1 (they make no power anyway).
+    """
+    from .blend import MaterialBlend
+
+    xp = fields.blend.xp
+    dtype = fields.blend.dtype
+    blend = MaterialBlend(xp, ctx.grid.shape, ctx.material_map,
+                          len(ctx.materials), dtype=dtype,
+                          mix_material=ctx.mix_material,
+                          mix_weight=ctx.mix_weight)
+    table = np.array([np.atleast_1d(m.nu_sigma_f) for m in ctx.materials],
+                     dtype=float)
+    scale = []
+    for g in range(table.shape[1]):
+        base = blend.linear(table[:, g])
+        moved = xp.asarray(fields.nu_sigma_f[g], dtype=dtype)
+        nonzero = base != 0.0
+        scale.append(xp.where(nonzero, moved / xp.where(nonzero, base, 1.0), 1.0))
+    return xp.stack(scale)
 
 
 def thermal_step(power, ctx: CouplingContext, t0=None):
@@ -315,9 +357,13 @@ class CoupledSolver:
               anderson_depth=0, verbose=False) -> CoupledResult:
         """Iterate to a self-consistent (T, phi, k).
 
-        tol        : convergence on max|T_{n+1} - T_n| relative to the
-                     temperature span, so it means the same thing whatever the
-                     absolute level.
+        tol        : convergence on the FIXED-POINT residual
+                     max|G(T) - T| relative to the temperature span, so it
+                     means the same thing whatever the absolute level. Not
+                     the step |T_{n+1} - T_n|: under relaxation omega that is
+                     omega times smaller than the residual (loosening the
+                     tolerance by 1/omega), and an Anderson step can be small
+                     while the residual is not.
 
                      There is a FLOOR, and asking below it hangs rather than
                      errors. The inner eigen solve converges only to
@@ -336,6 +382,12 @@ class CoupledSolver:
                      equivalent ones.
         anderson_depth : > 1 switches to Anderson acceleration over that many
                      iterates. The converged answer is unchanged.
+
+        The result is ONE evaluated state: ``temperature`` is the field the
+        cross sections were evaluated at, and ``k_eff``, ``flux`` and
+        ``power_density`` are the neutronics at exactly that field. The
+        conduction response to that power, G(T), is ``thermal.temperature``;
+        at convergence the two differ by less than ``tol`` times the span.
         """
         ctx = self.ctx
         T = np.asarray(ctx.initial_temperature() if t0 is None else t0, dtype=float)
@@ -345,25 +397,26 @@ class CoupledSolver:
         info = None
         converged = False
         t_start = time.perf_counter()
+        evaluated = T
         for n in range(1, max_iter + 1):
             T_raw, info = coupled_map(T, ctx)
-            T_new = acc.step(T, T_raw)
-            change = float(np.max(np.abs(T_new - T)))
-            span = max(float(np.ptp(T_new)), 1.0)
+            evaluated = T
+            residual = float(np.max(np.abs(T_raw - T)))
+            span = max(float(np.ptp(T_raw)), 1.0)
             k_hist.append(info["neutronics"].k_eff)
-            res_hist.append(change)
+            res_hist.append(residual)
             if verbose:
                 print(f"  coupling {n:3d}  k = {k_hist[-1]:.7f}  "
-                      f"max|dT| = {change:.3e} K  T_peak = {T_new.max():.1f} K",
-                      flush=True)
-            T = T_new
-            if change / span < tol:
+                      f"max|G(T)-T| = {residual:.3e} K  "
+                      f"T_peak = {T_raw.max():.1f} K", flush=True)
+            if residual / span < tol:
                 converged = True
                 break
+            T = acc.step(T, T_raw)
         seconds = time.perf_counter() - t_start
 
         return CoupledResult(
-            k_eff=k_hist[-1], temperature=T, power_density=info["power"],
+            k_eff=k_hist[-1], temperature=evaluated, power_density=info["power"],
             flux=info["neutronics"].flux, iterations=len(k_hist),
             converged=converged, seconds=seconds, device=ctx.device,
             k_history=k_hist, residual_history=res_hist,
@@ -400,6 +453,24 @@ class CoupledTransientResult:
                 f"{self.steps} steps in {self.seconds:.1f} s)")
 
 
+@dataclass
+class _CoupledTransientState:
+    """Thermal state and source integral over the current exchange window."""
+
+    temperature: object
+    peak_temperatures: list = field(default_factory=list)
+    mean_temperatures: list = field(default_factory=list)
+    power_integral: object | None = None
+    neutron_steps_in_window: int = 0
+    window_width: float = 0.0
+    last_accepted_time: float = 0.0
+    feedback_hook: object | None = None
+    min_power_integral: object | None = None
+    kappa_xs: object | None = None
+    cached_peak: float = 0.0
+    cached_mean: float = 0.0
+
+
 def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
                       initial_coupled_steady=None,
                       dt_thermal=None, verbose=False, transient_kwargs=None,
@@ -411,14 +482,12 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
                       power_quadrature="scheme"):
     """March the neutronics and the thermal solution together.
 
-    Operator splitting, one exchange per step: the neutronics step is taken
-    with the cross sections evaluated at the temperature the thermal solver
-    left behind, then the resulting power advances the temperature. That is
-    what production coupled codes do, and it is the only sane choice here --
-    a fully implicit coupling would need the eigenvalue-free flux solve and
-    the conduction solve inside one Newton iteration, at several times the
-    cost, to chase a splitting error that is already far below the modelling
-    error in an analytic Doppler law.
+    Operator splitting advances neutronics with cross sections evaluated at
+    the last accepted thermal state. The resulting power advances conduction
+    at the next thermal exchange. The exchange interval controls the splitting
+    error; neutron and thermal equations are solved separately. This is
+    explicit Lie splitting, so the coupled result is FIRST order in
+    ``dt_thermal`` even when the neutronics runs BDF2/BDF3 or FTM.
 
     The neutronics step is set by prompt kinetics (milliseconds); the thermal
     response is seconds. Backward Euler on the conduction side is
@@ -530,46 +599,56 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
     thermal = thermal_solver_for(dt_thermal)
 
     # Everything the loop touches lives on the solve device from here on.
-    steady_T = np.asarray(steady.temperature)
-    state = {"T": xp.asarray(steady_T, dtype=thermal.dtype),
-             "peak": [], "mean": [], "accum": None, "n": 0,
-             "elapsed": 0.0, "last_t": 0.0, "hook": None,
-             "min_integral": None}
-    state["hook"] = ctx.feedback.hook(state["T"])
+    steady_temperature = np.asarray(steady.temperature)
+    state = _CoupledTransientState(
+        temperature=xp.asarray(steady_temperature, dtype=thermal.dtype))
+    state.feedback_hook = _feedback_hook(ctx, state.temperature)
     used_source_weights = []
     fuel = _fuel_mask(ctx)
-    fuel_dev = xp.asarray(fuel)
+    fuel_mask_device = xp.asarray(fuel)
 
     def xs_update_at(_t):
         # The SAME object until the temperature actually moves. The transient
         # rebuilds its operators on identity change, so with a thermal step
         # coarser than the neutronics step this skips the rebuild on every
         # sub-step -- the cross sections genuinely have not changed.
-        return state["hook"]
+        return state.feedback_hook
 
     # Per-group kappa*Sigma_f on the DEVICE, blended by the same rules the
     # cross sections use. Keeping this on device is what makes the GPU path
     # worth having: the host-side power_density would pull the whole flux back
     # every step (11 groups x 12k cells is ~1 MB a step, thousands of steps),
     # and that transfer would sit in series with every solve.
-    kappa_xs = xp.stack(_device_fission_energy(ctx, xp, thermal.dtype))
-    act_dev = None if ctx.active is None else xp.asarray(ctx.active).astype(bool)
-    if act_dev is not None:
-        kappa_xs = xp.where(act_dev[None, ...], kappa_xs, 0.0)
-    vol = thermal.cell_volume
+    kappa_static = xp.stack(_device_fission_energy(ctx, xp, thermal.dtype))
+    active_cells_device = None if ctx.active is None else xp.asarray(ctx.active).astype(bool)
+    if active_cells_device is not None:
+        kappa_static = xp.where(active_cells_device[None, ...], kappa_static, 0.0)
+
+    def feedback_kappa(hook):
+        # The same feedback-moved kappa the steady power edit uses, refreshed
+        # whenever the temperature (hence the feedback) moves -- so t = 0 is
+        # the steady state's own power shape, not a frozen-kappa variant.
+        from .solver import Fields
+        fields = Fields(xp, ctx.grid, ctx.materials, ctx.material_map,
+                        thermal.dtype, mix_material=ctx.mix_material,
+                        mix_weight=ctx.mix_weight, xs_update=hook)
+        return kappa_static * _fission_scale(ctx, fields)
+
+    state.kappa_xs = feedback_kappa(state.feedback_hook)
+    cell_volumes = thermal.cell_volume
     raw_power = xp.zeros(ctx.shape, dtype=thermal.dtype)
-    initial_peak = float(steady_T[fuel].max())
-    initial_mean = float(steady_T[fuel].mean())
-    state["cached_peak"], state["cached_mean"] = initial_peak, initial_mean
+    initial_peak = float(steady_temperature[fuel].max())
+    initial_mean = float(steady_temperature[fuel].mean())
+    state.cached_peak, state.cached_mean = initial_peak, initial_mean
 
     def advance_step(t, phi, power_ratio):
         profiler.pause_neutronics()
         try:
-            step_width = float(t) - state["last_t"]
+            step_width = float(t) - state.last_accepted_time
             if not np.isfinite(step_width) or step_width <= 0.0:
                 raise RuntimeError("coupled transient received non-increasing "
                                    "accepted times")
-            state["last_t"] = float(t)
+            state.last_accepted_time = float(t)
             with profiler.region("power_edit"):
                 raw_power.fill(0)
                 # One contraction kernel when the multigroup transient hands
@@ -578,25 +657,25 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
                 # consumes the legacy group list directly.
                 phi_power = (phi if not kernels.use_fused(xp, "groups") or
                              hasattr(phi, "shape") else xp.stack(phi))
-                kernels.group_accumulate(xp, raw_power, kappa_xs, phi_power)
-                integral = xp.sum(raw_power * vol)       # device scalar
+                kernels.group_accumulate(xp, raw_power, state.kappa_xs, phi_power)
+                integral = xp.sum(raw_power * cell_volumes)       # device scalar
                 scale = ctx.total_power * power_ratio / integral
-                q = raw_power * scale
-                state["min_integral"] = (
-                    integral if state["min_integral"] is None else
-                    xp.minimum(state["min_integral"], integral))
+                power_density_field = raw_power * scale
+                state.min_power_integral = (
+                    integral if state.min_power_integral is None else
+                    xp.minimum(state.min_power_integral, integral))
                 # Accumulate power over the sub-steps so a coarser thermal step
                 # sees the mean source over its own interval, not a snapshot.
-                source_weight = (getattr(tr, "step_source_weight", step_width)
+                source_weight = (getattr(neutron_solver, "step_source_weight", step_width)
                                  if power_quadrature == "scheme" else step_width)
                 if not np.isfinite(source_weight) or source_weight <= 0.0:
                     raise RuntimeError("neutron source integral weight must be finite and positive")
                 used_source_weights.append(float(source_weight))
-                weighted_q = q * source_weight
-                state["accum"] = (weighted_q if state["accum"] is None
-                                  else state["accum"] + weighted_q)
-                state["n"] += 1
-                state["elapsed"] += step_width
+                weighted_power_density = power_density_field * source_weight
+                state.power_integral = (weighted_power_density if state.power_integral is None
+                                  else state.power_integral + weighted_power_density)
+                state.neutron_steps_in_window += 1
+                state.window_width += step_width
             profiler.counters["neutronics_steps"] += 1
 
             # Flush a trailing partial interval too. A constant-width thermal
@@ -605,31 +684,32 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
             final_window = np.isclose(t, t_end, rtol=1e-12,
                                       atol=1e-14 * max(1.0, t_end))
             full_window = np.isclose(
-                state["elapsed"], dt_thermal, rtol=1e-12,
+                state.window_width, dt_thermal, rtol=1e-12,
                 atol=1e-14 * max(1.0, dt_thermal))
-            if state["elapsed"] > dt_thermal and not full_window:
+            if state.window_width > dt_thermal and not full_window:
                 raise RuntimeError(
                     "adaptive neutron step crossed a thermal exchange time")
             if full_window or final_window:
-                width = state["elapsed"]
+                width = state.window_width
                 stepper = (thermal if full_window
                            else thermal_solver_for(width))
                 next_thermal = profiler.counters["thermal_steps"] + 1
                 diagnostics = (thermal_diagnostics_every > 0 and
                                next_thermal % thermal_diagnostics_every == 0)
                 with profiler.region("thermal_solve"):
-                    res = stepper.step(
-                        state["accum"] / width, state["T"],
+                    thermal_result = stepper.step(
+                        state.power_integral / width, state.temperature,
                         rtol=thermal_rtol, maxiter=thermal_maxiter,
                         check_every=thermal_check_every,
                         diagnostics=diagnostics, synchronize_timing=False)
-                state["T"] = res.temperature
+                state.temperature = thermal_result.temperature
                 profiler.counters["thermal_steps"] += 1
-                profiler.counters["thermal_iterations"] += res.iterations
+                profiler.counters["thermal_iterations"] += thermal_result.iterations
                 profiler.counters["thermal_diagnostics"] += int(diagnostics)
 
                 with profiler.region("feedback_update"):
-                    state["hook"] = ctx.feedback.hook(state["T"])
+                    state.feedback_hook = _feedback_hook(ctx, state.temperature)
+                    state.kappa_xs = feedback_kappa(state.feedback_hook)
                 profiler.counters["feedback_updates"] += 1
 
                 # One small transfer per thermal window supplies both
@@ -637,33 +717,33 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
                 # normalization since the previous exchange.
                 with profiler.region("telemetry_transfer"):
                     packet = asnumpy(xp.stack((
-                        state["min_integral"],
-                        xp.max(state["T"][fuel_dev]),
-                        xp.mean(state["T"][fuel_dev]))))
+                        state.min_power_integral,
+                        xp.max(state.temperature[fuel_mask_device]),
+                        xp.mean(state.temperature[fuel_mask_device]))))
                 profiler.counters["telemetry_transfers"] += 1
                 if not np.isfinite(packet[0]) or packet[0] <= 0.0:
                     raise RuntimeError("no finite positive fission power in "
                                        "the transient flux")
-                state["cached_peak"] = float(packet[1])
-                state["cached_mean"] = float(packet[2])
-                state["accum"], state["n"] = None, 0
-                state["elapsed"] = 0.0
-                state["min_integral"] = None
+                state.cached_peak = float(packet[1])
+                state.cached_mean = float(packet[2])
+                state.power_integral, state.neutron_steps_in_window = None, 0
+                state.window_width = 0.0
+                state.min_power_integral = None
 
             # Temperature is constant between thermal exchanges; reuse the
             # last two host scalars instead of synchronizing twice per neutron
             # step merely to rediscover the same values.
-            state["peak"].append(state["cached_peak"])
-            state["mean"].append(state["cached_mean"])
+            state.peak_temperatures.append(state.cached_peak)
+            state.mean_temperatures.append(state.cached_mean)
             if on_step is not None:
-                on_step(float(t), phi, power_ratio, state["T"])
+                on_step(float(t), phi, power_ratio, state.temperature)
         finally:
             profiler.resume_neutronics()
 
-    mats = ctx.materials
-    stationary = (lambda _t: (mats, ctx.material_map,
+    materials = ctx.materials
+    stationary = (lambda _t: (materials, ctx.material_map,
                               ctx.mix_material, ctx.mix_weight))
-    tr = TransientSolver(
+    neutron_solver = TransientSolver(
         ctx.grid, problem_at or stationary, ctx.kinetics, bc=ctx.bc,
         active=ctx.active, mask_bc=ctx.mask_bc,
         mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
@@ -674,39 +754,12 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
         xs_update_at=xs_update_at, on_step=advance_step,
         phase_context=(profiler.region if profile else None))
 
-    # Whole-core rebalance instead of Anderson, measured on the 11-group HP-MR
-    # (refine 3, one 50 ms step, against a tol=1e-10 rebalanced reference):
-    #
-    #   depth=1 rebalance=on   tol 1e-6   -0.034%    16.7 s   112k inner
-    #   depth=1 rebalance=off  tol 1e-6   -0.034%    75.3 s   535k inner
-    #   depth=5 rebalance=off  tol 1e-6   -0.693%    38.5 s   273k inner
-    #   depth=5 rebalance=off  tol 1e-8   -0.002%   102.8 s   652k inner
-    #
-    # Two things there. Rebalance cuts plain Picard 4.5x at the SAME answer
-    # (the two agree to 1.2e-6), which is the property an accelerator must
-    # have. And Anderson's convergence measure -- the change between successive
-    # MIXED iterates -- understates the true residual on this stiff map, so at
-    # the same nominal tolerance it stops 20x short; tightening to 1e-8 fixes
-    # the answer but costs 6x the rebalanced run. The two also do not combine:
-    # rebalance makes the map mildly nonlinear in S, which breaks Anderson's
-    # affine premise, and depth 5 with rebalance fails to converge outright.
-    # ...and the winner depends on the problem, so pick rather than hard-code.
-    # On the two-group placeholder core the map is well conditioned and
-    # Anderson is 7.5x FASTER than rebalanced Picard (2.0 s vs 15.0 s, agreeing
-    # to 1.5e-4). The stiff regime is the multigroup one with upscatter, where
-    # the numbers above invert. Group count is the honest proxy for "is this
-    # the stiff regime"; override through transient_kwargs when it guesses
-    # wrong.
+    # Upscattering multigroup problems use rebalanced Picard; two-group
+    # problems retain Anderson. Both solve the same endpoint equations.
+    # Callers may override this workload-dependent choice in transient_kwargs.
     n_groups = ctx.materials[0].n_groups
     if n_groups > 2:
-        # scatter_subsweeps=6 rather than the auto-selected 3: on this exact
-        # problem (the 11-group HP-MR) the within-step fixed point is limited by
-        # the SPECTRAL coupling, and 3 passes leave the outer iteration to carry
-        # the group cascade -- ~7x the CG iterations and ~3x the wall time, at
-        # twice the error. See garnet.benchmarks.hpmr_transient_bench.SUBSWEEPS
-        # for the measured table. The solver's auto rule is left at 3 because it
-        # is shared with benchmarks that have not been re-measured; this path is
-        # the one the measurement was made on.
+        # Extra group sweeps settle the spectrum before amplitude rebalance.
         step_kwargs = dict(rebalance=True, anderson_depth=1, max_sweeps=4000,
                            scatter_subsweeps=6)
     else:
@@ -727,66 +780,67 @@ def coupled_transient(ctx: CouplingContext, t_end, dt, *, problem_at=None,
     # through transient_kwargs for a compatibility/convergence experiment.
     step_kwargs.setdefault("initial_steady", steady.neutronics)
     if str(step_kwargs.get("step_solver", "fixed-point")).lower() != "monolithic":
-        lin_kw = dict(step_kwargs.get("linsolve_kwargs") or {})
-        lin_kw.setdefault("check_every", check_every)
-        step_kwargs["linsolve_kwargs"] = lin_kw
+        linear_options = dict(step_kwargs.get("linsolve_kwargs") or {})
+        linear_options.setdefault("check_every", check_every)
+        step_kwargs["linsolve_kwargs"] = linear_options
     t0 = time.perf_counter()
     profiler.resume_neutronics()
     with (profiler.region("transient_total") if profile else nullcontext()):
-        res = tr.solve(t_end=t_end, dt=dt, verbose=verbose, **step_kwargs)
+        transient_result = neutron_solver.solve(t_end=t_end, dt=dt, verbose=verbose, **step_kwargs)
     profiler.pause_neutronics()
     seconds = time.perf_counter() - t0
 
     with profiler.region("result_transfer"):
-        final_temperature = asnumpy(state["T"])
+        final_temperature = asnumpy(state.temperature)
     profiler.counters["result_transfers"] += 1
     profiler.counters["initial_eigen_outer_iterations"] = \
-        res.steady.outer_iterations
+        transient_result.steady.outer_iterations
     profiler.counters["initial_eigen_inner_iterations"] = \
-        res.steady.inner_iterations
-    profiler.counters["initial_state_reuses"] = int(res.initial_state_reused)
+        transient_result.steady.inner_iterations
+    profiler.counters["initial_state_reuses"] = int(transient_result.initial_state_reused)
     profiler.counters["coupled_steady_reuses"] = int(
         initial_coupled_steady is not None)
-    profiler.counters["neutron_inner_iterations"] = res.total_inner_iterations
-    profiler.counters["neutron_operator_rebuilds"] = res.operator_rebuilds
+    profiler.counters["neutron_inner_iterations"] = transient_result.total_inner_iterations
+    profiler.counters["neutron_operator_rebuilds"] = transient_result.operator_rebuilds
     profiler.counters["neutron_ftm_fallbacks"] = sum(
-        bool(reason) for reason in res.ftm_fallback_reasons)
-    profiler.counters["neutron_outer_iterations"] = sum(res.step_iterations)
+        bool(reason) for reason in transient_result.ftm_fallback_reasons)
+    profiler.counters["neutron_outer_iterations"] = sum(transient_result.step_iterations)
     profiler.counters["neutron_rejected_outer_iterations"] = sum(
-        res.rejected_step_iterations)
+        transient_result.rejected_step_iterations)
     profiler.counters["neutron_total_outer_iterations"] = (
-        sum(res.step_iterations) + sum(res.rejected_step_iterations))
-    profiler.counters["neutron_rejected_steps"] = res.rejected_steps
+        sum(transient_result.step_iterations) + sum(transient_result.rejected_step_iterations))
+    profiler.counters["neutron_rejected_steps"] = transient_result.rejected_steps
     profiler.counters["neutron_monolithic_steps"] = int(
-        res.step_method == "monolithic") * (len(res.times) - 1)
+        transient_result.step_method == "monolithic") * (len(transient_result.times) - 1)
     # Backward-compatible name. For a monolithic run these are FGMRES applies,
     # not fission-source fixed-point sweeps; prefer neutron_outer_iterations.
-    profiler.counters["neutron_fixed_point_sweeps"] = sum(res.step_iterations)
+    profiler.counters["neutron_fixed_point_sweeps"] = sum(transient_result.step_iterations)
     profiler.counters["mixed_precision_fallbacks"] = \
-        res.mixed_precision_fallbacks
-    profiler.counters["cuda_graph_captures"] = res.cuda_graph_captures
-    profiler.counters["cuda_graph_replays"] = res.cuda_graph_replays
-    profiler.counters["cuda_graph_errors"] = len(res.cuda_graph_errors)
-    profiler.counters["adjoint_coarse_setups"] = res.adjoint_coarse_setups
-    profiler.counters["group_batch_active"] = int(res.group_batch_active)
-    profiler.counters["fgmres_workspace_bytes"] = res.fgmres_workspace_bytes
-    profiler.counters["neutron_bdf_max_order"] = max(res.time_orders, default=1)
+        transient_result.mixed_precision_fallbacks
+    profiler.counters["cuda_graph_captures"] = transient_result.cuda_graph_captures
+    profiler.counters["cuda_graph_replays"] = transient_result.cuda_graph_replays
+    profiler.counters["cuda_graph_errors"] = len(transient_result.cuda_graph_errors)
+    profiler.counters["adjoint_coarse_setups"] = transient_result.adjoint_coarse_setups
+    profiler.counters["group_batch_active"] = int(transient_result.group_batch_active)
+    profiler.counters["fgmres_workspace_bytes"] = transient_result.fgmres_workspace_bytes
+    profiler.counters["neutron_bdf_max_order"] = max(transient_result.time_orders, default=1)
     phase_seconds = profiler.seconds()
 
     return CoupledTransientResult(
-        times=res.times, power=res.power,
-        peak_temperature=np.array([steady.peak_temperature] + state["peak"]),
+        times=transient_result.times, power=transient_result.power,
+        peak_temperature=np.array([steady.peak_temperature] + state.peak_temperatures),
         mean_temperature=np.array(
-            [float(np.asarray(steady.temperature)[fuel].mean())] + state["mean"]),
-        k0=res.k0, temperature=final_temperature, flux=res.flux, steady=steady,
-        seconds=seconds, device=ctx.device, steps=len(res.times) - 1,
-        time_scheme=res.time_scheme, time_orders=list(res.time_orders),
-        step_widths=list(res.step_widths), local_errors=list(res.local_errors),
-        rejected_steps=res.rejected_steps,
+            [float(np.asarray(steady.temperature)[fuel].mean())] + state.mean_temperatures),
+        k0=transient_result.k0, temperature=final_temperature, flux=transient_result.flux, steady=steady,
+        seconds=seconds, device=ctx.device, steps=len(transient_result.times) - 1,
+        time_scheme=transient_result.time_scheme, time_orders=list(transient_result.time_orders),
+        step_widths=list(transient_result.step_widths), local_errors=list(transient_result.local_errors),
+        rejected_steps=transient_result.rejected_steps,
         step_source_weights=used_source_weights,
-        step_frequencies=list(res.step_frequencies),
-        ftm_fallback_reasons=list(res.ftm_fallback_reasons),
+        step_frequencies=list(transient_result.step_frequencies),
+        ftm_fallback_reasons=list(transient_result.ftm_fallback_reasons),
         phase_seconds=phase_seconds, counters=dict(profiler.counters))
+
 
 
 def _device_fission_energy(ctx, xp, dtype):
@@ -859,7 +913,8 @@ def cell_centroids(grid, raster=None) -> np.ndarray:
 
 
 def coupling_vertices(problem):
-    """(coords, flat_indices) for the ACTIVE cells, in one place.
+    """(coords, flat_indices) for the ACTIVE cells, in one place -- every cell
+    when the problem has no ``active`` mask.
 
     Both preCICE participants must call this on identically-built problems.
     The nearest-neighbour mapping is exact -- the identity permutation,
@@ -869,25 +924,28 @@ def coupling_vertices(problem):
     quietly map each vertex to a nearby wrong cell, and the coupling becomes a
     smoother. That is what the echo test in the preCICE test-suite is for.
     """
-    coords = cell_centroids(problem.grid, problem.raster)
-    active = np.asarray(problem.active).ravel()
-    idx = np.flatnonzero(active)
+    coords = cell_centroids(problem.grid, getattr(problem, "raster", None))
+    active = getattr(problem, "active", None)
+    idx = (np.arange(len(coords)) if active is None
+           else np.flatnonzero(np.asarray(active).ravel()))
     return np.ascontiguousarray(coords[idx]), idx
 
 
 def uncoupled_k(ctx: CouplingContext, temperature=None) -> float:
     """k with the feedback evaluated at a frozen temperature -- the reference
-    the temperature defect is measured against. ``None`` means the reference
-    temperature itself, i.e. the cross sections exactly as tabulated."""
-    if temperature is None:
-        temperature = np.full(ctx.shape,
-                              float(np.max(ctx.feedback.t_ref)))
+    the temperature defect is measured against. ``None`` means each material
+    at its OWN reference temperature, i.e. the cross sections exactly as
+    tabulated -- so no feedback hook at all. (One uniform temperature, such
+    as the largest t_ref, would move every material whose reference differs.)
+    """
+    xs_update = (None if temperature is None
+                 else _feedback_hook(ctx, temperature))
     solver = ctx.solver_cls(
         ctx.grid, ctx.materials, ctx.material_map, bc=ctx.bc,
         active=ctx.active, mask_bc=ctx.mask_bc,
         mix_material=ctx.mix_material, mix_weight=ctx.mix_weight,
         device=ctx.device, dtype=ctx.dtype,
-        xs_update=ctx.feedback.hook(temperature))
+        xs_update=xs_update)
     return solver.solve(**ctx.eigen_kwargs).k_eff
 
 
@@ -916,6 +974,10 @@ def criticality_search(rebuild, ctx_kwargs, bracket=(0.0, 180.0), target_k=1.0,
     smooth and monotone in the angle once the absorber is volume-mixed
     ("polar"), so secant lands in ~4 evaluations instead of ~20 -- and each
     evaluation is a full coupled solve.
+
+    Raises RuntimeError unless |k - target_k| < tol at the returned angle:
+    running out of iterations, or a secant step that stalls on a flat stretch
+    of the worth curve (a coarse-mesh staircase), is not an answer.
     """
     solve_kwargs = dict(solve_kwargs or {})
     cache = {}
@@ -943,12 +1005,16 @@ def criticality_search(rebuild, ctx_kwargs, bracket=(0.0, 180.0), target_k=1.0,
             f"the core cannot be made critical by drum rotation alone here")
 
     for _ in range(max_iter):
-        if abs(fb - fa) < 1e-14:
+        if abs(fb) < tol or abs(fb - fa) < 1e-14:
             break
         c = b - fb * (b - a) / (fb - fa)
         c = min(max(c, min(bracket)), max(bracket))
         fc = k_at(c).k_eff - target_k
         a, fa, b, fb = b, fb, c, fc
-        if abs(fc) < tol:
-            break
+    if not abs(fb) < tol:
+        raise RuntimeError(
+            f"criticality search did not converge: k = {fb + target_k:.7f} at "
+            f"{b:.4f} deg, |k - {target_k}| = {abs(fb):.2e} >= tol = {tol:.1e} "
+            f"after {len(cache)} coupled solves (the secant step stalled or "
+            f"max_iter = {max_iter} ran out)")
     return b, cache[b]

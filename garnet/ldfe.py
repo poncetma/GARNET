@@ -14,12 +14,11 @@ Construction (Jarrell & Adams; this follows OpenSN's ``SLDFEsqQuadrature``):
    sphere; one face covers exactly one octant-pair of directions.
 2. Subdivide the face into ``(level+1)^2`` squares in the face ("tilde")
    coordinates.  Each maps to a *spherical quadrilateral* (SQ).
-3. Inside each SQ place four directions at the centroids of its four sub-squares
-   and solve for four weights such that the rule integrates every linear
-   function ``c0 + c1 x + c2 y + c3 z`` over that SQ exactly.  With the four
-   nodal shape functions ``f_k`` (``f_k(omega_i) = delta_ki``) the weights are
-   simply ``w_k = integral of f_k over the SQ``, evaluated with a Gauss-Legendre
-   rule in tilde coordinates against the exact Jacobian ``a / r^3``.
+3. Inside each SQ place four directions at the centroids of its four sub-squares.
+   Construct nodal shape functions in the bilinear face-coordinate basis
+   ``{1, x~, y~, x~y~}``, with ``f_k(omega_i) = delta_ki``. Their integrals
+   give the four weights, evaluated with Gauss-Legendre quadrature against
+   the exact spherical Jacobian ``a / r^3``.
 4. Copy the face construction to all six faces (all eight octants).
 
 That locality is the point: step 3 only ever couples the four directions of one
@@ -29,8 +28,8 @@ The equal-solid-angle diagonal spacing of the reference implementation (its
 ``alpha``/``beta`` tweak) is not reproduced here; this module subdivides the
 face uniformly in tilde coordinates.  Cell solid angles therefore vary by ~1.6x
 between the face centre and its corner at low level.  That costs some
-uniformity but nothing in *correctness*: the weights are still exact for linear
-functions per cell, which is what makes the rule second-order accurate.
+uniformity; the chosen face-coordinate basis is still integrated to the
+accuracy of the Gauss-Legendre rule used in :func:`_cell_weights`.
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ def _cell_weights(x0, x1, y0, y1, frame, n_gl=16):
 
     Directions sit at the centroids of the cell's four sub-squares (the
     "centroid" point placement).  Weights integrate the nodal linear shape
-    functions over the cell, so the rule is exact for any linear function there.
+    functions in face coordinates over the cell, to the integration rule's accuracy.
     """
     xm, ym = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
     subs = ((x0, xm, y0, ym), (xm, x1, y0, ym), (x0, xm, ym, y1), (xm, x1, ym, y1))

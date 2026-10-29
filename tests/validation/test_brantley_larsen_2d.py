@@ -8,9 +8,12 @@ grid-aligned, so garnet's 2nd-order FV converges cheaply and the eigenvalue is a
 tests, which only pin internal consistency. This problem caught a sign typo in
 the paper's SDP2 c^(1) closure coefficient (Appendix A.3).
 
-garnet sits a uniform +45..+105 pcm above the paper for every method (its
-per-moment Robin vacuum vs the paper's coupled Marshak boundary), and reproduces
-the full ordering, including the headline SDPN-beats-SPN-at-equal-DoF result.
+On this 80x80 mesh garnet sits +45..+115 pcm above the paper for every method
+and reproduces the full ordering, including the headline SDPN-beats-SPN-at-
+equal-DoF result. The dedicated SP3 solver uses the coupled Marshak vacuum by
+default (+114 pcm here, the mesh error: it extrapolates to the paper, see
+test_marshak_converges_to_paper); the other methods default to the per-moment
+Robin vacuum, whose BC offset partly cancels the mesh error (+45..+87 pcm).
 """
 
 import numpy as np
@@ -64,8 +67,9 @@ def test_keff_matches_paper(keff, name):
 
 
 def test_offset_is_uniform(keff):
-    """The garnet-minus-paper gap is the same small positive vacuum-BC offset for
-    every method (no method is an outlier)."""
+    """The garnet-minus-paper gap is a small positive offset (mesh error plus,
+    for the per-moment methods, the vacuum-BC offset) for every method, with no
+    outlier."""
     d = np.array([(keff[n] - PAPER[n]) * 1e5 for n in PAPER])
     assert np.all(d > 0) and np.all(d < 150), dict(zip(PAPER, d))
     assert d.max() - d.min() < 80          # tight spread => consistent physics
@@ -89,7 +93,7 @@ def test_sdpn_beats_spn_at_matched_dofs(keff):
 
 def test_marshak_diagonal_g_reduces_to_per_moment():
     """The coupled-boundary machinery with a diagonal g = 1/2 I is identical to
-    the default per-moment Robin vacuum -- a correctness check on the K formula
+    the per-moment Robin vacuum (SP5's default) -- a correctness check on the K formula
     (K reduces to robin_face_term when the moments decouple)."""
     grid, mmap, bc = _problem(48)
     k_pm = SP5EigenSolver(grid, [FUEL, MOD], material_map=mmap, bc=bc,

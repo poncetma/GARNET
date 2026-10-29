@@ -177,7 +177,7 @@ def test_auto_selection_paths():
 def test_auto_congruence_from_boundary_conditions():
     """SDP3 auto (symmetrize=None) turns the congruence basis + CG on exactly
     when every boundary the operator sees is reflective/zero-flux."""
-    from garnet.linalg import pcg, bicgstab
+    from garnet.linalg import gmres, pcg
     from garnet.operator import CongruentSDPNOperator
 
     grid, mats, mmap, bc_vac = _bl_problem(20)
@@ -190,7 +190,9 @@ def test_auto_congruence_from_boundary_conditions():
 
     off = SDP3EigenSolver(grid, mats, material_map=mmap, bc=bc_vac,
                           device="cpu")
-    assert not off._symmetrize and off._linsolve is bicgstab
+    # Non-symmetric fallback is GMRES (BiCGStab's irregular inner error
+    # stalled the Anderson outer loop on vacuum-bounded SDP3 cores).
+    assert not off._symmetrize and off._linsolve is gmres
 
     # An active mask brings in mask_bc as a seventh boundary: the default
     # (vacuum) mask boundary must veto the congruence, a reflective one not.

@@ -104,8 +104,21 @@ def material_map(values, shape, count):
     return values.astype(np.int64, copy=True)
 
 
+# Fraction of the local step width within which a fixed-schedule endpoint is
+# moved onto a nearby event rather than kept beside it.
+_EVENT_SNAP = 1e-3
+
+
 def transient_schedule(t_end, dt, event_times, options):
-    """Split fixed steps at physical events, or hand them to a controller."""
+    """Split fixed steps at physical events, or hand them to a controller.
+
+    Each event becomes a step end and a BDF restart point. As for
+    ``bdf_restart_times``, the event endpoint belongs to the old segment:
+    ``problem_at(t_e)`` must return the pre-event (left-limit) state, and
+    history is discarded before the step leaving the event. A grid endpoint
+    within ``1e-3`` of the local width of an event is moved onto it, so no
+    sliver step is created; elsewhere the containing step is split in two.
+    """
     options = dict(options)
     if options.get("adaptive_bdf") is not None:
         options.setdefault("step_solver", "monolithic")
@@ -145,8 +158,19 @@ def transient_schedule(t_end, dt, event_times, options):
             raise ValueError("dt widths must be finite and positive and sum to t_end")
         endpoints = np.cumsum(widths)
         endpoints[-1] = t_end
-    # Retain each exact event rather than two endpoints separated by roundoff.
+    # Splitting the step (lo, hi] that contains an event leaves a sliver when
+    # the event lies within _EVENT_SNAP of that step's width from either end
+    # (an event at 0.1 + 1e-10 with dt = 0.01 made a 1e-10 s step, and
+    # variable-step BDF across a ~1e8 width ratio is unstable). Move that
+    # endpoint onto the event instead; t_end itself is never moved.
     for event in events:
-        endpoints = endpoints[~np.isclose(endpoints, event, rtol=1e-12, atol=1e-14)]
+        index = int(np.searchsorted(endpoints, event))
+        hi = endpoints[index]
+        lo = endpoints[index - 1] if index else 0.0
+        tolerance = _EVENT_SNAP * (hi - lo)
+        if hi - event <= tolerance and index < endpoints.size - 1:
+            endpoints = np.delete(endpoints, index)
+        elif event - lo <= tolerance and index:
+            endpoints = np.delete(endpoints, index - 1)
     endpoints = np.sort(np.r_[endpoints, events])
     return np.diff(np.r_[0.0, endpoints]), options

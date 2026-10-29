@@ -78,7 +78,9 @@ class HexGroupOperator:
 
     Same (apply, inv_diag) interface as the Cartesian GroupOperator, with an
     optional `active` mask for non-lattice-filling cores and a Robin/albedo
-    `mask_bc` on every core-surface and array-edge face.
+    `mask_bc` on every face it exposes (in-plane and axial, array edge
+    included). Without a mask the array's outer in-plane faces follow the
+    `bc` spec's row/column axes.
     """
 
     def __init__(self, xp, grid: HexGrid, D, removal, bc=BC_VACUUM, active=None,
@@ -127,36 +129,40 @@ class HexGroupOperator:
         if wz is not None:
             diag[:, :, :-1] += wz; diag[:, :, 1:] += wz
 
-        # Core-surface Robin faces. A face is a boundary for an active cell when
-        # its in-plane neighbour is inactive; add the Robin term to that cell.
-        # The active mask must carry a one-cell void border (assert below), so
-        # every boundary face is such an active/void interface and no off-array
-        # face is missed.
-        if alpha_edge != 0.0 and act is not None:
-            if bool(act[0].any() or act[-1].any()
-                    or act[:, 0].any() or act[:, -1].any()):
-                raise ValueError("active mask must have a one-cell void border "
-                                 "(use build helpers, which pad it)")
+        # Core-surface Robin faces: an active cell whose in-plane neighbour is
+        # inactive or off the array. With an active mask every exposed face
+        # takes mask_bc (no void border needed). Without one only the array's
+        # outer faces are exposed, and they take the bc spec's in-plane axes --
+        # rows (axis 0) and columns (axis 1), lo/hi, rows first for the
+        # diagonal (r+-1, c-+1) neighbours -- as the z faces take its z axis.
+        # (Formerly an unmasked lattice was silently reflective in-plane.)
+        if act is None:
+            side_alpha = (face_alpha(bc[0][0]), face_alpha(bc[0][1]),
+                          face_alpha(bc[1][0]), face_alpha(bc[1][1]))
+        else:
+            side_alpha = (alpha_edge,) * 4
+        if alpha_edge != 0.0 or any(a != 0.0 for a in side_alpha):
+            nr, nc = grid.shape[0], grid.shape[1]
+            a_self = xp.ones(grid.shape, dtype=bool) if act is None else act
+            # Neighbour activity and face alpha on a one-cell padded frame.
+            pad_act = xp.zeros((nr + 2, nc + 2, grid.shape[2]), dtype=bool)
+            pad_act[1:-1, 1:-1] = a_self
+            pad_alpha = xp.full((nr + 2, nc + 2, 1), float(alpha_edge))
+            pad_alpha[:, 0], pad_alpha[:, -1] = side_alpha[2], side_alpha[3]
+            pad_alpha[0], pad_alpha[-1] = side_alpha[0], side_alpha[1]
 
-            def add_plane(diag_sl, self_act, nbr_act, D_sl):
-                diag[diag_sl] += xp.where(
-                    self_act & ~nbr_act, robin_plane(D_sl, alpha_edge), 0.0)
+            for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0), (1, -1), (-1, 1)):
+                rs, cs = slice(1 + dr, 1 + dr + nr), slice(1 + dc, 1 + dc + nc)
+                exposed = a_self & ~pad_act[rs, cs]
+                a = pad_alpha[rs, cs]
+                a_fin = xp.where(xp.isinf(a), 1.0, a)
+                term = xp.where(xp.isinf(a), 4.0 * D / (3.0 * p * p),
+                                4.0 * D * a_fin / (3.0 * p * (p * a_fin + 2.0 * D)))
+                diag += xp.where(exposed & (a > 0.0), term, 0.0)
 
-            # Both orientations of each of the three axial directions.
-            add_plane((slice(None), slice(0, -1), slice(None)),
-                      act[:, :-1, :], act[:, 1:, :], D[:, :-1, :])
-            add_plane((slice(None), slice(1, None), slice(None)),
-                      act[:, 1:, :], act[:, :-1, :], D[:, 1:, :])
-            add_plane((slice(0, -1), slice(None), slice(None)),
-                      act[:-1, :, :], act[1:, :, :], D[:-1, :, :])
-            add_plane((slice(1, None), slice(None), slice(None)),
-                      act[1:, :, :], act[:-1, :, :], D[1:, :, :])
-            add_plane((slice(0, -1), slice(1, None), slice(None)),
-                      act[:-1, 1:, :], act[1:, :-1, :], D[:-1, 1:, :])
-            add_plane((slice(1, None), slice(0, -1), slice(None)),
-                      act[1:, :-1, :], act[:-1, 1:, :], D[1:, :-1, :])
-
-        # z boundary faces (Cartesian) use the bc spec on the z axis.
+        # z boundary faces (Cartesian) use the bc spec on the z axis; an axial
+        # face between an active and an inactive cell is a mask boundary and
+        # takes mask_bc (it used to act as a reflector).
         if grid.shape[2] > 1:
             for alpha, sl in ((face_alpha(bc[2][0]), (slice(None), slice(None), 0)),
                               (face_alpha(bc[2][1]), (slice(None), slice(None), -1))):
@@ -166,6 +172,12 @@ class HexGroupOperator:
                 if act is not None:
                     term = xp.where(act[sl], term, 0.0)
                 diag[sl] += term
+            if act is not None and alpha_edge != 0.0:
+                lo, hi = (Ellipsis, slice(1, None)), (Ellipsis, slice(0, -1))
+                diag[lo] += xp.where(act[lo] & ~act[hi],
+                                     robin_face_term(xp, D[lo], dz, alpha_edge), 0.0)
+                diag[hi] += xp.where(act[hi] & ~act[lo],
+                                     robin_face_term(xp, D[hi], dz, alpha_edge), 0.0)
 
         if act is not None:
             diag = xp.where(act, diag, 1.0)

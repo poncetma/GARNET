@@ -101,3 +101,73 @@ def test_xml_c5g7_cross_transcription():
         np.testing.assert_allclose(m.sigma_s, ref["scatter"], rtol=1e-5)
         if m.is_fissile:
             np.testing.assert_allclose(m.chi, ref["chi"], rtol=1e-5)
+
+
+_XSEC_3D = """\
+# two planes, hex-staggered rows (ragged), as in FEMFFUSION's 3D_Langenbuch
+Materials
+PLANE 1
+1     1 1
+2   1 1 1
+3     1 1
+PLANE 2
+1     1 2
+2   2 3 1
+3     1 1
+
+XSecs 3 # Number of materials defined
+#    Sigma_tr1    Sigma_a1   nuSigma_f1   Sigma_f1    Sigma_12
+#    Sigma_tr2    Sigma_a2   nuSigma_f2   Sigma_f2
+1   0.20   0.0026   0.0     0.0      0.027
+    1.26   0.049    0.0     0.0
+2   0.23   0.011    0.0075  0.0030   0.017
+    0.95   0.099    0.1378  0.0551
+3   0.23   0.010    0.0065  0.0026   0.0175
+    0.93   0.088    0.1127  0.0451
+
+Velocity
+1.25e7   2.5e5
+"""
+
+
+def _write(tmp_path, text):
+    path = tmp_path / "case.xsec"
+    path.write_text(text)
+    return str(path)
+
+
+def test_xsec_plane_headers_give_per_plane_maps(tmp_path):
+    """PLANE n lines are headers, not map rows: reading them as rows put a stray
+    [n] between planes and merged every plane into one corrupted map."""
+    xs = read_xsec(_write(tmp_path, _XSEC_3D))
+    assert xs.n_planes == 2
+    assert xs.core_map == [[[1, 1], [1, 1, 1], [1, 1]],
+                           [[1, 2], [2, 3, 1], [1, 1]]]
+    assert len(xs.materials) == 3
+
+
+def test_xsec_2d_map_is_unchanged_by_plane_support(tmp_path):
+    lines = _XSEC_3D.splitlines(keepends=True)
+    text = "".join(lines[:2] + lines[3:6] + lines[10:])  # plane 1, no headers
+    xs = read_xsec(_write(tmp_path, text))
+    assert xs.n_planes == 0
+    assert xs.core_map == [[1, 1], [1, 1, 1], [1, 1]]
+
+
+def test_xsec_plane_out_of_order_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="PLANE 2"):
+        read_xsec(_write(tmp_path, _XSEC_3D.replace("PLANE 2", "PLANE 3")))
+
+
+def test_xsec_keeps_the_power_cross_section_as_kappa(tmp_path):
+    """The Sigma_f column becomes kappa*Sigma_f in energy units (200 MeV/fission
+    in J by default); dropping it sent the power edit back to nu-weighting."""
+    from garnet.femffusion import ENERGY_PER_FISSION_J
+    xs = read_xsec(_write(tmp_path, _XSEC_3D))
+    assert xs.materials[0].kappa_fission is None     # reflector: not fissile
+    np.testing.assert_allclose(xs.materials[1].kappa_fission,
+                               ENERGY_PER_FISSION_J * np.array([0.0030, 0.0551]))
+    np.testing.assert_allclose(xs.materials[2].kappa_fission,
+                               ENERGY_PER_FISSION_J * np.array([0.0026, 0.0451]))
+    custom = read_xsec(_write(tmp_path, _XSEC_3D), energy_per_fission=1.0)
+    np.testing.assert_allclose(custom.materials[1].kappa_fission, [0.0030, 0.0551])

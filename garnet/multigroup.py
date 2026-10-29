@@ -82,16 +82,17 @@ class MultigroupStepOperator:
         self._group_batch = None
         if (group_batch is not None
                 and kernels.use_fused(self.xp, "groups")):
-            W, S = group_batch.get("W"), group_batch.get("S")
+            production_weights = group_batch.get("production_weights")
+            scatter_to_from = group_batch.get("scatter_to_from")
             expected_w = (self.groups,) + self.cell_shape
             expected_s = (self.groups, self.groups) + self.cell_shape
-            if W is None or tuple(W.shape) != expected_w:
-                raise ValueError("group_batch W has incompatible shape")
-            if S is None or tuple(S.shape) != expected_s:
-                raise ValueError("group_batch S has incompatible shape")
-            self._group_batch = {"W": W, "S": S}
+            if production_weights is None or tuple(production_weights.shape) != expected_w:
+                raise ValueError("group_batch production_weights has incompatible shape")
+            if scatter_to_from is None or tuple(scatter_to_from.shape) != expected_s:
+                raise ValueError("group_batch scatter_to_from has incompatible shape")
+            self._group_batch = {"production_weights": production_weights, "scatter_to_from": scatter_to_from}
             self._fission_buffer = self.xp.empty(self.cell_shape,
-                                                  dtype=W.dtype)
+                                                  dtype=production_weights.dtype)
             self._scatter_buffer = self.xp.empty_like(self._fission_buffer)
             self._emission_rows = tuple(
                 w if rhs_weight is None else rhs_weight * w
@@ -123,7 +124,7 @@ class MultigroupStepOperator:
             source = self._fission_buffer
             source.fill(0)
             kernels.group_accumulate(
-                self.xp, source, self._group_batch["W"], value)
+                self.xp, source, self._group_batch["production_weights"], value)
             source *= 1.0 / self.k_eff
             return source
         source = self.nu_sigma_f[0] * value[0]
@@ -146,23 +147,23 @@ class MultigroupStepOperator:
                     self.xp, out[g], self._emission_rows[g], fission, -1.0)
                 if self.rhs_weight is None:
                     kernels.group_accumulate(
-                        self.xp, out[g], self._group_batch["S"][g], value,
+                        self.xp, out[g], self._group_batch["scatter_to_from"][g], value,
                         alpha=-1.0)
                 else:
                     scatter = self._scatter_buffer
                     scatter.fill(0)
                     kernels.group_accumulate(
-                        self.xp, scatter, self._group_batch["S"][g], value)
+                        self.xp, scatter, self._group_batch["scatter_to_from"][g], value)
                     kernels.product_accumulate(
                         self.xp, out[g], self.rhs_weight, scatter, -1.0)
             return out
         for g, op in enumerate(self.operators):
             op.apply(value[g], out=out[g])
             coupled = self.emission_weights[g] * fission
-            for gf in range(self.groups):
-                scatter = self.sigma_s[gf][g]
-                if gf != g and scatter is not None:
-                    coupled = coupled + scatter * value[gf]
+            for source_group in range(self.groups):
+                scatter = self.sigma_s[source_group][g]
+                if source_group != g and scatter is not None:
+                    coupled = coupled + scatter * value[source_group]
             if self.rhs_weight is not None:
                 coupled = self.rhs_weight * coupled
             out[g] -= coupled
@@ -530,20 +531,20 @@ class EnergyGroupGaussSeidelPreconditioner:
                 if self.block._group_batch is not None:
                     if self.block.rhs_weight is None:
                         kernels.group_accumulate(
-                            self.xp, q, self.block._group_batch["S"][g], z)
+                            self.xp, q, self.block._group_batch["scatter_to_from"][g], z)
                         coupled = None
                     else:
                         coupled = self.block._scatter_buffer
                         coupled.fill(0)
                         kernels.group_accumulate(
                             self.xp, coupled,
-                            self.block._group_batch["S"][g], z)
+                            self.block._group_batch["scatter_to_from"][g], z)
                 else:
                     coupled = None
-                    for gf in range(self.block.groups):
-                        scatter = self.block.sigma_s[gf][g]
-                        if gf != g and scatter is not None:
-                            term = scatter * z[gf]
+                    for source_group in range(self.block.groups):
+                        scatter = self.block.sigma_s[source_group][g]
+                        if source_group != g and scatter is not None:
+                            term = scatter * z[source_group]
                             coupled = term if coupled is None else coupled + term
                 if fission is not None:
                     term = self.block.emission_weights[g] * fission

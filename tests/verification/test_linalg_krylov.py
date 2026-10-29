@@ -365,3 +365,57 @@ def test_unknown_linear_solver_rejected():
     assert get_linear_solver("gmres") is gmres
     assert get_linear_solver("bicgstab") is bicgstab
     assert get_linear_solver(pcg) is pcg   # callables pass through
+
+
+# --- interchangeable signatures, degenerate right-hand sides, scale invariance
+from garnet.linalg import COMMON_SOLVER_KWARGS, LINEAR_SOLVERS  # noqa: E402
+
+
+@pytest.mark.parametrize("name", sorted(LINEAR_SOLVERS))
+def test_every_solver_accepts_the_common_kwargs(name):
+    # Call sites (e.g. the thermal solver, which always passes check_every)
+    # may hand any of these to any solver chosen by linear_solver=.
+    op, b = _spd_stencil_system(6)
+    x0 = np.zeros_like(b)
+    kwargs = {"rtol": 1e-8, "atol": 0.0, "maxiter": 2000,
+              "precond": neumann_preconditioner(op.apply, op.inv_diag, 1),
+              "check_every": 2, "raise_on_fail": True,
+              "workspace": PCGWorkspace.like(b) if name == "cg" else None}
+    assert set(kwargs) == set(COMMON_SOLVER_KWARGS)
+    x, _ = get_linear_solver(name)(op.apply, b, x0, op.inv_diag, np, **kwargs)
+    assert np.linalg.norm(b - op.apply(x)) <= 1e-7 * np.linalg.norm(b)
+
+
+@pytest.mark.parametrize("name", sorted(LINEAR_SOLVERS))
+def test_raise_on_fail_false_returns_iterate(name):
+    op, b = _spd_stencil_system(6)
+    x, _ = get_linear_solver(name)(op.apply, b, np.zeros_like(b), op.inv_diag,
+                                   np, rtol=1e-14, maxiter=2,
+                                   raise_on_fail=False)
+    assert x.shape == b.shape and np.all(np.isfinite(x))
+
+
+@pytest.mark.parametrize("name", sorted(LINEAR_SOLVERS))
+def test_zero_rhs_with_warm_start_returns_zero(name):
+    # pcg used to iterate to maxiter chasing a relative target of 0 and
+    # raise; COCG reported a breakdown.
+    op, _ = _spd_stencil_system(6)
+    b = np.zeros(op.inv_diag.shape)
+    x, it = get_linear_solver(name)(op.apply, b, np.ones_like(b), op.inv_diag,
+                                    np, rtol=1e-6, maxiter=50)
+    assert it == 0 and not np.any(x)
+
+
+def test_bicgstab_breakdown_test_is_scale_invariant():
+    # The absolute 1e-300 thresholds declared a Lanczos breakdown on any
+    # system whose (r_hat, r) fell below them -- here a right-hand side with
+    # ||b||^2 ~ 1e-302, still comfortably normal floating point -- and then
+    # raised. The relative test sees the identical (scaled) recurrence.
+    A, b = _nonsymmetric_system()
+    apply = lambda v: A @ v
+    inv_diag = 1.0 / np.diag(A)
+    x1, it1 = bicgstab(apply, b, np.zeros_like(b), inv_diag, np, rtol=1e-2)
+    s = 1e-151 / np.linalg.norm(b)
+    x2, it2 = bicgstab(apply, s * b, np.zeros_like(b), inv_diag, np, rtol=1e-2)
+    assert it2 == it1
+    assert np.allclose(x2 / s, x1, rtol=1e-6)

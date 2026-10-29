@@ -84,9 +84,34 @@ class MaterialBlend:
     def harmonic(self, table):
         """Harmonic blend -- the rule for a diffusion coefficient (its
         transport cross section 1/(3D) volume-averages, so a trace of a strong
-        absorber correctly chokes the cell) and, for the same reason, for a
-        thermal conductivity in series across a cell."""
+        absorber correctly chokes the cell).
+
+        NOT the rule for thermal conductivity: :class:`~garnet.thermal.
+        ConductionSolver` blends k *arithmetically* within a cell (two
+        materials sharing a cell conduct in parallel) and leaves the series
+        (harmonic) mean to the operator's face coefficients."""
         return self._blend(table, lambda b, o, wt: 1.0 / ((1.0 - wt) / b + wt / o))
+
+    def components(self):
+        """The (at most two) materials sharing each cell, with their fractions.
+
+        A list of ``(index, fraction)`` per-cell fields: the base material at
+        ``1 - w`` and, where a blend is active, the partner at ``w`` (the
+        partner entry has fraction 0 elsewhere). :meth:`linear` is exactly
+        ``sum(fraction * table[index])`` over them. For a per-material LAW
+        rather than a per-material number -- a temperature feedback, whose
+        change depends on each material's own coefficient and reference
+        temperature -- evaluate the law per component and blend the results,
+        instead of blending the coefficients and evaluating once.
+        """
+        xp = self.xp
+        ones = xp.ones(self.shape, dtype=self.dtype)
+        if self.mmap is None:
+            return [(xp.zeros(self.shape, dtype=np.int64), ones)]
+        if not self.mix:
+            return [(self.mmap, ones)]
+        w = xp.where(self.active_mix, self.w, 0.0)
+        return [(self.mmap, 1.0 - w), (self.mm2c, w)]
 
     def fission_weighted(self, table, production):
         """Blend by share of the cell's fission production, not by volume.

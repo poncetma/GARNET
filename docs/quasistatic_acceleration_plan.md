@@ -68,7 +68,9 @@ Phases 0-3, including the guarded time-dependent IQS core, are now executable:
   after a positive rescaling makes its adjoint projection exactly match the
   accepted fine-step inventory. `iqs_predictor_tol` adaptively halves future
   shape intervals after a large coarse-predictor disagreement and restores the
-  maximum interval after the event settles. Optional `iqs_substeps` traverse
+  maximum interval after the event settles. (Superseded on 2026-10-29: the
+  tolerance now rejects and retries the current interval; see
+  [Predictor-corrector IQS](#predictor-corrector-iqs-2026-10-29-audit-fix).) Optional `iqs_substeps` traverse
   the actual cached control path inside a macro corrector.
 - Reused adjoints can now be guarded by the amplitude-free residual of the
   current transposed eigenproblem. `adjoint_every` remains a maximum age and a
@@ -115,6 +117,69 @@ inheriting HP-MR-specific error limits.
 The detailed configuration, counters, timing, sampled reference comparison,
 and limitations are recorded in
 [`benchmark-results/hpmr-iqs-gh200`](../benchmark-results/hpmr-iqs-gh200/README.md).
+This profile was calibrated under the explicit-shape IQS that preceded the
+2026-10-29 predictor–corrector fix. Re-check it on the GH200 before relying on
+it (audit open item O3 in
+[code_audit_2026-10-28.md](qa/code_audit_2026-10-28.md)).
+
+## Predictor-corrector IQS (2026-10-29 audit fix)
+
+The audit found the IQS step explicit in the shape: over each macro interval
+`rho`, `Lambda` and `beta` came from the start shape only, the corrector's end
+power was used only as a disagreement metric, and `iqs_predictor_tol` merely
+halved the *next* interval. Error converged first order in `shape_dt` and IQS
+was barely better than adiabatic. Each IQS interval is now iterated:
+
+1. Predictor: march amplitude, power edits and thermal windows with
+   start-shape kinetics (unchanged from before).
+2. Corrector: solve the time-dependent end shape; project it on the operator
+   of the last fine step to get the shape correction
+   `Delta = p(end shape) - p(start shape)` for `rho`, `Lambda`, `beta` and the
+   end time importance.
+3. Re-march (host only) the anchor amplitude/effective precursors with
+   `p_start(t_j) + w_j Delta`, `w_j` linear in time, and the interpolated
+   power-shape factor `q_j = q_0 T_0 / ((1-w_j) T_0 + w_j T_1)`.
+4. If the end power differs from the march's by more than
+   `iqs_iteration_tol` (default `1e-4`), restore the anchor checkpoint
+   (amplitude, precursors, temperature, feedback hook, power window, history)
+   and replay the interval with the correction, so the thermal windows see the
+   corrected power. When that replay moves the end operator the end shape is
+   solved again. Accept the re-projected amplitude history once converged.
+5. Reject the interval and retry it from the anchor with half the width if it
+   has not converged after `iqs_max_iterations` (default 4) replays or if the
+   corrector's own end power disagrees with the accepted power by more than
+   `iqs_predictor_tol`. A one-fine-step interval is accepted and counted.
+
+Other fixes in the same change: after a shape correction the next step reuses
+the shape solver (not the stale pre-correction one); the hard fallback scales
+its precursors under the same start operator that `TransientSolver` uses to
+normalize the flux; a thermal window that closed on a step whose power is then
+corrected is re-stepped (`thermal_redos`); and the projection functions raise
+`TypeError` for SP3/SPN/SDPN solvers.
+
+Measured maximum relative power error, 2-group 8x6 core with a localized
+thermal-absorption decrease (P/P0 about 3.1 at 20 ms), full diffusion at the
+same `dt=0.25 ms` as reference:
+
+| `shape_dt` | explicit IQS (before) | IQS (now) | adiabatic |
+|---:|---:|---:|---:|
+| 4 ms | 3.10e-2 | 1.17e-2 | 3.17e-2 |
+| 2 ms | 1.71e-2 | 5.45e-3 | 1.82e-2 |
+| 1 ms | 8.98e-3 | 1.96e-3 | 1.05e-2 |
+| 0.5 ms | 4.68e-3 | 4.80e-4 | 6.81e-3 |
+
+With `shape_dt = dt` (one corrector step = one full backward-Euler step) the
+old scheme had 1.9%/0.97%/0.50% error at 2/1/0.5 ms; IQS now reproduces the
+full transient to its solver tolerance (about 1e-9 at `tol_step=1e-11`).
+`tests/verification/test_quasistatic_accuracy.py` gates both behaviors in x-z
+and r-z.
+
+Cost: shape and adjoint solves per accepted interval are unchanged when no
+rejection occurs. Each interval whose shape moves is replayed once, which
+repeats its fine-step operator rebuilds/projections and thermal solves; the
+point-kinetics re-march is host-only. Calibrated guard profiles from earlier
+studies should be re-checked: `iqs_predictor_tol` now rejects the current
+interval instead of shortening the next one.
 
 The fixed-shape entry point still reports `shape_updates == 0` intentionally.
 The adiabatic option performs scheduled eigen updates; IQS is now the default.

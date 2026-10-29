@@ -25,6 +25,7 @@ hex and triangular stencils and the SP3/SDPN angular blocks all reuse it.
 from __future__ import annotations
 
 import math
+import numbers
 
 import numpy as np
 
@@ -45,16 +46,20 @@ _VACUUM_ALPHA = 0.5
 
 def _face_valid(f):
     """Validate and canonicalize one face spec: a known string or an albedo."""
-    if f in (BC_ZERO_FLUX, BC_REFLECTIVE, BC_VACUUM):
+    if isinstance(f, str) and f in (BC_ZERO_FLUX, BC_REFLECTIVE, BC_VACUUM):
         return f
+    # numbers.Real admits numpy scalars (np.float32(0.5)); a numeric string
+    # (e.g. from an input file) is still parsed; bool is not an albedo.
     try:
+        if not isinstance(f, (str, numbers.Real)) or isinstance(f, bool):
+            raise TypeError
         alpha = float(f)
     except (TypeError, ValueError):
         raise ValueError(
             f"unknown bc {f!r}; use {BC_ZERO_FLUX!r}, {BC_REFLECTIVE!r}, "
-            f"{BC_VACUUM!r}, or a non-negative albedo coefficient")
-    if alpha < 0:
-        raise ValueError(f"albedo coefficient must be non-negative, got {alpha}")
+            f"{BC_VACUUM!r}, or a non-negative albedo coefficient") from None
+    if not math.isfinite(alpha) or alpha < 0:
+        raise ValueError(f"albedo coefficient must be finite (not NaN or inf) and non-negative, got {alpha}")
     return alpha
 
 
@@ -79,7 +84,7 @@ def normalize_bc(bc):
     coefficient alpha (the boundary law J_net = alpha * phi_surface).
     """
     def is_scalar(x):
-        return isinstance(x, (str, int, float))
+        return isinstance(x, (str, numbers.Real))
 
     if is_scalar(bc):
         faces = [bc] * 6
@@ -179,24 +184,29 @@ class GroupOperator:
 
         # Cylindrical (r-z) grids: every term of the per-unit-volume Cartesian
         # stencil is scaled by its radial metric factor -- cell terms (removal,
-        # y/z couplings, y/z boundary faces) by the cell-center radius cw, and
+        # y/z couplings, y/z boundary faces) by the cell-center radius, and
         # radial face terms by the face radius. This is the equation multiplied
         # by the cell volume, so the radial two-point stencil stays symmetric
         # (both neighbours see the shared face radius) and CG still applies;
         # the matching source-side weight is exposed as self.rhs_weight. On a
         # Cartesian grid all factors are 1 and the stencil is unchanged.
-        met = getattr(grid, "cylindrical_metrics", lambda: None)()
-        self._cartesian = met is None
-        if met is None:
-            cw = fwx = 1.0
-            bwx_lo = bwx_hi = 1.0
+        cylindrical_metrics = getattr(grid, "cylindrical_metrics", lambda: None)()
+        self._cartesian = cylindrical_metrics is None
+        if cylindrical_metrics is None:
+            cell_radius = radial_face_radius = 1.0
+            inner_boundary_radius = outer_boundary_radius = 1.0
             self.rhs_weight = None
         else:
-            rc, rf, r_lo, r_hi = met
-            cw = xp.asarray(rc, dtype=D.dtype)
-            fwx = xp.asarray(rf, dtype=D.dtype)
-            bwx_lo, bwx_hi = float(r_lo), float(r_hi)
-            self.rhs_weight = cw
+            center_radii, face_radii, inner_radius, outer_radius = cylindrical_metrics
+            cell_radius = xp.asarray(center_radii, dtype=D.dtype)
+            radial_face_radius = xp.asarray(face_radii, dtype=D.dtype)
+            inner_boundary_radius, outer_boundary_radius = float(inner_radius), float(outer_radius)
+            self.rhs_weight = cell_radius
+            # The y "faces" of an r-z grid are the azimuthal seam, not a
+            # surface: always reflective, whatever a scalar/all-face bc says
+            # (as CylindricalModel does). The r = 0 axis needs no override --
+            # its boundary radius is 0, so any bc there is inert below.
+            bc = (bc[0], (BC_REFLECTIVE, BC_REFLECTIVE), bc[2])
 
         def robin(Dface, d, alpha):
             return robin_face_term(xp, Dface, d, alpha)
@@ -206,9 +216,9 @@ class GroupOperator:
         def face(Da, Db, d):
             return harmonic_mean(Da, Db) / (d * d)
 
-        self.wx = fwx * face(D[:-1, :, :], D[1:, :, :], dx)
-        self.wy = cw * face(D[:, :-1, :], D[:, 1:, :], dy)
-        self.wz = cw * face(D[:, :, :-1], D[:, :, 1:], dz)
+        self.wx = radial_face_radius * face(D[:-1, :, :], D[1:, :, :], dx)
+        self.wy = cell_radius * face(D[:, :-1, :], D[:, 1:, :], dy)
+        self.wz = cell_radius * face(D[:, :, :-1], D[:, :, 1:], dz)
 
         # Each pair contains the factors on the low- and high-coordinate side
         # of every interior face. The two directed coefficients multiply the
@@ -216,7 +226,7 @@ class GroupOperator:
         self._adf = adf is not None
         self._high_weights = None
         if adf is not None:
-            if met is not None:
+            if cylindrical_metrics is not None:
                 raise ValueError("ADF is currently supported on Cartesian grids only")
             if len(adf) != 3 or any(len(pair) != 2 for pair in adf):
                 raise ValueError("adf must contain three (low, high) face-array pairs")
@@ -236,9 +246,9 @@ class GroupOperator:
                 slices_lo = [slice(None)] * 3
                 slices_hi = [slice(None)] * 3
                 slices_lo[axis], slices_hi[axis] = slice(None, -1), slice(1, None)
-                dl, dh = D[tuple(slices_lo)], D[tuple(slices_hi)]
+                diffusion_low, diffusion_high = D[tuple(slices_lo)], D[tuple(slices_hi)]
                 spacing = (dx, dy, dz)[axis]
-                denom = 0.5 * spacing**2 * (lo / dl + hi / dh)
+                denom = 0.5 * spacing**2 * (lo / diffusion_low + hi / diffusion_high)
                 weights = (lo / denom, hi / denom)
                 if any(not bool(xp.all(xp.isfinite(w) & (w > 0))) for w in weights):
                     raise ValueError("ADF face coefficients must be finite and positive in the operator dtype")
@@ -249,21 +259,21 @@ class GroupOperator:
         # Non-rectangular cores: an "active" mask marks in-domain cells. Faces
         # touching an inactive (excised) cell carry no diffusion; the active
         # cell instead sees the core-surface boundary law mask_bc on that face.
-        act = None
+        active_cells = None
         if active is not None:
-            act = xp.asarray(active).astype(bool)
-            if act.shape != grid.shape:
-                raise ValueError(f"active mask shape {act.shape} != grid shape {grid.shape}")
-            self.wx = xp.where(act[:-1, :, :] & act[1:, :, :], self.wx, 0.0)
-            self.wy = xp.where(act[:, :-1, :] & act[:, 1:, :], self.wy, 0.0)
-            self.wz = xp.where(act[:, :, :-1] & act[:, :, 1:], self.wz, 0.0)
+            active_cells = xp.asarray(active).astype(bool)
+            if active_cells.shape != grid.shape:
+                raise ValueError(f"active mask shape {active_cells.shape} != grid shape {grid.shape}")
+            self.wx = xp.where(active_cells[:-1, :, :] & active_cells[1:, :, :], self.wx, 0.0)
+            self.wy = xp.where(active_cells[:, :-1, :] & active_cells[:, 1:, :], self.wy, 0.0)
+            self.wz = xp.where(active_cells[:, :, :-1] & active_cells[:, :, 1:], self.wz, 0.0)
             if self._adf:
                 self._high_weights = tuple(xp.where(mask, w, 0.0) for mask, w in zip(
-                    (act[:-1] & act[1:], act[:, :-1] & act[:, 1:],
-                     act[:, :, :-1] & act[:, :, 1:]), self._high_weights))
+                    (active_cells[:-1] & active_cells[1:], active_cells[:, :-1] & active_cells[:, 1:],
+                     active_cells[:, :, :-1] & active_cells[:, :, 1:]), self._high_weights))
 
         # Diagonal: removal + sum of face couplings incident on each cell.
-        diag = removal * cw
+        diag = removal * cell_radius
         wx_hi, wy_hi, wz_hi = (self._high_weights if self._adf else (self.wx, self.wy, self.wz))
         diag[1:, :, :] += wx_hi
         diag[:-1, :, :] += self.wx
@@ -276,40 +286,64 @@ class GroupOperator:
         # active), each scaled by its face's metric weight: the boundary radius
         # for the two radial faces (0 at the symmetry axis, so any bc there is
         # inert), the cell radius for y/z faces.
-        cw_at = (lambda sl: 1.0) if met is None else (lambda sl: cw[sl])
+        cell_radius_at = (lambda sl: 1.0) if cylindrical_metrics is None else (lambda sl: cell_radius[sl])
         boundary_faces = [
-            (face_alpha(bc[0][0]), (0, slice(None), slice(None)), dx, lambda sl: bwx_lo),
-            (face_alpha(bc[0][1]), (-1, slice(None), slice(None)), dx, lambda sl: bwx_hi),
-            (face_alpha(bc[1][0]), (slice(None), 0, slice(None)), dy, cw_at),
-            (face_alpha(bc[1][1]), (slice(None), -1, slice(None)), dy, cw_at),
-            (face_alpha(bc[2][0]), (slice(None), slice(None), 0), dz, cw_at),
-            (face_alpha(bc[2][1]), (slice(None), slice(None), -1), dz, cw_at),
+            (face_alpha(bc[0][0]), (0, slice(None), slice(None)), dx, lambda sl: inner_boundary_radius),
+            (face_alpha(bc[0][1]), (-1, slice(None), slice(None)), dx, lambda sl: outer_boundary_radius),
+            (face_alpha(bc[1][0]), (slice(None), 0, slice(None)), dy, cell_radius_at),
+            (face_alpha(bc[1][1]), (slice(None), -1, slice(None)), dy, cell_radius_at),
+            (face_alpha(bc[2][0]), (slice(None), slice(None), 0), dz, cell_radius_at),
+            (face_alpha(bc[2][1]), (slice(None), slice(None), -1), dz, cell_radius_at),
         ]
         for alpha, sl, d, wgt in boundary_faces:
             if alpha == 0.0:
                 continue
             term = wgt(sl) * robin(D[sl], d, alpha)
-            if act is not None:
-                term = xp.where(act[sl], term, 0.0)
+            if active_cells is not None:
+                term = xp.where(active_cells[sl], term, 0.0)
             diag[sl] += term
 
         # Internal core-surface faces (active cell facing an excised cell).
-        if act is not None:
-            ma = face_alpha(_face_valid(mask_bc))
-            if ma != 0.0:
-                lo_a, hi_a = act[:-1, :, :], act[1:, :, :]
-                diag[:-1, :, :] += xp.where(lo_a & ~hi_a, fwx * robin(D[:-1, :, :], dx, ma), 0.0)
-                diag[1:, :, :] += xp.where(hi_a & ~lo_a, fwx * robin(D[1:, :, :], dx, ma), 0.0)
-                lo_a, hi_a = act[:, :-1, :], act[:, 1:, :]
-                diag[:, :-1, :] += xp.where(lo_a & ~hi_a, cw * robin(D[:, :-1, :], dy, ma), 0.0)
-                diag[:, 1:, :] += xp.where(hi_a & ~lo_a, cw * robin(D[:, 1:, :], dy, ma), 0.0)
-                lo_a, hi_a = act[:, :, :-1], act[:, :, 1:]
-                diag[:, :, :-1] += xp.where(lo_a & ~hi_a, cw * robin(D[:, :, :-1], dz, ma), 0.0)
-                diag[:, :, 1:] += xp.where(hi_a & ~lo_a, cw * robin(D[:, :, 1:], dz, ma), 0.0)
+        if active_cells is not None:
+            mask_alpha = face_alpha(_face_valid(mask_bc))
+            if mask_alpha != 0.0:
+                low_active, high_active = active_cells[:-1, :, :], active_cells[1:, :, :]
+                diag[:-1, :, :] += xp.where(
+                    low_active & ~high_active,
+                    radial_face_radius * robin(D[:-1, :, :], dx, mask_alpha),
+                    0.0,
+                )
+                diag[1:, :, :] += xp.where(
+                    high_active & ~low_active,
+                    radial_face_radius * robin(D[1:, :, :], dx, mask_alpha),
+                    0.0,
+                )
+                low_active, high_active = active_cells[:, :-1, :], active_cells[:, 1:, :]
+                diag[:, :-1, :] += xp.where(
+                    low_active & ~high_active,
+                    cell_radius * robin(D[:, :-1, :], dy, mask_alpha),
+                    0.0,
+                )
+                diag[:, 1:, :] += xp.where(
+                    high_active & ~low_active,
+                    cell_radius * robin(D[:, 1:, :], dy, mask_alpha),
+                    0.0,
+                )
+                low_active, high_active = active_cells[:, :, :-1], active_cells[:, :, 1:]
+                diag[:, :, :-1] += xp.where(
+                    low_active & ~high_active,
+                    cell_radius * robin(D[:, :, :-1], dz, mask_alpha),
+                    0.0,
+                )
+                diag[:, :, 1:] += xp.where(
+                    high_active & ~low_active,
+                    cell_radius * robin(D[:, :, 1:], dz, mask_alpha),
+                    0.0,
+                )
             # Excised cells: decouple (all face weights into them are already 0)
             # and give them a unit diagonal so Jacobi is well defined; with a
             # void material (no fission/scatter) their flux stays exactly zero.
-            diag = xp.where(act, diag, 1.0)
+            diag = xp.where(active_cells, diag, 1.0)
 
         # Divergence form (symmetric=False, cylindrical only): apply() runs
         # the weighted stencil and then divides each row by its cell weight,
@@ -317,8 +351,8 @@ class GroupOperator:
         # finite-volume form. The Jacobi diagonal scales along.
         self._stencil_diag = diag
         self.row_scale = None
-        if not symmetric and met is not None:
-            self.row_scale = 1.0 / cw
+        if not symmetric and cylindrical_metrics is not None:
+            self.row_scale = 1.0 / cell_radius
             self.rhs_weight = None
             diag = diag * self.row_scale
         self.diag = diag

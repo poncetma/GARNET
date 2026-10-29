@@ -44,6 +44,7 @@ import numpy as np
 from .backend import asnumpy
 from .linalg import anderson_step as _anderson_step
 from .materials import Material
+from .power import fission_energy_xs
 
 
 def _cell_tables(materials, material_map):
@@ -82,8 +83,10 @@ def _mixed_entries(material_map, region_map, cell_volume, shape_n,
     idx = np.arange(shape_n)
     base_mat = np.asarray(material_map).reshape(-1)
     base_reg = np.asarray(region_map).reshape(-1)
+    # Broadcast against the UNflattened map, so a documented (*shape) per-cell
+    # volume array lines up cell for cell, then flatten like the maps above.
     V = np.broadcast_to(np.asarray(cell_volume, dtype=float),
-                        base_mat.shape).reshape(-1).astype(float)
+                        np.shape(material_map)).reshape(-1).astype(float)
     if mix_material is None or mix_weight is None:
         return idx, base_reg, V, base_mat
     mm = np.asarray(mix_material).reshape(-1)
@@ -110,7 +113,10 @@ def flux_weighted_homogenize(flux, materials, material_map, region_map,
                    regions (e.g. one per assembly).
     cell_volume  : scalar cell volume, or a (*shape) array (uniform grids: pass
                    the constant; it cancels in the ratios but sets the scale of
-                   the returned region volumes/fluxes).
+                   the returned region volumes/fluxes). Non-uniform grids need
+                   the array -- on an r-z grid ``grid.cell_volumes`` (annuli),
+                   not the rectangular ``grid.cell_volume`` -- and the same
+                   value must go to :func:`region_average`.
     mix_material, mix_weight : the solvers' per-cell two-material blend. Supply
                    them and each blended cell is split into two fractional
                    entries, so a volume-mixed absorber arc is homogenized at its
@@ -126,6 +132,10 @@ def flux_weighted_homogenize(flux, materials, material_map, region_map,
       homogenized_materials : list of R Materials, each cross section
         flux-and-volume weighted over its region and group so that
         Sigma_hom * <phi>_region * V_region == the region's fine reaction rate.
+        kappa_fission is collapsed the same way as nu_sigma_f whenever the fine
+        materials carry it (non-fissile ones without it count as zero; a mix of
+        fissile materials with and without it is rejected, see
+        :func:`garnet.power.fission_energy_xs`); non-fissile regions get None.
       region_flux           : (R, G) volume-average scalar flux per region.
       region_volume         : (R,) total volume per region.
 
@@ -136,61 +146,81 @@ def flux_weighted_homogenize(flux, materials, material_map, region_map,
     flux = asnumpy(flux)          # device Result.flux -> host (see module note)
     G = int(flux.shape[0])
     ncell = int(np.asarray(material_map).size)
-    cells, n, V, matidx = _mixed_entries(material_map, region_map, cell_volume,
-                                         ncell, mix_material, mix_weight,
-                                         mix_region_map)
-    tab = _cell_tables(materials, matidx)
-    R = int(max(n.max(), np.asarray(region_map).max())) + 1
-    phi = flux.reshape(G, -1)[:, cells]               # (G, n_entries)
+    entry_cells, entry_regions, entry_volumes, entry_materials = _mixed_entries(
+        material_map, region_map, cell_volume, ncell, mix_material, mix_weight,
+        mix_region_map)
+    material_tables = _cell_tables(materials, entry_materials)
+    # kappa*Sigma_f is a reaction-rate coefficient like nu*Sigma_f: dropping it
+    # here sent every SPH-homogenized model's power edit back to nu-weighting.
+    energy_table, energy_key = fission_energy_xs(materials)
+    kappa_table = (energy_table[entry_materials]
+                   if energy_key == "kappa_fission" else None)
+    R = int(max(entry_regions.max(), np.asarray(region_map).max())) + 1
+    region_counts = np.bincount(entry_regions, weights=entry_volumes, minlength=R)
+    if np.any(region_counts <= 0.0):
+        # Returned lists are indexed by region, so an empty index cannot simply
+        # be skipped; it would otherwise surface as 0/0 and an IndexError.
+        raise ValueError("region_map must use every index in [0, R) on cells of "
+                         "positive volume; empty regions: "
+                         f"{np.flatnonzero(region_counts <= 0.0).tolist()}")
+    phi = flux.reshape(G, -1)[:, entry_cells]               # (G, n_entries)
 
     region_flux = np.zeros((R, G))
     region_volume = np.zeros(R)
     mats_out = []
     for i in range(R):
-        cells = np.where(n == i)[0]
-        Vi = V[cells]                                 # (ni,)
-        w = phi[:, cells] * Vi                        # (G, ni) flux-volume weight
-        wsum = w.sum(axis=1)                          # (G,)
-        vol = Vi.sum()
+        region_entries = np.where(entry_regions == i)[0]
+        region_entry_volumes = entry_volumes[region_entries]
+        region_flux_entries = phi[:, region_entries]
+        flux_volume_weights = region_flux_entries * region_entry_volumes
+        group_weight_sums = flux_volume_weights.sum(axis=1)
+        vol = region_entry_volumes.sum()
         region_volume[i] = vol
-        region_flux[i] = (phi[:, cells] * Vi).sum(axis=1) / vol   # volume-average flux
+        region_flux[i] = (region_flux_entries * region_entry_volumes).sum(axis=1) / vol
 
         # Fall back to volume weighting in any group with no flux (a void or a
         # decoupled region), so the region still yields a finite Material rather
         # than a division-by-zero; such regions carry no reaction rate and are
         # frozen (mu = 1) by the SPH solve anyway.
-        wsafe = np.where(wsum > 0, wsum, 1.0)
+        safe_weight_sums = np.where(group_weight_sums > 0, group_weight_sums, 1.0)
 
-        def fw(table):                                # flux-volume weighted, (G,)
-            fluxw = (table[cells].T * w).sum(axis=1) / wsafe      # (G,)
-            volw = (table[cells].T * Vi).sum(axis=1) / vol        # (G,)
-            return np.where(wsum > 0, fluxw, volw)
+        def flux_weighted_average(table):                                # flux-volume weighted, (G,)
+            flux_weighted = (table[region_entries].T * flux_volume_weights).sum(axis=1) / safe_weight_sums
+            volume_weighted = (table[region_entries].T * region_entry_volumes).sum(axis=1) / vol
+            return np.where(group_weight_sums > 0, flux_weighted, volume_weighted)
 
-        sigma_a = fw(tab["sigma_a"])
-        nu_sigma_f = fw(tab["nu_sigma_f"])
-        sigma_t = fw(tab["sigma_t"])
+        sigma_a = flux_weighted_average(material_tables["sigma_a"])
+        nu_sigma_f = flux_weighted_average(material_tables["nu_sigma_f"])
+        kappa_fission = (flux_weighted_average(kappa_table)
+                         if kappa_table is not None and np.any(nu_sigma_f > 0)
+                         else None)
+        sigma_t = flux_weighted_average(material_tables["sigma_t"])
         # diffusion: flux-weight the transport cross section 1/(3D), then invert
-        sigma_tr = fw(1.0 / (3.0 * tab["diffusion"]))
+        sigma_tr = flux_weighted_average(1.0 / (3.0 * material_tables["diffusion"]))
         diffusion = 1.0 / (3.0 * sigma_tr)
         # scattering g->g' weighted by the source-group (g) flux-volume weight
-        ss = tab["sigma_s"][cells]                    # (ni, G, G)
+        scattering_tables = material_tables["sigma_s"][region_entries]                    # (ni, G, G)
         sigma_s = np.zeros((G, G))
         for g in range(G):
-            wg = w[g]
-            denom = wg.sum()
+            source_group_weights = flux_volume_weights[g]
+            denom = source_group_weights.sum()
             if denom > 0:
-                sigma_s[g] = (ss[:, g, :].T * wg).sum(axis=1) / denom
+                sigma_s[g] = (scattering_tables[:, g, :].T * source_group_weights).sum(axis=1) / denom
         # chi: fission-production weighted over the region
-        prod = (tab["nu_sigma_f"][cells] * phi[:, cells].T).sum(axis=1)   # (ni,) sum_g nuSf phi
-        pw = prod * Vi
-        chi = ((tab["chi"][cells].T * pw).sum(axis=1) / pw.sum()
-               if pw.sum() > 0 else tab["chi"][cells][0])
+        fission_production = (
+            material_tables["nu_sigma_f"][region_entries] * region_flux_entries.T
+        ).sum(axis=1)
+        production_weights = fission_production * region_entry_volumes
+        region_spectra = material_tables["chi"][region_entries]
+        chi = ((region_spectra.T * production_weights).sum(axis=1)
+               / production_weights.sum()
+               if production_weights.sum() > 0 else region_spectra[0])
 
         mats_out.append(Material(
             name=f"sph-region-{i}", diffusion=diffusion, sigma_a=sigma_a,
             nu_sigma_f=nu_sigma_f, sigma_s=sigma_s,
             chi=(chi if np.isclose(chi.sum(), 1.0) else np.array([1.0] + [0.0] * (G - 1))),
-            total=sigma_t))
+            total=sigma_t, kappa_fission=kappa_fission))
     return mats_out, region_flux, region_volume
 
 
@@ -218,18 +248,23 @@ def production_weight(materials, region_volume):
 
 
 def region_average(flux, region_map, mix_material=None, mix_weight=None,
-                   mix_region_map=None):
+                   mix_region_map=None, cell_volume=1.0):
     """Volume-average scalar flux per coarse region, (R, G).
 
-    flux : (G, *shape) scalar flux; region_map : (*shape) region index. Assumes
-    equal cell volumes (uniform grid), matching :func:`flux_weighted_homogenize`.
-    Pass the same ``mix_material`` / ``mix_weight`` used there so the coarse
-    solve's region fluxes are averaged over the *same* fractional volumes -- SPH
-    compares these two directly, so an inconsistent split biases every factor.
+    flux : (G, *shape) scalar flux; region_map : (*shape) region index.
+    cell_volume : scalar or (*shape) cell volumes, as for
+    :func:`flux_weighted_homogenize`; pass the SAME value used there. The
+    default 1.0 is only right on a uniform grid: on an r-z grid use
+    ``grid.cell_volumes`` (unit volumes overweight the axis annuli, e.g. a
+    ratio of 1.38 against the reference region flux for one r-z region).
+    Pass the same ``mix_material`` / ``mix_weight`` too, so the coarse solve's
+    region fluxes are averaged over the *same* fractional volumes -- SPH
+    compares these two directly, so an inconsistent weighting biases every
+    factor.
     """
     f = asnumpy(flux)
     G = f.shape[0]
-    cells, n, V, _ = _mixed_entries(region_map, region_map, 1.0, f[0].size,
+    cells, n, V, _ = _mixed_entries(region_map, region_map, cell_volume, f[0].size,
                                     mix_material, mix_weight, mix_region_map)
     ff = f.reshape(G, -1)[:, cells]
     R = int(max(n.max(), np.asarray(region_map).max())) + 1
@@ -321,7 +356,8 @@ def sph_get_correct(homogenized_materials, region_map, reference_region_flux,
         # probes f ~ 1e5, which wrecks the conditioning of the (now
         # non-symmetric) operator and GMRES fails outright.
         z = np.asarray(z, dtype=float)
-        x = np.zeros(ref.size); y = np.zeros(ref.size)
+        x = np.zeros(ref.size)
+        y = np.zeros(ref.size)
         x[live] = np.clip(z[:n], -12.0, 12.0)
         y[live] = np.clip(z[n:], -1.2, 1.2)          # f in [0.30, 3.3]
         mu, nu = np.exp(x).reshape(shape), np.exp(y).reshape(shape)
@@ -335,7 +371,8 @@ def sph_get_correct(homogenized_materials, region_map, reference_region_flux,
         state["k"] = k
         phi = np.asarray(phi, float).reshape(-1)
         leak = np.asarray(leak, float).reshape(-1)
-        r1 = np.full(ref.size, 0.0); r2 = np.full(ref.size, 0.0)
+        r1 = np.full(ref.size, 0.0)
+        r2 = np.full(ref.size, 0.0)
         ok = live & (phi > 0)
         r1[ok] = np.log(mu.reshape(-1)[ok] * phi[ok] / ref.reshape(-1)[ok])
         r1[live & ~ok] = 1e3
@@ -361,7 +398,8 @@ def sph_get_correct(homogenized_materials, region_map, reference_region_flux,
             z = newton_krylov(residual, z0, f_tol=tol, maxiter=max_iter,
                               method="lgmres")
         except NoConvergence as e:
-            z = np.asarray(e.args[0]); converged = False
+            z = np.asarray(e.args[0])
+            converged = False
     mu, nu, mats = build(z)
     _, k, _ = solve(mats, nu)
     return SphResult(corrected_materials=mats, factors=np.stack([mu, nu]),
@@ -378,26 +416,39 @@ def sph_get_correct(homogenized_materials, region_map, reference_region_flux,
 # leaky-colorset test "inverse" is markedly better (SPH closes 4x of the
 # homogenization error vs 2x), so this is exposed as a choice and measured per
 # problem rather than assumed. The paper's method is CFEM; garnet's is FV.
+# OPEN ISSUE: with "inverse" a common rescaling of mu is not a gauge, so k
+# depends on the flux normalisation (355 pcm on a leaky 3-region colorset, vs
+# 27 pcm with "direct"); see docs/numerical_implementation_notes.md.
 D_SCALING = "inverse"
 
 
 def _scale_material(mat, mu, d_scaling=None):
-    """SPH-corrected material: every cross section x mu, and D x mu.
+    """SPH-corrected material: every cross section x mu; D per ``d_scaling``.
 
     Sigma_m,g = mu_m,g Sigma_ref_m,g            (Laboure et al. 2019, Eq. 4)
-    D_m,g     = mu_m,g D_ref_m,g                (Eq. 7)
 
-    NOTE the diffusion coefficient is multiplied by mu, NOT divided. Dividing is
-    what "consistency" suggests (if Sigma_t scales by mu then D = 1/(3 Sigma_tr)
-    scales by 1/mu) and is what this function did originally -- but SPH's D
-    correction is a deliberate empirical choice "to better match the reference
-    currents", i.e. it is a LEAKAGE correction, not a transport-consistent one.
-    Getting it backwards inverts the sign of the leakage correction on every
-    region with mu != 1, which is why region leakage would not converge to the
-    reference no matter how the factors were solved for.
+    for Sigma_a, nu*Sigma_f, kappa*Sigma_f, Sigma_t and the scattering rows
+    (source group g). The diffusion coefficient follows ``d_scaling``, which
+    defaults to the module setting :data:`D_SCALING` (currently "inverse"):
+
+    * ``"inverse"`` (default): D_m,g = D_ref_m,g / mu_m,g. Transport
+      consistent -- if Sigma_t scales by mu, D = 1/(3 Sigma_tr) scales by
+      1/mu -- and measured better on garnet's FV leaky-colorset test.
+    * ``"direct"``: D_m,g = mu_m,g D_ref_m,g (Laboure et al. 2019, Eq. 7;
+      Ortensi et al.). This is what the exact transform phi = mu phi~ of the
+      diffusion equation gives, an empirical leakage correction "to better
+      match the reference currents".
+
+    The two differ in the SIGN of the leakage correction on every region with
+    mu != 1. With "inverse" a common rescaling of all mu is no longer a
+    harmless gauge, so the converged k depends on the flux-normalisation
+    convention of :func:`sph_correct`; see the SPH note in
+    docs/numerical_implementation_notes.md (open known issue).
     """
     mu = np.atleast_1d(np.asarray(mu, dtype=float))
     d_scaling = D_SCALING if d_scaling is None else d_scaling
+    if d_scaling not in ("inverse", "direct"):
+        raise ValueError(f"d_scaling must be 'inverse' or 'direct', got {d_scaling!r}")
     dfac = mu if d_scaling == "direct" else 1.0 / mu
     return Material(
         name=f"{mat.name}-sph", diffusion=np.asarray(mat.diffusion) * dfac,
@@ -430,7 +481,7 @@ class SphResult:
 _INFEASIBLE_PULL = 10.0
 
 
-def _sph_residual(x_live, live, ln_ref_n, shape, homogenized_materials, solve,
+def _sph_residual(x_live, live, log_reference_flux, shape, homogenized_materials, solve,
                   state):
     """SPH residual in log space, restricted to the live entries.
 
@@ -440,7 +491,9 @@ def _sph_residual(x_live, live, ln_ref_n, shape, homogenized_materials, solve,
     Jacobian has no null directions for the Newton solve.
     """
     R = len(homogenized_materials)
-    x_live = np.clip(np.asarray(x_live, dtype=float), -8.0, 8.0)
+    max_abs_log_factor = 8.0
+    x_live = np.clip(np.asarray(x_live, dtype=float),
+                     -max_abs_log_factor, max_abs_log_factor)
     x = np.zeros(live.size)
     x[live] = x_live
     mu = np.exp(x).reshape(shape)
@@ -454,25 +507,19 @@ def _sph_residual(x_live, live, ln_ref_n, shape, homogenized_materials, solve,
         # A trial mu drove the coarse solve to a non-positive (or non-finite)
         # region flux, where log() is undefined.
         #
-        # Returning a CONSTANT here (the original guard) is a trap, not a
-        # barrier: a constant residual has zero Jacobian, so the Krylov solve
-        # finds no direction back and Newton simply stays put -- observed on
-        # HP-MR as |F| pinned at 106.826 for every subsequent iteration, with
-        # the step length varying and the residual not responding at all.
-        #
-        # A linear pull toward x = 0 (mu = 1, always feasible) instead has
-        # Jacobian PENALTY*I, so the Newton step is exactly -x: one step back
-        # into the feasible region, from which the real residual takes over.
+        # A linear pull toward log(mu)=0 has a nonzero Jacobian, so Newton
+        # can step back into the feasible region. A constant penalty would
+        # leave the linearized problem without a recovery direction.
         return _INFEASIBLE_PULL * np.asarray(x_live, dtype=float)
     if state.get("absolute"):
         denom = 1.0                       # no per-iteration normalization
     else:
-        nw = state.get("nw")
-        denom = live_phi.sum() if nw is None else (nw * live_phi).sum()
-    ln_phi_n = np.log(live_phi / denom)
-    r = (ln_ref_n[live] - ln_phi_n) - x_live
-    sc = state.get("scale")
-    return r if sc is None else r * sc
+        normalization_weights = state.get("nw")
+        denom = live_phi.sum() if normalization_weights is None else (normalization_weights * live_phi).sum()
+    log_normalized_flux = np.log(live_phi / denom)
+    r = (log_reference_flux[live] - log_normalized_flux) - x_live
+    residual_scale = state.get("scale")
+    return r if residual_scale is None else r * residual_scale
 
 
 def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
@@ -618,14 +665,8 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
         x[ok0] = np.log(m0[ok0])
 
     if method in ("hybr", "lm"):
-        # Dense-Jacobian Newton with a trust region. The SPH system is TINY --
-        # one unknown per live region-group, ~12 on HP-MR -- so the Jacobian-free
-        # Krylov machinery of "jfnk" is the wrong tool: it estimates directional
-        # derivatives one at a time and, when the rows are poorly scaled, stalls
-        # (measured: 2017 evaluations without converging on the inserted drum
-        # state under production normalization). Forming the full Jacobian costs
-        # n+1 residual evaluations -- 13 coarse solves -- and MINPACK's hybrid
-        # trust region then takes proper steps instead of crawling.
+        # Dense Newton with a trust region is useful for small SPH systems:
+        # it resolves poorly scaled rows with a full numerical Jacobian.
         from scipy.optimize import root
         state = {"k": float("nan"), "nfev": 0, "scale": None,
                  "absolute": absolute,
@@ -680,7 +721,9 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
     X, F = [], []
     k = float("nan")
     converged = False
+    x_solved = x
     for it in range(1, max_iter + 1):
+        x_solved = x                                  # the iterate k belongs to
         mu = np.exp(x).reshape(shape)
         region_flux, k = solve([_scale_material(homogenized_materials[i], mu[i])
                                 for i in range(R)])
@@ -694,11 +737,16 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
         if err < tol:
             converged = True
             break
-        X.append(x); F.append(f)
+        X.append(x)
+        F.append(f)
         if len(F) > depth:
-            X.pop(0); F.pop(0)
+            X.pop(0)
+            F.pop(0)
         x = _anderson_step(X, F, relax)
-    mu = np.exp(x).reshape(shape)
+    # Return the last iterate that was actually solved: after max_iter the
+    # pending Anderson update has no coarse solve, so pairing its materials
+    # with the previous k_eff would give an inconsistent result.
+    mu = np.exp(x_solved).reshape(shape)
     corrected = [_scale_material(homogenized_materials[i], mu[i]) for i in range(R)]
     return SphResult(corrected_materials=corrected, factors=mu, k_eff=k,
                      iterations=it, converged=converged)
@@ -909,7 +957,8 @@ def sph_df_correct(homogenized_materials, region_map, reference_region_flux,
 
     def unpack(z):
         z = np.clip(np.asarray(z, dtype=float), -bounds, bounds)
-        x = np.zeros(ref.size); x[live] = z[:nmu]
+        x = np.zeros(ref.size)
+        x[live] = z[:nmu]
         mu = np.exp(x).reshape(ref.shape)
         df = np.exp(z[nmu:nmu + ndf]).reshape(len(ikeys), G)
         bc = np.exp(z[nmu + ndf:]).reshape(len(bkeys), G)

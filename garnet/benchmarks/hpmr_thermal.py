@@ -153,10 +153,19 @@ def hpmr_thermal_materials(three_d: bool = False, power_w: float = RATED_POWER_W
 #: only the pattern is physics. See hpmr_feedback().
 _DOPPLER_SHAPE = {FUEL: 1.0}
 
+#: Fuel-density reactivity worth W = d rho / d ln(N_fuel), pcm per unit
+#: fractional change of the fuel's atom density, measured on the frozen-mesh
+#: density law of :class:`~garnet.feedback.ThermalFeedback` (every fuel cross
+#: section times f, D / f) by central difference f = 1 +/- 0.01 on the 2D core
+#: at refine 3, drums out (180 deg). Positive: denser fuel is more reactive.
+#: Library-dependent by a factor of ~4, so it is quoted per set, not assumed:
+FUEL_DENSITY_WORTH_PCM = {"2-group": 1952.0, "11-group": 7500.0}
+
 
 def hpmr_feedback(n_materials: int, target_pcm_per_K: float = -2.5,
                   t_ref: float = XS_REFERENCE_K, doppler_amplitude: float = 1e-3,
-                  expansion_pcm_per_K: float | None = None) -> ThermalFeedback:
+                  expansion_pcm_per_K: float | None = None,
+                  fuel_density_worth_pcm: float | None = None) -> ThermalFeedback:
     """Fuel-only Doppler feedback for the HP-MR core.
 
     ``target_pcm_per_K`` is documentation of intent, not a fitted result: this
@@ -164,6 +173,19 @@ def hpmr_feedback(n_materials: int, target_pcm_per_K: float = -2.5,
     :func:`garnet.feedback.calibrate` scales it to hit the target against the
     actual core and cross sections. A graphite-moderated HEU microreactor sits
     around -2 to -3 pcm/K, dominated by U-238 Doppler in the TRISO kernels.
+
+    ``expansion_pcm_per_K`` adds the fuel density law with that reactivity
+    coefficient (negative). The law is written in density, f = 1 - beta (T -
+    T_ref), so the coefficient is converted through the core's fuel-density
+    worth W = d rho / d ln N (pcm, ``fuel_density_worth_pcm``)::
+
+        d rho/dT = W * d ln f/dT = -W * beta   =>   beta = -expansion_pcm_per_K / W
+
+    W is required with it -- see :data:`FUEL_DENSITY_WORTH_PCM` for the values
+    measured on this core, which differ by ~4x between the 2- and 11-group
+    sets -- because a fixed beta would give a different pcm/K on every
+    library. First order: exact as dT -> 0, and the coupled answer should be
+    re-measured with :func:`garnet.feedback.measure_pcm_per_K` if it matters.
     """
     if target_pcm_per_K >= 0:
         raise ValueError("a fuel temperature coefficient must be negative")
@@ -173,10 +195,21 @@ def hpmr_feedback(n_materials: int, target_pcm_per_K: float = -2.5,
             doppler[idx] = doppler_amplitude * weight
     expansion = None
     if expansion_pcm_per_K is not None:
+        if fuel_density_worth_pcm is None:
+            raise ValueError(
+                "expansion_pcm_per_K needs fuel_density_worth_pcm (d rho / d ln "
+                "N_fuel, pcm) to become a density coefficient; see "
+                "FUEL_DENSITY_WORTH_PCM for this core's measured values")
+        beta = -float(expansion_pcm_per_K) / float(fuel_density_worth_pcm)
+        if not np.isfinite(beta) or beta <= 0.0:
+            raise ValueError(
+                f"expansion_pcm_per_K = {expansion_pcm_per_K} with a density "
+                f"worth of {fuel_density_worth_pcm} pcm gives beta = {beta:.3g} "
+                f"1/K; heating must LOWER the density (beta > 0)")
         expansion = np.zeros(n_materials)
         for idx in _DOPPLER_SHAPE:
             if idx < n_materials:
-                expansion[idx] = 1e-5
+                expansion[idx] = beta
     return ThermalFeedback(t_ref=np.full(n_materials, t_ref), doppler=doppler,
                            expansion=expansion)
 

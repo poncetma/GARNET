@@ -72,6 +72,30 @@ def test_adjoint_weights_first_order_perturbation_theory():
     assert rel < 0.02, f"PT estimate {drho_pt:.3e} vs exact {drho_exact:.3e} (rel {rel:.1e})"
 
 
+def test_rz_divergence_form_adjoint_is_the_transpose():
+    # symmetric_operator=False builds L_div = W^-1 L_w (W = cell radius) from
+    # the symmetric volume-weighted L_w, so the true adjoints are related by
+    # phi*_div = W phi*_sym. Reusing the forward non-symmetric stencil on the
+    # adjoint path instead returns phi*_sym itself (off by the factor W).
+    grid = Grid(shape=(16, 1, 12), size=(60.0, 60.0, 80.0), geometry="cylindrical")
+    mmap = np.zeros(grid.shape, dtype=int)
+    mmap[:5] = 1
+    mats = [PWR_TWO_GROUP, Material(
+        name="poisoned", diffusion=PWR_TWO_GROUP.diffusion,
+        sigma_a=PWR_TWO_GROUP.sigma_a + np.array([0.0, 2e-3]),
+        nu_sigma_f=PWR_TWO_GROUP.nu_sigma_f, sigma_s=PWR_TWO_GROUP.sigma_s,
+        chi=PWR_TWO_GROUP.chi)]
+    sym = DiffusionEigenSolver(grid, mats, material_map=mmap, device="cpu")
+    div = DiffusionEigenSolver(grid, mats, material_map=mmap, device="cpu",
+                               symmetric_operator=False, linear_solver="gmres")
+    a_sym = sym.solve(adjoint=True, **TIGHT)
+    a_div = div.solve(adjoint=True, **TIGHT)
+    assert a_div.k_eff == pytest.approx(a_sym.k_eff, rel=1e-8)
+    radius = grid.cylindrical_metrics()[0]
+    ratio = a_div.flux_numpy / (radius * a_sym.flux_numpy)
+    assert np.ptp(ratio) / np.abs(ratio).mean() < 1e-6
+
+
 @pytest.mark.parametrize("angular", ["diffusion", "sp3"])
 @pytest.mark.parametrize("f_hz", [0.1, 10.0])
 def test_noise_adjoint_reciprocity(angular, f_hz):

@@ -14,8 +14,10 @@ Extruded reactors (any 2D cross-section swept vertically -- the geometry of
 prismatic microreactor cores) add a trailing z axis: shape (nrows, ncols, 2,
 nz) with uniform layer height dz. The in-plane stencil broadcasts over z
 unchanged; the z coupling is the Cartesian one (hm(D) / dz^2), and the z faces
-take their boundary condition from the ``bc`` spec's z axis (in-plane
-boundaries are governed by the active mask's ``mask_bc``, as in 2D).
+take their boundary condition from the ``bc`` spec's z axis. Faces exposed by
+an active mask (in-plane or axial, including active cells on the array edge)
+take ``mask_bc``; with no mask the lattice's outer in-plane edges take the
+``bc`` spec's row (axis 0) and column (axis 1) entries.
 
 For equilateral triangles of side h: shared-edge length h, centroid spacing
 h/sqrt(3), area (sqrt(3)/4) h^2, giving an interior face coupling w = 4 D / h^2
@@ -134,10 +136,8 @@ class TriGroupOperator:
         #   per FACE, a 6-tuple (fL, fR) x (hyp, v, h) of arrays matching each
         #     face family -- one factor per ORDERED region pair, which is what
         #     classical GET actually specifies.
-        # The per-cell form cannot satisfy per-surface reference currents: a
-        # region touching n neighbours gets n conditions but one unknown, and
-        # least squares drives it to its bound (measured on HP-MR: cost stalled
-        # at 0.678 with every drum factor pegged at exp(+-1.2)).
+        # Per-face factors provide independent unknowns for the reference
+        # current on each region surface.
         if isinstance(df, tuple):
             if len(df) != 6:
                 raise ValueError("per-face df must be a 6-tuple "
@@ -166,13 +166,8 @@ class TriGroupOperator:
         self.h = h
         self.alpha_edge = alpha_edge
         self.j_scale = (_SQRT3 / 4.0) * h
-        # Face area, so partial currents can be reported edge-INTEGRATED. The
-        # S_N reference (aggregate_partial_currents) already folds the edge
-        # length in, so a per-unit-area coarse current is inconsistent with it by
-        # a factor h. That used to cancel in an all-row gauge; once the gauge is
-        # read off the flux rows only it is a real offset, and it showed up as
-        # the coarse/reference ratio splitting into distinct clusters (flux ~31,
-        # interface ~10, boundary ~5) where one common value was required.
+        # Reference currents are face-integrated, so coarse currents must
+        # include this face area too.
         self.face_area = h * dz
         self.D_cell = D
         if not hasattr(self, "bcf_arr"):
@@ -199,9 +194,12 @@ class TriGroupOperator:
             ad, au = act[:, :, 0], act[:, :, 1]
             m_hyp, m_v = ad & au, ad[1:, :] & au[:-1, :]
             m_h = ad[:, 1:] & au[:, :-1]
-            a_hyp = xp.where(m_hyp, a_hyp, 0.0); b_hyp = xp.where(m_hyp, b_hyp, 0.0)
-            a_v = xp.where(m_v, a_v, 0.0); b_v = xp.where(m_v, b_v, 0.0)
-            a_h = xp.where(m_h, a_h, 0.0); b_h = xp.where(m_h, b_h, 0.0)
+            a_hyp = xp.where(m_hyp, a_hyp, 0.0)
+            b_hyp = xp.where(m_hyp, b_hyp, 0.0)
+            a_v = xp.where(m_v, a_v, 0.0)
+            b_v = xp.where(m_v, b_v, 0.0)
+            a_h = xp.where(m_h, a_h, 0.0)
+            b_h = xp.where(m_h, b_h, 0.0)
             w_hyp, w_v, w_h = a_hyp, a_v, a_h
             if wz is not None:
                 wz = xp.where(act[..., :-1] & act[..., 1:], wz, 0.0)
@@ -211,20 +209,41 @@ class TriGroupOperator:
         self.a_h, self.b_h = a_h, b_h
 
         diag = removal.copy()
-        diag[:, :, 0] += a_hyp; diag[:, :, 1] += b_hyp
-        diag[1:, :, 0] += a_v;  diag[:-1, :, 1] += b_v
-        diag[:, 1:, 0] += a_h;  diag[:, :-1, 1] += b_h
+        diag[:, :, 0] += a_hyp
+        diag[:, :, 1] += b_hyp
+        diag[1:, :, 0] += a_v
+        diag[:-1, :, 1] += b_v
+        diag[:, 1:, 0] += a_h
+        diag[:, :-1, 1] += b_h
         if wz is not None:
-            diag[..., :-1] += wz; diag[..., 1:] += wz
+            diag[..., :-1] += wz
+            diag[..., 1:] += wz
 
-        # Robin faces: an active cell whose neighbour across an edge is inactive
-        # (or off-array, via the required void border). Each triangle has three
-        # edges; add the boundary term per exposed edge.
-        if alpha_edge != 0.0 and act is not None:
-            border = (act[0].any() or act[-1].any() or act[:, 0].any() or act[:, -1].any())
-            if bool(border):
-                raise ValueError("active mask must have a one-cell void border")
-            ad, au = act[:, :, 0], act[:, :, 1]
+        # In-plane Robin faces: an active cell whose neighbour across an edge is
+        # inactive or off the array. With an active mask, every such exposed
+        # edge takes mask_bc (no void border needed: an active cell on the
+        # array edge is exposed there too). Without one, all cells are active
+        # and only the lattice's outer edges are exposed; they take the bc
+        # spec's in-plane axes -- rows (axis 0) and columns (axis 1), lo/hi --
+        # just as the z faces take its z axis. (Formerly they were silently
+        # reflective whatever bc said.)
+        bcf_arr = None if bcf is None else xp.asarray(bcf)
+        # Partial-current reconstruction must use this same boundary law to
+        # keep its leakage consistent with the operator.
+        self.bcf_arr = bcf_arr
+        if act is None:
+            edge_alpha = (face_alpha(bc[0][0]), face_alpha(bc[0][1]),
+                          face_alpha(bc[1][0]), face_alpha(bc[1][1]))
+        else:
+            edge_alpha = (alpha_edge,) * 4
+        #: alpha on the off-array edges: (row lo, row hi, col lo, col hi).
+        self.edge_alpha = edge_alpha
+        if alpha_edge != 0.0 or any(a != 0.0 for a in edge_alpha):
+            nr, nc = grid.shape[0], grid.shape[1]
+            if act is None:
+                ad = au = xp.ones(D[:, :, 0].shape, dtype=bool)
+            else:
+                ad, au = act[:, :, 0], act[:, :, 1]
 
             # Boundary coefficient: a generalized-equivalence BCf scales the
             # Marshak albedo on masked/outer faces so the coarse solve can match
@@ -232,37 +251,40 @@ class TriGroupOperator:
             # factors act only on interior faces, so without this the vacuum
             # boundary -- where a leaky core's equivalence error actually lives
             # -- has no free parameter at all. bcf = 1 leaves it untouched.
-            bcf_arr = None if bcf is None else xp.asarray(bcf)
-            # Kept so tri_partial_currents can reproduce the operator's ACTUAL
-            # boundary leakage. It previously used a bare phi/4, which carries no
-            # dependence on D, alpha or bcf -- so the boundary condition it
-            # matched was disconnected from the leakage the operator applies, and
-            # the fit could drive the residual to machine zero (measured 1.2e-28)
-            # with k still 350 pcm off.
-            self.bcf_arr = bcf_arr
-
-            def add(diag_sl, self_act, nbr_act, D_sl):
-                if bcf_arr is None:
-                    term = robin(D_sl, alpha_edge)
+            def add(diag_sl, exposed, D_sl, alpha):
+                if alpha == 0.0:
+                    return
+                if bcf_arr is None or math.isinf(alpha):
+                    term = robin(D_sl, alpha)
                 else:
-                    a_loc = alpha_edge * bcf_arr[diag_sl]
+                    a_loc = alpha * bcf_arr[diag_sl]
                     term = xp.where(
                         a_loc > 0.0,
                         8.0 * D_sl * a_loc / (h * (h * a_loc + 2.0 * _SQRT3 * D_sl)),
                         0.0)
-                diag[diag_sl] += xp.where(self_act & ~nbr_act, term, 0.0)
+                diag[diag_sl] += xp.where(exposed, term, 0.0)
 
-            # hypotenuse edge (down<->up, same rhombus)
-            add((slice(None), slice(None), 0), ad, au, Dd)
-            add((slice(None), slice(None), 1), au, ad, Du)
-            # bottom edge  down(i,j)<->up(i-1,j)
-            add((slice(1, None), slice(None), 0), ad[1:, :], au[:-1, :], Dd[1:, :])
-            add((slice(0, -1), slice(None), 1), au[:-1, :], ad[1:, :], Du[:-1, :])
-            # left edge    down(i,j)<->up(i,j-1)
-            add((slice(None), slice(1, None), 0), ad[:, 1:], au[:, :-1], Dd[:, 1:])
-            add((slice(None), slice(0, -1), 1), au[:, :-1], ad[:, 1:], Du[:, :-1])
+            S = slice(None)
+            if act is not None:
+                # hypotenuse edge (down<->up, same rhombus)
+                add((S, S, 0), ad & ~au, Dd, alpha_edge)
+                add((S, S, 1), au & ~ad, Du, alpha_edge)
+                # bottom edge  down(i,j)<->up(i-1,j)
+                add((slice(1, None), S, 0), ad[1:, :] & ~au[:-1, :], Dd[1:, :], alpha_edge)
+                add((slice(0, -1), S, 1), au[:-1, :] & ~ad[1:, :], Du[:-1, :], alpha_edge)
+                # left edge    down(i,j)<->up(i,j-1)
+                add((S, slice(1, None), 0), ad[:, 1:] & ~au[:, :-1], Dd[:, 1:], alpha_edge)
+                add((S, slice(0, -1), 1), au[:, :-1] & ~ad[:, 1:], Du[:, :-1], alpha_edge)
+            # off-array edges: down's bottom (row 0) / left (col 0), up's top
+            # (row nr-1) / right (col nc-1)
+            add((0, S, 0), ad[0], Dd[0], edge_alpha[0])
+            add((nr - 1, S, 1), au[nr - 1], Du[nr - 1], edge_alpha[1])
+            add((S, 0, 0), ad[:, 0], Dd[:, 0], edge_alpha[2])
+            add((S, nc - 1, 1), au[:, nc - 1], Du[:, nc - 1], edge_alpha[3])
 
-        # z boundary faces (extruded grids) use the bc spec's z axis.
+        # z boundary faces (extruded grids) use the bc spec's z axis; an axial
+        # face between an active and an inactive cell is a mask boundary and
+        # takes mask_bc, like the in-plane ones (it used to act as a reflector).
         if len(grid.shape) == 4:
             for alpha, sl in ((face_alpha(bc[2][0]), (Ellipsis, 0)),
                               (face_alpha(bc[2][1]), (Ellipsis, -1))):
@@ -272,6 +294,12 @@ class TriGroupOperator:
                 if act is not None:
                     term = xp.where(act[sl], term, 0.0)
                 diag[sl] += term
+            if act is not None and alpha_edge != 0.0 and grid.shape[3] > 1:
+                lo, hi = (Ellipsis, slice(1, None)), (Ellipsis, slice(0, -1))
+                diag[lo] += xp.where(act[lo] & ~act[hi],
+                                     robin_face_term(xp, D[lo], dz, alpha_edge), 0.0)
+                diag[hi] += xp.where(act[hi] & ~act[lo],
+                                     robin_face_term(xp, D[hi], dz, alpha_edge), 0.0)
 
         if act is not None:
             diag = xp.where(act, diag, 1.0)
@@ -357,14 +385,15 @@ class TriGroupOperator:
                                (_np.concatenate(rows), _np.concatenate(cols))),
                               shape=(n, n))
 
-    def ilu_preconditioner(self, drop_tol=1e-4, fill_factor=10.0):
+    def ilu_preconditioner(self, drop_tol=1e-4, fill_factor=10.0, transpose=False):
         """ILU(0)-style preconditioner as a callable, for the df path.
 
-        Returns f(x) ~ A^-1 x with x shaped like the flux, suitable for the
-        ``precond=`` argument of garnet's gmres/bicgstab.
+        Returns f(x) ~ A^-1 x (A^-T x with ``transpose``) with x shaped like the
+        flux, suitable for the ``precond=`` argument of garnet's gmres/bicgstab.
         """
         from scipy.sparse.linalg import spilu
-        lu = spilu(self.assemble().tocsc(), drop_tol=drop_tol,
+        A = self.assemble()
+        lu = spilu((A.T if transpose else A).tocsc(), drop_tol=drop_tol,
                    fill_factor=fill_factor)
         shape = self.shape
 
@@ -401,6 +430,35 @@ class TriGroupOperator:
         out[:-1, :, 1] -= self.a_v * phi[1:, :, 0]
         out[:, 1:, 0] -= self.b_h * phi[:, :-1, 1]
         out[:, :-1, 1] -= self.a_h * phi[:, 1:, 0]
+        if self.wz is not None:
+            out[..., :-1] -= self.wz * phi[..., 1:]
+            out[..., 1:] -= self.wz * phi[..., :-1]
+        return out
+
+
+    def apply_transpose(self, phi):
+        """Return A^T phi: the adjoint operator of the discontinuity-factor path.
+
+        Each face puts -b in the down (L) row and -a in the up (R) row, so the
+        transpose is the same stencil with a and b exchanged (the diagonal and
+        the symmetric axial coupling are unchanged). Without df, a == b and this
+        equals ``apply``.
+        """
+        from . import kernels
+
+        if (kernels.use_fused(self.xp, "stencil") and phi.flags.c_contiguous
+                and self._fusable(phi.dtype)):
+            dg, ah, bh, av, bv, ahh, bhh, wz, nx, ny, nz = \
+                self._fused_arrays(phi.dtype)
+            return kernels.tri_stencil_apply(self.xp, phi, dg, bh, ah, bv, av,
+                                             bhh, ahh, wz, nx, ny, nz)
+        out = self.diag * phi
+        out[:, :, 0] -= self.a_hyp * phi[:, :, 1]
+        out[:, :, 1] -= self.b_hyp * phi[:, :, 0]
+        out[1:, :, 0] -= self.a_v * phi[:-1, :, 1]
+        out[:-1, :, 1] -= self.b_v * phi[1:, :, 0]
+        out[:, 1:, 0] -= self.a_h * phi[:, :-1, 1]
+        out[:, :-1, 1] -= self.b_h * phi[:, 1:, 0]
         if self.wz is not None:
             out[..., :-1] -= self.wz * phi[..., 1:]
             out[..., 1:] -= self.wz * phi[..., :-1]
@@ -488,8 +546,10 @@ def tri_partial_currents(op, phi, region_map, active=None):
     interfaces, boundaries = {}, {}
     for k, (t, di, dj, tn, _n) in enumerate(_EDGES):
         a_w, b_w, sl, f_s, t_s = W[k]
-        a_w = np.asarray(asnumpy(a_w)); b_w = np.asarray(asnumpy(b_w))
-        f_s = np.asarray(asnumpy(f_s)); t_s = np.asarray(asnumpy(t_s))
+        a_w = np.asarray(asnumpy(a_w))
+        b_w = np.asarray(asnumpy(b_w))
+        f_s = np.asarray(asnumpy(f_s))
+        t_s = np.asarray(asnumpy(t_s))
         for i in range(nr):
             ii = i + di
             for j in range(nc):
@@ -505,10 +565,17 @@ def tri_partial_currents(op, phi, region_map, active=None):
                     # quantity: leak = 8 D a / (h (h a + 2 sqrt3 D)) * phi, with
                     # a = alpha_edge * bcf, converted to a true current by
                     # j_scale. J_in = 0 there, so J_out is the leakage itself.
-                    a_loc = op.alpha_edge * (1.0 if op.bcf_arr is None
-                                             else float(asnumpy(op.bcf_arr)[i, j, t]))
+                    if inside:                       # inactive neighbour: mask_bc
+                        a_edge = op.alpha_edge
+                    else:                            # off-array: per-side alpha
+                        a_edge = op.edge_alpha[(0 if di < 0 else 1) if di else
+                                               (2 if dj < 0 else 3)]
+                    a_loc = a_edge * (1.0 if op.bcf_arr is None
+                                      else float(asnumpy(op.bcf_arr)[i, j, t]))
                     Dc = float(asnumpy(op.D_cell)[i, j, t])
-                    if a_loc > 0.0:
+                    if math.isinf(a_loc):
+                        term = 8.0 * Dc / (op.h * op.h)
+                    elif a_loc > 0.0:
                         term = (8.0 * Dc * a_loc
                                 / (op.h * (op.h * a_loc + 2.0 * _SQRT3 * Dc)))
                     else:
@@ -523,8 +590,10 @@ def tri_partial_currents(op, phi, region_map, active=None):
                 ri = i - (sl[0].start or 0)
                 cj = j - (sl[1].start or 0)
                 try:
-                    wa = float(a_w[ri, cj]); wb = float(b_w[ri, cj])
-                    fs = float(f_s[ri, cj]); ts = float(t_s[ri, cj])
+                    wa = float(a_w[ri, cj])
+                    wb = float(b_w[ri, cj])
+                    fs = float(f_s[ri, cj])
+                    ts = float(t_s[ri, cj])
                 except (IndexError, ValueError):
                     continue
                 pR = float(phi[ii, jj, tn])
@@ -574,6 +643,19 @@ class TriDiffusionEigenSolver(DiffusionEigenSolver):
             # at residual 2.7e4 against a 3.1e1 target. ILU makes no diagonal
             # dominance assumption.
             self.preconds = [op.ilu_preconditioner() for op in self.ops]
+            # The adjoint must solve with A^T, not A: the forward operator is
+            # non-symmetric here, so reusing it gives neither the adjoint flux
+            # nor (in general) the forward k.
+            self._tri_adjoint = ([op.apply_transpose for op in self.ops],
+                                 [op.ilu_preconditioner(transpose=True)
+                                  for op in self.ops])
+        else:
+            self._tri_adjoint = None
+
+    def _linear_components(self, g, adjoint):
+        if adjoint and self._tri_adjoint is not None:
+            return self._tri_adjoint[0][g], self._tri_adjoint[1][g]
+        return super()._linear_components(g, adjoint)
 
     def _build_operators(self, grid, diffusion, sigma_t, removal, bc):
         df = getattr(self, "df", None)

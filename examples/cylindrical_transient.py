@@ -36,7 +36,7 @@ def main():
     run = core.transient(
         t_end=0.1, dt=0.01, device=args.device, time_scheme="bdf2",
         initial_steady=steady, event_times=[0.035, 0.08],
-        materials_at=lambda t: {"fuel": poisoned} if 0.035 <= t < 0.08 else {},
+        materials_at=lambda t: {"fuel": poisoned} if 0.035 < t <= 0.08 else {},
         on_step=lambda t, _flux, _power: accepted.append(t), **options)
     print(run)
     print("P/P0 at 0.02, 0.06, 0.10 s:", run.power_at([0.02, 0.06, 0.1]))
