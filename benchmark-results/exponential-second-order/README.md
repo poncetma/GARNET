@@ -20,6 +20,10 @@ The [TWIGL checkpoint](CHUNK7.md) assesses spatial time integration against
 independent physical references and tuned BE/BDF controls. It identifies
 an unresolved thermal-shape mesh error and retains BDF as the cheaper
 tested comparator at the declared 0.1% temporal budget.
+The [eighth checkpoint](CHUNK8.md) closes setup reuse by measurement and
+adds PARCS-style quadratic physical precursor production as an opt-in control.
+It finds no error/work benefit, and shows that tuning FTM's output tolerance
+makes FTM2 tie BDF on the TWIGL ramp, while BDF stays cheaper on the step.
 
 ## Implemented method
 

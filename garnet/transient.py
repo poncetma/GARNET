@@ -231,6 +231,9 @@ class TransientResult:
     step_frequency_refinements: list = field(default_factory=list)
     step_frequency_log_defects: list = field(default_factory=list)
     ftm_fallback_reasons: list = field(default_factory=list)
+    # FTM2 precursor production model of each committed endpoint solve:
+    # linear-transformed, linear-physical, quadratic-physical or BE fallback.
+    step_precursor_productions: list = field(default_factory=list)
     operator_rebuilds: int = 0
 
     @property
@@ -566,7 +569,12 @@ class TransientSolver:
             source weight is available as ``solver.step_source_weight`` during
             feedback/on_step callbacks and in ``result.step_source_weights``.
             FTM2 preserves ordinary endpoint heat quadrature and does not
-            transform the heat-transfer equation. FTM-BDF2 also uses endpoint
+            transform the heat-transfer equation. Its research control
+            ``precursor_production`` selects ``"linear-transformed"``
+            (default), ``"linear-physical"`` or PARCS-style
+            ``"quadratic-physical"`` production integration; the last starts
+            and restarts as linear-physical and is reported per step in
+            ``result.step_precursor_productions``. FTM-BDF2 also uses endpoint
             heat weights; its precursor update is a rational recurrence.
             It starts at order one and guards both historical exponents and
             abrupt width growth, reporting actual-BE fallbacks in the result.
@@ -1209,6 +1217,7 @@ class TransientSolver:
         frequency_refinements: list[int] = []
         frequency_log_defects: list[float | None] = []
         ftm_fallback_reasons: list[str] = []
+        precursor_productions: list[str | None] = []
         local_error_blocks = []
         rejected_error_blocks = []
         output_error_blocks = []
@@ -1249,6 +1258,7 @@ class TransientSolver:
                 frequency_refinements.append(scheme.frequency_refinements)
                 frequency_log_defects.append(scheme.frequency_log_defect)
                 ftm_fallback_reasons.append(scheme.fallback_reason)
+                precursor_productions.append(getattr(scheme, "step_production", None))
                 population = neutron_population()
                 if not np.isfinite(population) or population <= 0.0:
                     raise RuntimeError(
@@ -1565,6 +1575,7 @@ class TransientSolver:
                         frequency=scheme.frequency,
                         frequency_refinements=scheme.frequency_refinements,
                         frequency_log_defect=scheme.frequency_log_defect,
+                        precursor_production=getattr(scheme, "step_production", None),
                         fallback_reason=scheme.fallback_reason))
                     if (attempt["estimator"] == "history"
                             and (time_order_n != 2 or scheme.fallback_reason)):
@@ -2063,6 +2074,7 @@ class TransientSolver:
             step_frequency_refinements=frequency_refinements,
             step_frequency_log_defects=frequency_log_defects,
             ftm_fallback_reasons=ftm_fallback_reasons,
+            step_precursor_productions=precursor_productions,
             operator_rebuilds=operator_rebuilds,
             solve_seconds=time.perf_counter() - t0,
             device=self.device,

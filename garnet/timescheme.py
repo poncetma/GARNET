@@ -54,6 +54,8 @@ multiplier: 1+omega*dt versus exp(omega*dt). The diffusion engine consumes
 Its precursors and source quadrature integrate the frozen exponential model.
 The second-order ``ftm2`` variant carries the physical neutron derivative and
 integrates linear transformed precursor production, with no heat transform.
+Its opt-in ``precursor_production`` control instead integrates linear or
+PARCS-style quadratic **physical** production, independent of frequency.
 ``ftm-bdf2`` instead uses a damped BDF2 recurrence in a fresh exponential frame
 for both neutrons and precursors, with BDF1 startup and endpoint heat weights.
 """
@@ -67,7 +69,8 @@ import numpy as np
 from . import kernels
 from .backend import asnumpy
 from ._exponential import (ExponentialBDF2Step, ExponentialStep,
-                           ExponentialThetaStep, population_frequency)
+                           ExponentialThetaStep, PhysicalProductionStep,
+                           population_frequency)
 
 
 def _lin(xs, coeffs):
@@ -372,28 +375,41 @@ class ExponentialTheta(FrequencyTransform):
 
     Carries the accepted physical neutron derivative, so changing frequency
     or width does not reuse a derivative in the previous transformed frame.
-    Precursors integrate linearly interpolated transformed production. The
-    thermal driver receives its usual endpoint source weight, not an
-    exponential heat quadrature or a transformed heat equation.
+    By default precursors integrate linearly interpolated transformed
+    production. ``precursor_production="linear-physical"`` or
+    ``"quadratic-physical"`` instead interpolates physical production; the
+    quadratic history spans the previous accepted width and starts or
+    restarts as linear-physical. The thermal driver receives its usual
+    endpoint source weight, not an exponential heat quadrature or a
+    transformed heat equation.
     """
 
     name = "ftm2"
     order = 2
     _coefficient_type = ExponentialThetaStep
+    precursor_productions = ("linear-transformed", "linear-physical",
+                             "quadratic-physical")
 
-    def __init__(self, *, startup_be_steps=0, **kwargs):
+    def __init__(self, *, startup_be_steps=0,
+                 precursor_production="linear-transformed", **kwargs):
         super().__init__(**kwargs)
         if (isinstance(startup_be_steps, (bool, np.bool_))
                 or not np.isfinite(startup_be_steps)
                 or int(startup_be_steps) != startup_be_steps or startup_be_steps < 0):
             raise ValueError("FTM2 startup_be_steps must be a non-negative integer")
+        if precursor_production not in self.precursor_productions:
+            raise ValueError("FTM2 precursor_production must be one of "
+                             f"{self.precursor_productions}")
         self.startup_be_steps = int(startup_be_steps)
         self._startup_remaining = self.startup_be_steps
+        self.precursor_production = precursor_production
 
     def start(self, u0):
         result = super().start(u0)
         self._derivative = [0.0 * u for u in u0]
         self._beta_old = self._pending_beta = None
+        self.step_production = None
+        self._clear_production_history()
         self._prepared_carried = None
         self._startup_remaining = self.startup_be_steps
         return result
@@ -402,7 +418,32 @@ class ExponentialTheta(FrequencyTransform):
         """Seed the actual physical endpoint RHS at initialization/restart."""
         self._derivative = [d.copy() for d in derivative]
         self._beta_old = [b.copy() if hasattr(b, "copy") else b for b in beta]
+        self._clear_production_history()
         self._prepared_carried = None
+
+    def _clear_production_history(self):
+        # Quadratic physical production must not span a restart or event.
+        self._older_production = self._pending_older = None
+
+    @property
+    def production_interpolation(self):
+        """Precursor production model of the prepared step, for diagnostics."""
+        if self.fallback_reason:
+            return "backward-euler"
+        if self.precursor_production == "quadratic-physical":
+            return ("quadratic-physical" if self._older_production is not None
+                    else "linear-physical")
+        return self.precursor_production
+
+    def _production_weights(self, decay):
+        """Return retention, older, old and new weights and removed beta."""
+        if self.precursor_production == "linear-transformed":
+            retention, old, new, removed = self._coefficients.linear_precursor(decay)
+            return retention, 0.0, old, new, removed
+        older = self._older_production
+        previous = (older[2] if older is not None
+                    and self.precursor_production == "quadratic-physical" else None)
+        return PhysicalProductionStep(self._coefficients.width, previous).weights(decay)
 
     def prepare_step(self, step, dt):
         super().prepare_step(step, dt)
@@ -441,6 +482,9 @@ class ExponentialTheta(FrequencyTransform):
         if self._pending_beta is not None:
             self._beta_old = [b.copy() if hasattr(b, "copy") else b
                               for b in self._pending_beta]
+        if self._pending_older is not None:
+            self._older_production = self._pending_older + (width,)
+            self._pending_older = None
         super().push(u_new)
         self._prepared_carried = None
         self._startup_remaining = max(0, self._startup_remaining-1)
@@ -451,7 +495,7 @@ class ExponentialTheta(FrequencyTransform):
     def precursor_bcoef(self, step, beta, lam, dt):
         if self.fallback_reason:
             return TimeScheme.precursor_bcoef(self, step, beta, lam, dt)
-        return [b * self._coefficients.linear_precursor(float(l))[3]
+        return [b * self._production_weights(float(l))[4]
                 for b, l in zip(beta, lam)]
 
     def precursor_decayed(self, step, C_hist, S_prev, beta, lam, dt):
@@ -459,21 +503,37 @@ class ExponentialTheta(FrequencyTransform):
             return TimeScheme.precursor_decayed(self, step, C_hist, S_prev, beta, lam, dt)
         if self._beta_old is None:
             raise RuntimeError("FTM2 needs the accepted endpoint production history")
+        S_older, beta_older, _ = self._older_production or (None, None, None)
         out = []
-        for c, b, l in zip(C_hist[0], self._beta_old, lam):
-            retention, old, _, _ = self._coefficients.linear_precursor(float(l))
-            out.append(float(l) * (retention*c + old*b*S_prev))
+        for i, (c, b, l) in enumerate(zip(C_hist[0], self._beta_old, lam)):
+            retention, older, old, _, _ = self._production_weights(float(l))
+            history = retention*c + old*b*S_prev
+            if older:
+                history = history + older*beta_older[i]*S_older
+            out.append(float(l) * history)
         return out
 
     def precursor_update(self, step, C_hist, S_new, S_prev, beta, lam, dt):
         self._pending_beta = list(beta)
+        self.step_production = self.production_interpolation
+        if self.precursor_production == "quadratic-physical":
+            # The previous endpoint becomes the older quadratic node on
+            # acceptance, whichever formula this step uses: BE fallback and
+            # startup steps still record physical production.
+            self._pending_older = (
+                S_prev.copy() if hasattr(S_prev, "copy") else S_prev,
+                [b.copy() if hasattr(b, "copy") else b for b in self._beta_old])
         if self.fallback_reason:
             return TimeScheme.precursor_update(
                 self, step, C_hist, S_new, S_prev, beta, lam, dt)
+        S_older, beta_older, _ = self._older_production or (None, None, None)
         out = []
-        for c, b_old, b_new, l in zip(C_hist[0], self._beta_old, beta, lam):
-            retention, old, new, _ = self._coefficients.linear_precursor(float(l))
-            out.append(retention*c + old*b_old*S_prev + new*b_new*S_new)
+        for i, (c, b_old, b_new, l) in enumerate(zip(C_hist[0], self._beta_old, beta, lam)):
+            retention, older, old, new, _ = self._production_weights(float(l))
+            value = retention*c + old*b_old*S_prev + new*b_new*S_new
+            if older:
+                value = value + older*beta_older[i]*S_older
+            out.append(value)
         return out
 
 

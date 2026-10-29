@@ -49,9 +49,23 @@ references, an 80×80 spatial check and stronger output-width BE/BDF controls.
 Adaptive BDF remains cheaper at the declared 0.1% temporal budget. Thermal
 flux shape differs by 1.10% between 40×40 and 80×80, so the 0.1% spatial-shape
 gate remains open. Retain the initial-state resolution diagnosis before
-larger transient claims. Setup reuse remains a separate cost gate. Tight
+larger transient claims. Setup reuse was subsequently closed (chunk 8). Tight
 exponential tails can make physical-history checking more restrictive;
 keep its audit mode available and hold local/group frequency expansion.
+The [eighth checkpoint](../benchmark-results/exponential-second-order/CHUNK8.md)
+closes setup reuse by measurement: rebuilds are 0.15-0.93% of CPU march time,
+so caching cannot approach the promotion gate. It adds the E5a control,
+`precursor_production="quadratic-physical"` (PARCS physical production), and
+compares it with the default and linear physical production on nine cases.
+All models accept the same steps; only final precursor errors change, in a
+regime-dependent direction and far below budget. No error/work benefit is
+found. Allowing FTM `output_rtol=1e-3` also corrects chunk 7: on the TWIGL
+ramp FTM2 now ties tuned BDF (87 versus 92 solves on 20×20, 93 versus 92 on
+40×40), while BDF remains 1.46-1.85x cheaper on the step. After merging the
+audit's BDF startup-estimator fix, FTM2 is unchanged and the cheapest
+qualifying tested BDF ramp run needs 101 solves, but a 76-solve run misses the
+budget by only 0.7%; the ramp stays a tie and BDF is 1.47-1.87x cheaper on
+the step.
 
 **Recommendation: continue the opt-in frequency transformation method (FTM),
 retaining shared-frequency controls while testing each extension.** It can reuse
@@ -225,9 +239,10 @@ Reasons a benefit may disappear:
 The E4 spatial comparison has now been assessed on TWIGL: temporal errors
 are independently resolved on each study mesh, while the declared spatial
 shape budget and performance-promotion gate remain unmet. Resolve the mesh
-error before claiming application-wide 0.1% accuracy. Shared setup reuse is
-a separate bounded cost task; do not broaden FTM frequency models on the
-present negative matched-work result. The two-solve history estimator remains
+error before claiming application-wide 0.1% accuracy. Setup reuse is closed
+(measured CPU share below 1%), and E5a found no gain from precursor production
+interpolation. Do not broaden FTM frequency models on the present matched-work
+result: tune both comparators along the same output-width dimensions first. The two-solve history estimator remains
 opt-in, with the three-solve controller retained as its reference.
 K0 is a small independent feasibility
 gate; a full Krylov integrator is not a prerequisite for continuing FTM.
@@ -238,11 +253,11 @@ physical errors.
 |---|---|---|
 | E0: TWIGL temporal baseline added; spatial resolution pending | Homogeneous/ramp/event comparisons cover BE, CN and adaptive BDF. TWIGL step/ramp now has independent physical-generator temporal references and output-width BE/BDF controls on two meshes; its thermal shape still needs refinement for a 0.1% spatial claim. LRA and HP-MR remain later applications. Keep original BDF decisions reproducible and report per-field defects separately. IQS remains deferred. | Same spatial/control path, converged temporal reference, power/shape/energy/precursor errors and all accepted/rejected work. |
 | E1: implemented | Retain `ftm`, transformed-theta `ftm2` and damped `ftm-bdf2`, with their distinct precursor formulas and zero-frequency controls. | Existing equilibrium, mixed-mode, second-order, material/spectrum/geometry and damping verification remains green. |
-| E2: frequency implemented; caching pending | Accepted active-volume neutron populations, actual previous widths, bounded log rates, event resets, BE safeguards and optional correction are implemented. Next separate time-diagonal updates from geometric stencil/preconditioner setup. Test fitting inside existing spatial iterations only as a separate cost experiment. | No stale fields, face couplings or workspaces after dt/frequency/material changes; charge all correction/setup work. Do not add an eigen solve solely for a frequency. |
+| E2: frequency implemented; caching closed | Accepted active-volume neutron populations, actual previous widths, bounded log rates, event resets, BE safeguards and optional correction are implemented. Setup reuse was measured instead of built: all rebuild work is 0.15-0.93% of CPU march time on TWIGL 40×40/160×160, so separating time diagonals from stencil setup cannot approach the promotion gate. Test fitting inside existing spatial iterations only as a separate cost experiment. | No stale fields, face couplings or workspaces after dt/frequency/material changes; charge all correction/setup work. Do not add an eigen solve solely for a frequency. Revisit caching only if a GPU profile shows a material setup share. |
 | E3: neutron adaptation implemented | `adaptive_ftm` uses physical full/two-half-step defects per flux group and precursor family, and restores state, production, frequency and recurrence histories. Exact event/alignment endpoints and all-trial counters are verified. External feedback/thermal state is explicitly excluded for now. | Accepted-half-step replay, independent kinetics/Radau and localized matrix-exponential references. Keep three-solve control as the oracle for a cheaper estimator. Linear-solve-failure retry remains to be designed. |
 | E3b: output restriction and history estimator implemented | Optional `output_rtol` tests physical flux/precursor and scalar-power midpoint/chord defects. The opt-in history estimator uses two half solves and actual-width quadratic physical prediction, retaining step doubling for startup/events/unsafe histories and charging discarded BE-fallback work. Same-trial audits, independent references and state-driven rejection/replay checks calibrate it. | Keep endpoint, interpolated power/shape and power-integral errors separate. Matched-budget work improves over the three-solve FTM controller, while adaptive BDF remains cheaper. Tight tails can over-resolve physical curvature; local tolerance and empirical audits are not global guarantees. Validate larger spatial output histories and two-sided power jumps separately. |
-| E4: TWIGL assessed; spatial and promotion gates unmet | The 116-configuration TWIGL study compares physical power/field/shape/region/integral/final-precursor errors, tuned BE/BDF output caps, same-mesh zero-frequency controls and estimator audits. BDF wins the tested 0.1% temporal work budget; 40×40-to-80×80 thermal shape differs by 1.10%. Resolve spatial error and measure shared setup reuse before repeated CPU/GPU timings. Strong feedback still needs its own provisional-state controller. | Retain the best acceptable BE/BDF comparator. Keep spatial and temporal errors separate. Count every constituent/rejected solve, Krylov work and rebuild; timing promotion additionally needs setup/transfer accounting and the contract below. |
-| E5a: PARCS precursor control | Independently integrate quadratic physical production on unequal widths, initially sharing a frequency. Compare with linear transformed production and transformed BDF precursors at identical neutron formulas, meshes and frequency samples. | Stable small/large-lambda moments, startup, events, mapped beta and non-equilibrium families; demonstrate physical error/work benefit before retaining a new API option. |
+| E4: TWIGL assessed; spatial and promotion gates unmet | The 116-configuration TWIGL study compares physical power/field/shape/region/integral/final-precursor errors, tuned BE/BDF output caps, same-mesh zero-frequency controls and estimator audits. With FTM `output_rtol` also tuned (chunk 8), FTM2 ties BDF on the ramp and BDF remains 1.46-1.87x cheaper on the step at the 0.1% budget, before and after the audit's BDF fix; 40×40-to-80×80 thermal shape differs by 1.10%. A 160×160 study needs a linear tolerance above the FGMRES floor (about 1e-10). Resolve spatial error before repeated CPU/GPU timings. Strong feedback still needs its own provisional-state controller. | Retain the best acceptable BE/BDF comparator. Keep spatial and temporal errors separate. Count every constituent/rejected solve, Krylov work and rebuild; timing promotion additionally needs setup/transfer accounting and the contract below. |
+| E5a: implemented; no benefit | `ftm2` accepts `precursor_production` = linear-transformed (default), linear-physical or quadratic-physical, with stable positive decay moments, unequal widths, mapped beta products, linear startup/restart and complete rollback. Nine cases with independent references: identical accepted steps and work in 44 of 46 adaptive groups; precursor errors improve in slow insertions/shutdown and worsen for near-exponential production, always at least 50x below budget. Transformed-BDF precursors at FTM2 neutron formulas were not added. | Gate unmet: no physical error/work benefit. Keep as an opt-in research control only; it supplies the frequency-independent scalar endpoint source needed by E5b. |
 | E5b: conditional frequency extensions | Test a small regional/cell frequency model on a shape-changing case before full node/group rates. Distinguish PARCS physical-source interpolation, which preserves scalar endpoint fission coupling, from SIMULATE source-group exponential weights, which need family/source-group contractions. | Correct endpoint equations, old derivatives/history in the current frame, admissible spatial solves and a measured benefit over shared frequency. Different precursor families cannot simply inherit unrelated group frames. |
 | E6: later composition | Only after the relevant error/cost gates, consider FTM in IQS correctors/fallbacks or a thermal-coupled controller. | Explicit rollback of every coupled state and independent heat accuracy. Speedups over IQS are measured, not multiplied from separate studies. |
 

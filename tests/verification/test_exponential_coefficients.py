@@ -21,6 +21,8 @@ sys.modules[_spec.name] = _module
 _spec.loader.exec_module(_module)
 ExponentialStep = _module.ExponentialStep
 ExponentialThetaStep = _module.ExponentialThetaStep
+PhysicalProductionStep = _module.PhysicalProductionStep
+decay_moments = _module.decay_moments
 population_frequency = _module.population_frequency
 phi1 = _module.phi1
 phi2 = _module.phi2
@@ -181,6 +183,102 @@ class TestExponentialThetaCoefficients(unittest.TestCase):
                 errors.append(error)
             self.assertGreater(errors[0]/errors[1], 3.8, (prescribed, errors))
             self.assertGreater(errors[1]/errors[2], 3.8, (prescribed, errors))
+
+
+def _decimal_lagrange_weights(width, previous, decay):
+    """Independent reference: s-monomial Lagrange basis, integrated by parts.
+
+    Returns the exact older/old/new weights of int_0^h exp(-lam*(h-s)) P(s) ds
+    for P interpolated through s=-previous, 0, h (linear without previous).
+    """
+    h, lam = Decimal(str(width)), Decimal(str(decay))
+    if lam:
+        moments = [(1 - (-lam*h).exp())/lam]
+        for k in (1, 2):
+            moments.append((h**k - k*moments[-1])/lam)
+    else:
+        moments = [h, h*h/2, h**3/3]
+    if previous is None:
+        # P = P0*(1-s/h) + P1*s/h
+        return (Decimal(0), moments[0] - moments[1]/h, moments[1]/h)
+    p = Decimal(str(previous))
+    # Monomial coefficients (1, s, s**2) of each Lagrange basis polynomial.
+    older = (Decimal(0), -h/(p*(p+h)), 1/(p*(p+h)))
+    old = (Decimal(1), (h-p)/(p*h), -1/(p*h))
+    new = (Decimal(0), p/(h*(p+h)), 1/(h*(p+h)))
+    return tuple(sum(c*m for c, m in zip(basis, moments)) for basis in (older, old, new))
+
+
+class TestPhysicalProductionCoefficients(unittest.TestCase):
+    def test_decay_moments_against_high_precision(self):
+        with localcontext() as context:
+            context.prec = 90
+            for x in (0.0, 1e-12, 1e-6, 0.3, 1.999, 2.0, 2.001, 7.0, 40.0, 1e12):
+                X = Decimal(str(x))
+                if x:
+                    k0 = (1 - (-X).exp())/X
+                    k1 = (k0 - (-X).exp())/X
+                    exact = (k0, k1, (2*k1 - (-X).exp())/X)
+                else:
+                    exact = (Decimal(1), Decimal(1)/2, Decimal(1)/3)
+                for value, reference in zip(decay_moments(x), exact):
+                    self.assertTrue(math.isclose(value, float(reference), rel_tol=4e-15), x)
+
+    def test_physical_production_weights_against_high_precision(self):
+        with localcontext() as context:
+            context.prec = 90
+            for width, previous, decay in ((0.1, None, 0.08), (0.1, 0.1, 0.08),
+                                           (0.02, 0.05, 3.01), (0.3, 0.07, 0.0),
+                                           (1.0, 2.0, 30.0), (0.01, 0.0025, 1e4),
+                                           (0.5, 0.4, 4.0), (1.0, 1.0, 1e12),
+                                           (0.004, 0.001, 0.0124)):
+                retention, older, old, new, removed = PhysicalProductionStep(
+                    width, previous).weights(decay)
+                exact = _decimal_lagrange_weights(width, previous, decay)
+                lam_h = Decimal(str(decay))*Decimal(str(width))
+                case = (width, previous, decay)
+                self.assertTrue(math.isclose(retention, float((-lam_h).exp()),
+                                             rel_tol=3e-15, abs_tol=1e-300), case)
+                scale = float(sum(abs(w) for w in exact))
+                for value, reference in zip((older, old, new), exact):
+                    self.assertTrue(math.isclose(value, float(reference), rel_tol=2e-14,
+                                                 abs_tol=1e-15*scale), case)
+                # The removed fraction is formed without cancellation, even
+                # when it is a tiny difference for a very stiff family.
+                expected = 1 - Decimal(str(decay))*exact[2]
+                self.assertTrue(math.isclose(removed, float(expected), rel_tol=2e-14), case)
+
+    def test_linear_physical_is_zero_frequency_linear_transformed(self):
+        for width, decay in ((0.1, 0.08), (2.0, 0.4), (0.01, 1e4), (0.3, 0.0)):
+            retention, older, old, new, removed = PhysicalProductionStep(width).weights(decay)
+            expected = ExponentialThetaStep(width, 0.0).linear_precursor(decay)
+            self.assertEqual(older, 0.0)
+            for value, reference in zip((retention, old, new, removed), expected):
+                self.assertTrue(math.isclose(value, reference, rel_tol=3e-15,
+                                             abs_tol=1e-300), (width, decay))
+
+    def test_quadratic_weights_are_exact_for_constant_and_linear_production(self):
+        # Constant production in equilibrium, and a long previous interval
+        # approaching the two-point linear interpolant.
+        for decay in (0.08, 3.0, 300.0):
+            retention, older, old, new, removed = PhysicalProductionStep(0.2, 0.07).weights(decay)
+            self.assertAlmostEqual(retention + decay*(older + old + new), 1.0, delta=4e-16)
+            self.assertAlmostEqual(removed, 1 - decay*new, delta=4e-16)
+            self.assertLess(older, 0.0)
+            far = PhysicalProductionStep(0.2, 2e8).weights(decay)
+            linear = PhysicalProductionStep(0.2).weights(decay)
+            for value, reference in zip(far, linear):
+                self.assertAlmostEqual(value, reference, delta=1e-9)
+
+    def test_invalid_physical_production_inputs_are_rejected(self):
+        for args in ((0.0,), (math.inf,), (0.1, 0.0), (0.1, -1.0), (0.1, math.nan)):
+            with self.assertRaises(ValueError):
+                PhysicalProductionStep(*args)
+        for decay in (-1.0, math.inf):
+            with self.assertRaises(ValueError):
+                PhysicalProductionStep(0.1, 0.1).weights(decay)
+        with self.assertRaises(ValueError):
+            decay_moments(-1e-3)
 
 
 if __name__ == "__main__":

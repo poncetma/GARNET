@@ -32,6 +32,34 @@ def phi2(z: float) -> float:
     return (phi1(z) - 1.0) / z
 
 
+def decay_moments(x: float) -> tuple[float, float, float]:
+    """Return K_m = int_0^1 exp(-x*u)*u**m du for m = 0, 1, 2 and x >= 0.
+
+    u is the fraction of the step remaining before its end. All three moments
+    are positive, so weights written in them avoid the cancellation of the
+    equivalent phi-function combinations for stiff families. The forward
+    recurrence K_m = (m*K_(m-1) - exp(-x))/x is stable for x > 2.
+    """
+    if not math.isfinite(x) or x < 0.0:
+        raise ValueError("decay moment argument must be finite and non-negative")
+    if x > 2.0:
+        decay = math.exp(-x)
+        k0 = -math.expm1(-x) / x
+        k1 = (k0 - decay) / x
+        return k0, k1, (2.0 * k1 - decay) / x
+    moments = []
+    for m in range(3):
+        term, total = 1.0, 1.0 / (m + 1)
+        for j in range(1, 40):
+            term *= -x / j
+            contribution = term / (m + j + 1)
+            total += contribution
+            if abs(contribution) <= 1e-17 * total:
+                break
+        moments.append(total)
+    return tuple(moments)
+
+
 def population_frequency(current: float, previous: float, width: float) -> float:
     """Logarithmic growth over an accepted interval, without ratio overflow."""
     if not all(math.isfinite(v) and v > 0.0
@@ -132,6 +160,51 @@ class ExponentialThetaStep(ExponentialStep):
         removed = (1.0 - decay * new_weight if abs(z) < 0.5 else
                    (wh + lh * phi1(z)) / (-z))
         return math.exp(-lh), old_weight, new_weight, removed
+
+
+@dataclass(frozen=True)
+class PhysicalProductionStep:
+    """Precursor weights for polynomial **physical** production histories.
+
+    Production beta*S is interpolated in physical time through the new and
+    previous endpoints and, when ``previous_width`` is given, the endpoint
+    before that (PARCS v2.6 Theory Manual, Eqs. 2.23-2.27, generalized to
+    mapped beta products). No frequency enters: these weights are a control
+    that isolates production interpolation from the transformed neutron
+    equation. The older weight is negative, so a quadratic history does not
+    guarantee nonnegative precursors.
+
+      C_new = retention*C_old + older*(beta*S)_older
+              + old*(beta*S)_old + new*(beta*S)_new.
+
+    The removed-beta factor is 1-lambda*new, evaluated without cancellation.
+    """
+
+    width: float
+    previous_width: float | None = None
+
+    def __post_init__(self):
+        if not math.isfinite(self.width) or self.width <= 0.0:
+            raise ValueError("production step width must be finite and positive")
+        if (self.previous_width is not None and
+                (not math.isfinite(self.previous_width) or self.previous_width <= 0.0)):
+            raise ValueError("previous production width must be finite and positive")
+
+    def weights(self, decay):
+        """Return retention, older/old/new production weights and removed beta."""
+        if not math.isfinite(decay) or decay < 0.0:
+            raise ValueError("precursor decay must be finite and non-negative")
+        h = self.width
+        k0, k1, k2 = decay_moments(decay * h)
+        retention = math.exp(-decay * h)
+        if self.previous_width is None:
+            return retention, 0.0, h * k1, h * (k0 - k1), k0
+        r = self.previous_width / h
+        new = h * ((1.0 + r) * k0 - (2.0 + r) * k1 + k2) / (1.0 + r)
+        old = h * ((1.0 + r) * k1 - k2) / r
+        older = h * (k2 - k1) / (r * (1.0 + r))
+        removed = ((2.0 + r) * k0 - 2.0 * k1) / (1.0 + r)
+        return retention, older, old, new, removed
 
 
 @dataclass(frozen=True)

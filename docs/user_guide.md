@@ -591,6 +591,17 @@ repetitions. Iteration convergence is separate from time accuracy. See the
 [prompt-event checkpoint](../benchmark-results/exponential-second-order/CHUNK2.md)
 for controls, shared-mesh comparisons and remaining stability work.
 
+For research comparisons, FTM2 also accepts
+`ftm_kwargs={"precursor_production": "quadratic-physical"}`, which integrates
+delayed-neutron production quadratically in physical time through the last
+three accepted endpoints (PARCS style), or `"linear-physical"`. Neither
+depends on the frequency. The quadratic history starts and restarts as linear,
+and `result.step_precursor_productions` reports the model used per step. The
+[eighth checkpoint](../benchmark-results/exponential-second-order/CHUNK8.md)
+found the same accepted steps and work as the default linear transformed
+production, with precursor accuracy better or worse by regime; it is not a
+recommended setting.
+
 An alternative second-order transform is available as `time_scheme="ftm-bdf2"`:
 
 ```python
@@ -637,7 +648,8 @@ a runtime speedup or a gain over adaptive BDF.
 The [TWIGL spatial assessment](../benchmark-results/exponential-second-order/CHUNK7.md)
 compares independently measured power, shape, region power, integrated power
 and final precursor errors. At the declared 0.1% temporal budget, tuned
-adaptive BDF uses less work than the tested transforms. Mesh refinement
+adaptive BDF uses less work than the tested transforms on the step; with
+`output_rtol=1e-3` as well (chunk 8), FTM2 ties BDF on the ramp. Mesh refinement
 still changes the 40×40 thermal-group shape by about 1.10%, so these temporal
 results do not establish 0.1% spatial accuracy or earn a production speedup
 claim.

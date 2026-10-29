@@ -8,6 +8,22 @@ the mesh, time step, physics data, and hardware behind their results.
 
 ## Physical-state adaptive exponential check
 
+The [eighth checkpoint](../benchmark-results/exponential-second-order/CHUNK8.md)
+adds FTM2 `precursor_production` controls (PARCS-style quadratic and linear
+physical production). Five new scalar coefficient tests use 90-digit
+references and 26 solver tests use exact products, Radau and matrix-exponential
+references; default FTM2 trajectories are bitwise unchanged. A 199-run
+assessment over nine cases finds no error/work benefit: all production
+models accept the same steps, while final precursor errors move by regime and
+stay at least 50x inside the 0.1% budget. Setup reuse was closed by
+measurement (below 1% of CPU march time). With FTM `output_rtol` also tuned,
+FTM2 ties tuned BDF on the TWIGL ramp; BDF stays cheaper on the step. The
+default CPU suite records 951 passed, 26 skipped and one example-import
+timeout under concurrent load, which passes on retest. Merged with
+`audit-fixes`, FTM2 results are bitwise unchanged and the suite records 1240
+passed, 26 skipped and the same import timeout; the tri noise tests now state
+their reflective boundary explicitly, as audit fix H9 requires.
+
 The [seventh checkpoint](../benchmark-results/exponential-second-order/CHUNK7.md)
 assesses TWIGL step/ramp on 20×20 and 40×40 meshes, with independent sparse
 physical-generator references and a finer spatial check. **118 targeted
