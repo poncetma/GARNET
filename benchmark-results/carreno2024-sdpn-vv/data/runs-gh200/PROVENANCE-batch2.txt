@@ -1,0 +1,83 @@
+staged: 2026-10-30T13:34:12+01:00 by poncet_m on cn000
+source: /data/user/poncet_m/GARNET
+commit: 20967d3db1007abd53d10b56102c75c40ad8ec28 2026-10-29 11:04:07 +0100 Merge remote-tracking branch 'origin/audit-fixes'
+
+# git status --short
+ M benchmark-results/hpmr-iqs-gh200/README.md
+ M benchmark-results/lra2d-adaptive-bdf-report/README.md
+ M docs/coupling.md
+ M docs/gpu_kernel_optimization_plan.md
+ M docs/numerical_implementation_notes.md
+ M docs/numerical_scaling_plan.md
+ M docs/qa/code_audit_2026-10-28.md
+ M docs/quasistatic_acceleration_plan.md
+ M docs/transient_api.md
+ M docs/user_guide.md
+ M docs/verification_validation.md
+ M examples/hpmr_coupled_transient.py
+ M garnet/benchmarks/c5g7.py
+ M garnet/benchmarks/hpmr_assembly.py
+ M garnet/benchmarks/lra.py
+ M garnet/timescheme.py
+ M garnet/transient.py
+ M slurm/run_garnet_gpu_regression.sh
+ M slurm/stage_and_submit_gpu_regression.sh
+ M tests/README.md
+ M tests/validation/test_lra2d.py
+ M tests/validation/test_vver440.py
+ M tests/verification/test_exponential_transient.py
+ M tests/verification/test_femffusion_io.py
+ M tests/verification/test_hpmr_assembly_pin_power.py
+ M tests/verification/test_kinetics_reference.py
+ M tests/verification/test_sdpn_symmetric.py
+ M tests/verification/test_timescheme.py
+ M tests/verification/test_transient_kinetics_theory.py
+ M tests/verification/test_transient_point_kinetics.py
+?? benchmark-results/adaptive-bdf-error-norm/
+?? benchmark-results/carreno2024-sdpn-vv/
+?? benchmark-results/gpu-paths-gh200/
+?? benchmark-results/hpmr-iqs-gh200/recheck-20261029/
+?? benchmark-results/transient-sdpn-inner-solver/
+?? benchmark-results/transient-step-convergence/
+?? "literature/Development of a diffusive simplified double PN approximation to the neutron transport equation.pdf"
+?? slurm/run_garnet_carreno_gh.sh
+?? slurm/run_garnet_hpmr_iqs_gh.sh
+?? slurm/stage_and_submit_carreno_gh.sh
+?? slurm/stage_and_submit_hpmr_iqs_gh.sh
+?? tests/_femffusion.py
+?? tests/verification/test_gpu_paths.py
+?? tools/assess_carreno2024.py
+?? tools/assess_hpmr_iqs_guards.py
+
+# git diff --stat HEAD
+ benchmark-results/hpmr-iqs-gh200/README.md         | 174 ++++++++++++++++++---
+ .../lra2d-adaptive-bdf-report/README.md            |   7 +
+ docs/coupling.md                                   |   5 +-
+ docs/gpu_kernel_optimization_plan.md               |   6 +-
+ docs/numerical_implementation_notes.md             |  18 +++
+ docs/numerical_scaling_plan.md                     |   2 +-
+ docs/qa/code_audit_2026-10-28.md                   |  18 ++-
+ docs/quasistatic_acceleration_plan.md              |   6 +-
+ docs/transient_api.md                              |   7 +-
+ docs/user_guide.md                                 |  16 +-
+ docs/verification_validation.md                    |  46 ++++--
+ examples/hpmr_coupled_transient.py                 |  39 ++++-
+ garnet/benchmarks/c5g7.py                          |  31 +++-
+ garnet/benchmarks/hpmr_assembly.py                 | 137 ++++++++--------
+ garnet/benchmarks/lra.py                           |  33 +++-
+ garnet/timescheme.py                               |  45 ++++--
+ garnet/transient.py                                | 155 +++++++++++-------
+ slurm/run_garnet_gpu_regression.sh                 |  34 ++--
+ slurm/stage_and_submit_gpu_regression.sh           |  28 +++-
+ tests/README.md                                    |  12 +-
+ tests/validation/test_lra2d.py                     |  54 +++++++
+ tests/validation/test_vver440.py                   |  11 +-
+ tests/verification/test_exponential_transient.py   |   6 +-
+ tests/verification/test_femffusion_io.py           |  25 ++-
+ tests/verification/test_hpmr_assembly_pin_power.py |  71 ++++++++-
+ tests/verification/test_kinetics_reference.py      |  26 ++-
+ tests/verification/test_sdpn_symmetric.py          |  23 +++
+ tests/verification/test_timescheme.py              |  29 ++++
+ .../verification/test_transient_kinetics_theory.py |  12 +-
+ .../verification/test_transient_point_kinetics.py  |  31 +++-
+ 30 files changed, 845 insertions(+), 262 deletions(-)

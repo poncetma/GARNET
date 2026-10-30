@@ -1,0 +1,9 @@
+  outer    1  k = 1.03440328  dk = 3.44e-02  src_err = 2.21e-01
+  outer    2  k = 1.08412344  dk = 4.97e-02  src_err = 1.27e-01
+  outer    3  k = 1.10959832  dk = 2.55e-02  src_err = 9.26e-02
+  outer    4  k = 1.13178281  dk = 2.22e-02  src_err = 3.07e-02
+  outer    5  k = 1.14572802  dk = 1.39e-02  src_err = 4.00e-02
+  outer    6  k = 1.15141569  dk = 5.69e-03  src_err = 3.15e-02
+  outer    7  k = 1.15865973  dk = 7.24e-03  src_err = 1.19e-02
+  outer    8  k = 1.16412507  dk = 5.47e-03  src_err = 7.44e-03
+  outer    9  k = 1.16894389  dk = 4.82e-03  src_err = 4.42e-03

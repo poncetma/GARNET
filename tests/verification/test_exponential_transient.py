@@ -124,8 +124,12 @@ def test_frequency_transform_preserves_multigroup_equilibrium(scheme):
     kin = Kinetics(velocities=np.tile([1e7, 2e5], (2, 1)),
                    beta=[[0.005, 0.0025], [0.006, 0.002]], decay=[0.08, 0.4],
                    chi_delayed=[[0.95, 0.05], [0.85, 0.15]])
+    # A tight initial state: since audit O12 the steps are actually solved, and
+    # from the default steady tolerance the power drifts 3e-7 to 5e-7 (5e-12
+    # from this one). Before, the warm start was accepted untouched.
     result = TransientSolver(grid, lambda t: (materials, mapping), kin, device="cpu").solve(
-        t_end=0.1, dt=0.02, time_scheme=scheme, tol_step=1e-9)
+        t_end=0.1, dt=0.02, time_scheme=scheme, tol_step=1e-9,
+        steady_kwargs=dict(tol_k=1e-12, tol_source=1e-11))
     np.testing.assert_allclose(result.power, 1.0, atol=2e-7, rtol=0)
 
 

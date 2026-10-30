@@ -59,7 +59,7 @@ arbitrary left-scaled `D_r A` is not valid in general. Symmetric diagonal
 normalization is closely related to GARNET's existing Jacobi PCG;
 [PETSc documents both forms](https://petsc.org/release/manualpages/PC/PCJACOBI/).
 
-**Balancing error control.** This is the clearest unresolved opportunity.
+**Balancing error control.** This was the clearest unresolved opportunity. *Status 2026-10-29 (audit O11):* adaptive BDF now defaults to `error_norm="blockwise"`, the simpler dimensionless variant suggested below: Eq. (44) per flux group, precursor family and external field, accepting on the largest. `"concatenated"` preserves the legacy mode. The volume-weighted componentwise RMS and `T - T_ref` thermal scaling remain unimplemented; see [adaptive-bdf-error-norm](../benchmark-results/adaptive-bdf-error-norm/) for the measured effect.
 `BDF.error_norm()` computes
 
 ```text

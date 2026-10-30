@@ -1,0 +1,96 @@
+=== GARNET full GPU regression started at 2026-10-29T15:33:35+01:00 on gpu002 ===
+job=241683 repo=/data/scratch/shared/poncet_m/garnet-gpu-full-stage/repo python=/data/scratch/shared/poncet_m/garnet-gh-py313-v1/bin/python test_deps=/data/scratch/shared/poncet_m/garnet-test-deps/pytest8
+preflight: pytest=8.4.2 numpy=2.3.2 scipy=1.16.3 cupy=13.6.0
+preflight: cuda_devices=1 device0=NVIDIA GH200 120GB
+preflight: TransientSolver, MultigroupStepOperator
+staged: 2026-10-29T15:33:34+01:00 by poncet_m on cn000
+source: /data/user/poncet_m/GARNET
+commit: 20967d3db1007abd53d10b56102c75c40ad8ec28 2026-10-29 11:04:07 +0100 Merge remote-tracking branch 'origin/audit-fixes'
+
+# git status --short
+ M benchmark-results/lra2d-adaptive-bdf-report/README.md
+ M docs/numerical_implementation_notes.md
+ M docs/numerical_scaling_plan.md
+ M docs/qa/code_audit_2026-10-28.md
+ M docs/transient_api.md
+ M docs/user_guide.md
+ M docs/verification_validation.md
+ M examples/hpmr_coupled_transient.py
+ M garnet/benchmarks/hpmr_assembly.py
+ M garnet/benchmarks/lra.py
+ M garnet/timescheme.py
+ M garnet/transient.py
+ M slurm/run_garnet_gpu_regression.sh
+ M slurm/stage_and_submit_gpu_regression.sh
+ M tests/README.md
+ M tests/validation/test_lra2d.py
+ M tests/validation/test_vver440.py
+ M tests/verification/test_femffusion_io.py
+ M tests/verification/test_hpmr_assembly_pin_power.py
+ M tests/verification/test_kinetics_reference.py
+ M tests/verification/test_sdpn_symmetric.py
+ M tests/verification/test_timescheme.py
+?? benchmark-results/adaptive-bdf-error-norm/
+?? benchmark-results/transient-sdpn-inner-solver/
+?? slurm/run_garnet_hpmr_iqs_gh.sh
+?? slurm/stage_and_submit_hpmr_iqs_gh.sh
+?? tests/_femffusion.py
+?? tests/verification/test_gpu_paths.py
+pytest arguments: -ra -q -o addopts= -p no:cacheprovider --durations=30 --junitxml=/data/scratch/shared/poncet_m/garnet-regression-logs/full-gh200-20261029.xml tests
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 16%]
+..................s..................................................... [ 22%]
+........................................................................ [ 28%]
+........................................................................ [ 33%]
+........................................................................ [ 39%]
+........................................................................ [ 44%]
+........................................................................ [ 50%]
+........................................................................ [ 56%]
+........................................................................ [ 61%]
+........................................................................ [ 67%]
+........................................................................ [ 72%]
+........................................................................ [ 78%]
+........................................................................ [ 84%]
+........................................................................ [ 89%]
+........................................................................ [ 95%]
+..................................s..........................            [100%]
+- generated xml file: /data/scratch/shared/poncet_m/garnet-regression-logs/full-gh200-20261029.xml -
+============================= slowest 30 durations =============================
+42.10s call     tests/validation/test_brantley_larsen_2d.py::test_marshak_converges_to_paper
+22.14s call     tests/verification/test_transient_sn.py::test_sn_transient_tracks_point_kinetics[bdf2-5e-05]
+20.87s call     tests/verification/test_transient_sn.py::test_sn_transient_tracks_point_kinetics[backward-euler-0.0005]
+18.14s call     tests/verification/test_transient_kinetics_theory.py::test_asymptotic_period_matches_the_inhour_equation
+18.01s call     tests/validation/test_hpmr_sph_reference_families.py::test_sph_reference_families_agree_more_than_diffusion
+17.77s setup    tests/verification/test_hpmr_sn_homogenization.py::test_transport_reference_is_sane
+12.23s call     tests/validation/test_c5g7_td.py::test_td1_worth_ordering_at_peak_insertion
+11.14s call     tests/validation/test_model_twigl.py::test_twigl_transient_power_matches_literature[ramp-1.31-2.11]
+9.61s call     tests/validation/test_model_twigl.py::test_twigl_transient_power_matches_literature[step-2.06-2.13]
+7.95s call     tests/validation/test_lra2d.py::test_adaptive_lra_restart_uses_the_thermal_startup_predictor
+7.58s call     tests/validation/test_hpmr_3d_mesh.py::test_unstructured_3d_matches_tri_prism_on_hpmr
+6.48s call     tests/validation/test_c5g7_td.py::test_td3_density_dip_and_recovery
+6.44s call     tests/validation/test_hpmr_sph.py::test_sph_folds_sp3_self_shielding_into_hpmr_diffusion
+6.35s call     tests/validation/test_hpmr_sph_reference_families.py::test_sph_folds_each_transport_family_into_hpmr_diffusion[SDP2]
+6.16s call     tests/validation/test_hpmr_sph_reference_families.py::test_sph_folds_each_transport_family_into_hpmr_diffusion[SP3]
+6.13s call     tests/verification/test_unstructured_mesh.py::test_unstructured_3d_converges_to_analytic_second_order
+6.12s call     tests/verification/test_transient_point_kinetics.py::test_sdp3_transient_tracks_point_kinetics
+6.07s call     tests/verification/test_coupling.py::test_a_drum_withdrawal_raises_power_and_feedback_pushes_back
+5.97s call     tests/verification/test_hpmr_assembly_pin_power.py::test_reconstruction_is_shape_times_form
+5.82s call     tests/verification/test_tri_sn.py::test_3d_scb_more_accurate_than_step
+5.78s call     tests/validation/test_anl7416_8a1.py::test_transient_exhibit_a
+5.64s call     tests/validation/test_hpmr_sph_reference_families.py::test_sph_folds_each_transport_family_into_hpmr_diffusion[SDP1]
+5.58s call     tests/verification/test_transient_point_kinetics.py::test_sdp1_transient_tracks_point_kinetics_and_diffusion
+5.56s call     tests/verification/test_transient_kinetics_theory.py::test_the_answer_is_converged_in_time
+5.04s call     tests/verification/test_feedback.py::test_tabulated_feedback_is_monotonic_and_negative
+4.96s call     tests/verification/test_fused_kernels.py::test_tri_sn_sweep_is_unchanged_by_the_fused_contractions[scb]
+4.83s call     tests/validation/test_noise_femffusion.py::test_femffusion_1d_2group_noise[sp3]
+4.57s call     tests/validation/test_anl7416_8a1.py::test_transient_via_divergence_form
+4.33s call     tests/verification/test_batched_group_source.py::test_batched_transient_reproduces_the_sparse_one
+4.18s call     tests/verification/test_coupling.py::test_thermal_substepping_changes_little
+=========================== short test summary info ============================
+SKIPPED [1] tests/validation/test_coupled_precice.py:33: could not import 'precice': No module named 'precice'
+SKIPPED [1] tests/verification/test_sdpn_derivation.py:25: could not import 'sympy': No module named 'sympy'
+SKIPPED [1] tests/verification/test_diffusion_analytic.py:103: cupy present; this test targets CUDA-less machines
+SKIPPED [1] tests/verification/test_tri_sn.py:316: could not import 'pyamg': No module named 'pyamg'
+1283 passed, 4 skipped in 479.97s (0:07:59)
+=== GARNET full GPU regression finished at 2026-10-29T15:41:37+01:00 with status 0 ===

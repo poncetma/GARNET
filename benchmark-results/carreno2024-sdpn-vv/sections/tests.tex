@@ -1,0 +1,33 @@
+\section{Test tolerances}
+\label{sec:tests}
+
+\textbf{\path{tests/validation/test_brantley_larsen_2d.py}.} The
+single-mesh tests now check the Marshak results, the default, on the
+$80 \times 80$ mesh: each method within 150~pcm of Table~6 (measured $+87$ to
+$+127$~pcm, all mesh error) and a positive offset with a spread below 60~pcm
+(measured 41~pcm). A new test keeps the per-moment Robin results for
+comparison: Robin minus Marshak between $-80$ and $-45$~pcm (measured $-53$
+to $-54$~pcm, and $-73$~pcm for SDP1). Before, the single-mesh tests ran each
+solver's default, mostly Robin, and passed partly by cancellation
+(Table~\ref{tab:bl-split}). The mesh-limit test was the
+weak one: it checked SP3 and SDP1 only, to 10~pcm. It now checks every
+method with the Marshak vacuum against Table~6 to 4~pcm, from $n = 80$ and
+160 at second order; that two-mesh estimate is within 2.2~pcm of the
+three-mesh limits of Table~\ref{tab:bl-conv}, and the measured distances from
+the paper are within 1.5~pcm. SP1, SP3, SP5, SP7 and SDP1 run by default
+(about 20~s together); SDP2 and SDP3 with the FEMFFUSION tables, which need
+GMRES, are marked \code{slow}, as is a test that the re-derived SDP3 stays
+4--12~pcm below the paper (measured $-7.9$~pcm from two meshes). A value
+near zero there would mean the tables had been changed back to the paper's.
+
+\textbf{\path{tests/validation/test_c5g7.py}.} The homogenized tests keep
+their envelopes, with corrected explanations: Section~\ref{sec:c5g7} shows
+that their closeness to MCNP is a cancellation, so they guard the ordering
+and clustering of the hierarchy, not accuracy. Two tests are new. One checks
+that the exact pin areas reproduce $\pi r^2$ at any resolution and that the
+builder passes them and the vacuum boundary through. The other, marked
+\code{slow} (about a minute), runs pin-resolved diffusion at $s = 8$ with
+exact areas and vacuum outside, and checks it against the paper's SP1: $k$
+within 10~pcm (measured $-6.8$~pcm) and the pin-power AVG against the NEA
+MCNP map within 0.06 percentage points of the paper's 1.43\% (measured
+1.46\%). It skips without a FEMFFUSION checkout, which carries that map.

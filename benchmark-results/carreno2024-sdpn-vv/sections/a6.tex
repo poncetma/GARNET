@@ -1,0 +1,22 @@
+Three sets of SDP3 coefficient tables are in circulation, and they differ only
+in the closure rows 2--3:
+
+\begin{itemize}
+\item \textbf{Re-derived} (\garnet's default): rows 2--3 obtained symbolically
+  from the paper's own closure, Eq.~(34). The same derivation reproduces the
+  paper's SDP1 and SDP2 tables and all three Marshak matrices exactly.
+\item \textbf{FEMFFUSION}: the tables in the authors' code
+  (\path{src/matrix_operators/matrix_operators_sdpn.cc}).
+\item \textbf{Paper (A.6)}: the tables as printed. They equal FEMFFUSION's
+  except row 2 of $c^{(3)}$, printed as $(36/55,\ 54/175)$ where the code has
+  $(9/25,\ -54/175)$.
+\end{itemize}
+
+\begin{table}[h]
+\caption{Brantley--Larsen SDP3 with Marshak vacuum and the three coefficient
+sets. $k_\infty$ is extrapolated from $n = 80, 160, 320$.}
+\label{tab:bl-a6}
+\tablefile{bl_sdp3_tables}
+\end{table}
+
+\input{sections/a6_result}

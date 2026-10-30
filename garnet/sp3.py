@@ -63,8 +63,8 @@ class SP3GroupOperator:
     ``mask_bc="vacuum"``, the core/void faces -- whenever it is available:
     the "sp3" variant on a Cartesian ``GroupOperator`` grid without a
     ``hybrid_mask``. Elsewhere it falls back to the per-moment Robin term: the
-    SDP1 Marshak matrix is not symmetric in this basis (use
-    ``SDPNEigenSolver`` order 1 with ``marshak_vacuum=True`` for it), the
+    SDP1 Marshak matrix is not symmetric in this basis (``SDPNEigenSolver``
+    of order 1 applies it by default), the
     triangular/cylindrical stencils have no coupled face term, and a hybrid
     block must stay pure diffusion outside its mask. True requires it (raises
     where unavailable); False selects the per-moment Robin term.

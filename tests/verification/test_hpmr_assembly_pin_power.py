@@ -14,13 +14,17 @@ the wrong coordinate frame, and pin positions that miss their own assembly.
 import numpy as np
 import pytest
 
-from garnet.benchmarks.hpmr import (FUEL, PITCH, _FUEL_SITES, build_hpmr2d,
+from garnet.benchmarks.hpmr import FUEL as CORE_FUEL
+from garnet.benchmarks.hpmr import (PITCH, _FUEL_SITES, build_hpmr2d,
                                    hpmr_materials_builtin)
-from garnet.benchmarks.hpmr_assembly import (N_FUEL, N_HP, N_MOD, PIN_PITCH,
+from garnet.benchmarks.hpmr_assembly import (FUEL, HEATPIPE, HP_SHELL, MOD_SHELL,
+                                            MODERATOR, N_FUEL, N_HP, N_MOD,
+                                            PIN_MATERIAL_NAMES, PIN_PITCH,
                                             R_FUEL, R_HP, R_HP_SHELL, R_MOD,
                                             R_MOD_SHELL, build_hpmr_assembly2d,
-                                            pin_fluxes, pin_materials_builtin,
-                                            pin_powers, vtb_pin_lattice)
+                                            pin_fluxes, pin_layer_fractions,
+                                            pin_materials_builtin, pin_powers,
+                                            vtb_pin_lattice)
 from garnet.hexraster import hex_site_xy
 from garnet.pin_power import reconstruct_pin_powers, tri_cell_centroids
 
@@ -94,16 +98,69 @@ def test_pins_fit_the_assembly_and_do_not_overlap():
     assert worst >= 2.0 * R_HP_SHELL
 
 
-@pytest.mark.parametrize("refine, tol", [(4, 1.4e-2), (8, 4e-3)])
+@pytest.mark.parametrize("refine, tol", [(4, 8e-3), (8, 4e-3), (16, 1e-4)])
 def test_meshed_volume_fractions_converge(refine, tol):
     """Volume mixing must converge; centroid assignment does not.
 
     Without mixing the heat-pipe fraction sat at a refinement-INDEPENDENT
-    -0.0123, a structural bias rather than a resolution one.
+    -0.0123, a structural bias rather than a resolution one. What remains is
+    the two-constituent truncation of cells that hold three (max 0.0074 at
+    refine 4, 0.0030 at 8, 5e-5 at 16).
     """
     p = build_hpmr_assembly2d(refine=refine)
     for name, ref in DOC_FRACTIONS.items():
         assert p.volume_fractions[name] == pytest.approx(ref, abs=tol)
+
+
+def _analytic_fractions():
+    pi = np.pi
+    area = {"fuel_compact": N_FUEL * pi * R_FUEL ** 2,
+            "moderator": N_MOD * pi * R_MOD ** 2,
+            "mod_shell": N_MOD * pi * (R_MOD_SHELL ** 2 - R_MOD ** 2),
+            "heatpipe": N_HP * pi * R_HP ** 2,
+            "hp_shell": N_HP * pi * (R_HP_SHELL ** 2 - R_HP ** 2)}
+    frac = {k: v / ASSEMBLY_AREA for k, v in area.items()}
+    frac["graphite"] = 1.0 - sum(frac.values())
+    return frac
+
+
+@pytest.mark.parametrize("refine", [2, 4])
+def test_cell_fractions_are_exact_at_any_refinement(refine):
+    """Per-cell constituent areas are closed-form, so they sum to the analytic
+    pin areas on any mesh. The former barycentric sampler used only the upright
+    sub-triangle centroids: at refine 4 it put mod_shell at 0.0183 against
+    0.0227 and hp_shell at 0.0278 against 0.0383."""
+    p = build_hpmr_assembly2d(refine=refine)
+    cf = p.cell_fractions.reshape(-1, len(PIN_MATERIAL_NAMES))
+    np.testing.assert_allclose(cf.sum(axis=1), 1.0, atol=1e-12)
+    assert cf.min() >= 0.0
+    exact = _analytic_fractions()
+    for i, name in enumerate(PIN_MATERIAL_NAMES):
+        assert cf[:, i].mean() == pytest.approx(exact[name], rel=1e-12, abs=1e-14)
+    # Every pin owns cells, and only covered cells are owned.
+    owned = p.pin_index.reshape(-1) >= 0
+    assert len(np.unique(p.pin_index.reshape(-1)[owned])) == N_FUEL + N_MOD + N_HP
+    np.testing.assert_array_equal(owned, cf[:, 1:].sum(axis=1) > 0.0)
+
+
+def test_pin_layer_fractions_closed_form():
+    s = 0.2
+    tri = np.array([[0.0, 0.0], [s, 0.0], [0.5 * s, 0.5 * np.sqrt(3.0) * s]])
+    # wholly inside the fuel compact, wholly outside it
+    assert pin_layer_fractions(tri, np.zeros(2), "fuel") == [(FUEL, pytest.approx(1.0))]
+    assert pin_layer_fractions(tri, np.array([5.0, 0.0]), "fuel") == [(FUEL, 0.0)]
+    # a triangle that contains a whole moderator pin sees disk and annulus areas
+    big = 10.0 * np.array([[-1.0, -1.0], [2.0, -1.0], [-1.0, 2.0]])
+    big_area = 0.5 * 30.0 * 30.0
+    (m0, f0), (m1, f1) = pin_layer_fractions(big, np.zeros(2), "mod")
+    assert (m0, m1) == (MODERATOR, MOD_SHELL)
+    assert f0 * big_area == pytest.approx(np.pi * R_MOD ** 2, rel=1e-13)
+    assert f1 * big_area == pytest.approx(np.pi * (R_MOD_SHELL ** 2 - R_MOD ** 2), rel=1e-12)
+    # a triangle straddling the heat-pipe wall holds pipe, wall and graphite
+    parts = dict(pin_layer_fractions(tri + np.array([-0.5 * s, R_HP - 0.05]),
+                                     np.zeros(2), "hp"))
+    assert 0.0 < parts[HEATPIPE] < 1.0 and 0.0 < parts[HP_SHELL] < 1.0
+    assert sum(parts.values()) < 1.0
 
 
 def test_builtin_materials_are_the_real_library():
@@ -152,7 +209,7 @@ def test_every_pin_lands_in_its_own_fuel_assembly():
     centres, _ = vtb_pin_lattice()
     pts = (sites[:, None, :] + centres[None, :, :]).reshape(-1, 2)
     d = np.linalg.norm(pts[:, None, :] - cen[None, :, :], axis=2)
-    assert np.all(mm[d.argmin(axis=1)] == FUEL)
+    assert np.all(mm[d.argmin(axis=1)] == CORE_FUEL)
 
 
 def test_reconstruction_is_shape_times_form():

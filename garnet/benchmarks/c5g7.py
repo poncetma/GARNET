@@ -10,8 +10,10 @@ treatment: each 1.26 cm pin cell is homogenized by volume-weighting the pin
 and moderator cross sections (fuel volume is conserved exactly and the
 quarter-core symmetry is preserved). Heterogeneity remains at the pin-cell
 level: six distinct homogenized pin types plus the pure water reflector. The
-outer vacuum boundary is modeled as zero flux, which is accurate here because
-a full assembly-width of water separates it from the fuel.
+outer vacuum boundary is modeled as zero flux by default, which is accurate
+here because a full assembly-width of water separates it from the fuel: it is
+within 1.4 pcm of the vacuum condition (``outer_bc="vacuum"``) for every
+SPN/SDPN order (benchmark-results/carreno2024-sdpn-vv).
 
 Expect k_eff within a few hundred pcm of the transport reference — the
 residual is the physics gap (diffusion + volume homogenization vs. transport),
@@ -144,10 +146,21 @@ class C5G7Problem:
     mix_weight: np.ndarray = None     # pin-resolved: fuel-covered area fraction
 
 
-def pin_coverage(s: int, sub: int = 16) -> np.ndarray:
+def pin_coverage(s: int, sub: int | None = 16) -> np.ndarray:
     """Fraction of each of the s x s sub-cells of a pin covered by the centred
-    r = 0.54 cm fuel cylinder (identical for every pin). Sub-sampled sub x sub."""
+    r = 0.54 cm fuel cylinder (identical for every pin). Sub-sampled sub x sub,
+    or exact (closed-form square/circle intersection) with ``sub=None``."""
     R = PIN_RADIUS / PIN_PITCH
+    if sub is None:
+        from ..model import _disk_polygon_area
+        edges = np.arange(s + 1) / s - 0.5
+        frac = np.empty((s, s))
+        for i in range(s):
+            for j in range(s):
+                square = np.array([[edges[i], edges[j]], [edges[i + 1], edges[j]],
+                                   [edges[i + 1], edges[j + 1]], [edges[i], edges[j + 1]]])
+                frac[i, j] = min(_disk_polygon_area(square, R) * s * s, 1.0)
+        return frac
     off = (np.arange(s) + 0.5) / s - 0.5                    # sub-cell centres
     soff = (np.arange(sub) + 0.5) / sub - 0.5               # points within a sub-cell (in cell units)
     frac = np.empty((s, s))
@@ -161,7 +174,8 @@ def pin_coverage(s: int, sub: int = 16) -> np.ndarray:
 
 
 def build_c5g7_2d(cells_per_pin: int = 2,
-                  pin_resolved: bool = False) -> C5G7Problem:
+                  pin_resolved: bool = False, exact_area: bool = False,
+                  outer_bc: str = "zero-flux") -> C5G7Problem:
     """Assemble the 2D quarter-core problem on a Cartesian grid.
 
     cells_per_pin: spatial cells per pin-cell side; the 64.26 cm quarter core
@@ -175,6 +189,13 @@ def build_c5g7_2d(cells_per_pin: int = 2,
     is the pin-resolved treatment used by pin-transport codes and by the FE
     solutions of Carreno et al. (2024); the default (False) keeps the fast
     volume-homogenized pin cells.
+
+    exact_area: pin-resolved only. True computes each cell's covered fraction
+    in closed form; the default samples 16 x 16 points per cell, which misstates
+    the fuel area by -0.66% at cells_per_pin = 4 and +0.06% at 8.
+
+    outer_bc: boundary on the two outer faces. The benchmark specifies
+    "vacuum"; the default "zero-flux" keeps earlier results unchanged.
     """
     chars = ["U", "m", "o", "x", "G", "F"]
     build_pin = _pure_pin if pin_resolved else _homogenized_pin
@@ -215,7 +236,7 @@ def build_c5g7_2d(cells_per_pin: int = 2,
         # the pi r^2 / pitch^2 fuel loading at *any* resolution -- a plain
         # in/out raster does not, and its fuel area (hence k) swings wildly with
         # cells_per_pin.
-        frac = np.tile(pin_coverage(s), (n, n))            # covered fraction
+        frac = np.tile(pin_coverage(s, None if exact_area else 16), (n, n))
         frac[expanded == water_idx] = 0.0                  # water pins: no fuel
         eps = 1e-9
         full = frac >= 1.0 - eps
@@ -231,10 +252,32 @@ def build_c5g7_2d(cells_per_pin: int = 2,
 
     L = n * PIN_PITCH  # 64.26 cm
     grid = Grid(shape=(n * s, n * s, 1), size=(L, L, PIN_PITCH))
-    bc = (("reflective", "zero-flux"),   # x: symmetry plane, outer vacuum
-          ("reflective", "zero-flux"),   # y: symmetry plane, outer vacuum
+    bc = (("reflective", outer_bc),      # x: symmetry plane, outer boundary
+          ("reflective", outer_bc),      # y: symmetry plane, outer boundary
           "reflective")                  # z: exact 2D
     return C5G7Problem(grid=grid, materials=materials, material_map=material_map,
                        bc=bc, fission_xs=np.array(fission), pin_map=pin_map,
                        cells_per_pin=s, mix_material=mix_material,
                        mix_weight=mix_weight)
+
+
+def pin_powers(problem: C5G7Problem, flux) -> np.ndarray:
+    """Pin fission rates, (51, 51) indexed [row = y, col = x] like ``pin_map``,
+    normalized to a mean of 1 over the 1056 fuel pins and 0 elsewhere.
+
+    flux: scalar flux, shape (G, nx, ny, 1), as ``Result.flux_numpy``. Blended
+    cells of the pin-resolved geometry use their blended fission cross
+    section. This is the normalization of the benchmark's reference pin powers.
+    """
+    phi = np.asarray(flux)
+    sigf = problem.fission_xs[problem.material_map[:, :, 0]]          # (nx, ny, G)
+    if problem.mix_material is not None:
+        mix = problem.mix_material[:, :, 0]
+        w = np.where(mix >= 0, problem.mix_weight[:, :, 0], 0.0)[..., None]
+        sigf = (1.0 - w) * sigf + w * problem.fission_xs[np.maximum(mix, 0)]
+    rate = np.einsum("xyg,gxy->xy", sigf, phi[:, :, :, 0])
+    s, n = problem.cells_per_pin, problem.pin_map.shape[0]
+    pins = rate.reshape(n, s, n, s).sum(axis=(1, 3)).T
+    fuel = problem.pin_map < 4                                         # UO2 and the 3 MOX
+    pins = np.where(fuel, pins, 0.0)
+    return pins / pins[fuel].mean()

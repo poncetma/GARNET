@@ -1,0 +1,10 @@
+The regression test's model, pin-cell homogenized at $s = 1$, lands 8--165~pcm
+below MCNP (Table~\ref{tab:c5g7-hom}). The agreement is a cancellation of two
+large errors. Homogenizing each pin cell raises $k$ by 380--660~pcm against
+the pin-resolved model (Table~\ref{tab:c5g7-eff}), so the homogenized mesh
+limit is 57--223~pcm \emph{above} MCNP and 376--650~pcm above the paper; the
+$s = 1$ mesh then lowers $k$ by 222--231~pcm. The test's eigenvalue envelopes
+(2\% for diffusion, 0.5\% for the family) are therefore not accuracy
+statements. What those tests guard is the internal ordering of the hierarchy
+and the clustering of the six transport methods, which is where the paper's
+SDP2/SDP3 table errors showed.

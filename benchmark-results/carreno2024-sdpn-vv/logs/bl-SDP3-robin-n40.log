@@ -1,0 +1,26 @@
+  outer    1  k = 0.75553243  dk = 2.44e-01  src_err = 1.59e-01
+  outer    2  k = 0.77290277  dk = 1.74e-02  src_err = 9.42e-02
+  outer    3  k = 0.78361317  dk = 1.07e-02  src_err = 6.51e-02
+  outer    4  k = 0.80262900  dk = 1.90e-02  src_err = 2.10e-02
+  outer    5  k = 0.80463974  dk = 2.01e-03  src_err = 7.78e-03
+  outer    6  k = 0.80769423  dk = 3.05e-03  src_err = 2.63e-03
+  outer    7  k = 0.80819358  dk = 4.99e-04  src_err = 8.94e-04
+  outer    8  k = 0.80814917  dk = 4.44e-05  src_err = 3.70e-04
+  outer    9  k = 0.80817542  dk = 2.63e-05  src_err = 2.11e-04
+  outer   10  k = 0.80814178  dk = 3.36e-05  src_err = 1.57e-04
+  outer   11  k = 0.80814690  dk = 5.12e-06  src_err = 2.93e-05
+  outer   12  k = 0.80816598  dk = 1.91e-05  src_err = 2.47e-05
+  outer   13  k = 0.80816862  dk = 2.64e-06  src_err = 6.38e-06
+  outer   14  k = 0.80816938  dk = 7.57e-07  src_err = 4.74e-06
+  outer   15  k = 0.80816840  dk = 9.80e-07  src_err = 2.63e-06
+  outer   16  k = 0.80816814  dk = 2.58e-07  src_err = 5.38e-07
+  outer   17  k = 0.80816830  dk = 1.62e-07  src_err = 1.96e-07
+  outer   18  k = 0.80816830  dk = 6.80e-09  src_err = 7.24e-08
+  outer   19  k = 0.80816830  dk = 3.53e-09  src_err = 4.65e-08
+  outer   20  k = 0.80816830  dk = 2.10e-09  src_err = 2.24e-08
+  outer   21  k = 0.80816830  dk = 2.43e-10  src_err = 1.13e-08
+  outer   22  k = 0.80816830  dk = 1.54e-10  src_err = 5.54e-09
+  outer   23  k = 0.80816830  dk = 6.53e-10  src_err = 1.00e-09
+  outer   24  k = 0.80816830  dk = 9.17e-10  src_err = 4.65e-10
+  outer   25  k = 0.80816830  dk = 8.78e-11  src_err = 2.59e-10
+RESULT bl SDP3      robin     mesh   40  k=0.808168304  dk=  +280.8 pcm  conv=True  outers=  25  inners=    717  t=    0.39s

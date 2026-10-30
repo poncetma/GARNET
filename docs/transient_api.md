@@ -133,7 +133,7 @@ The raw full/fine difference has no Richardson divisor. The width controller
 defaults to `max_factor=1.2` and `rejection_strategy="error"`; other width
 controls match `adaptive_bdf`, excluding automatic order selection.
 `min_dt` and `max_dt` bound macro widths; internal half widths are half that.
-Existing adaptive BDF retains its original error norm and defaults.
+Adaptive BDF applies the same per-field principle to its predictor defect (`error_norm="blockwise"`, the default since 2026-10-29); `error_norm="concatenated"` keeps the original joined-state Eq. (44).
 
 `local_error_blocks` and `rejected_error_blocks` list flux-group errors then
 precursor-family errors. `ftm_trial_diagnostics` and
@@ -335,8 +335,9 @@ until the end power changes by at most `iqs_iteration_tol` (default `1e-4`).
 It is rejected and retried with half the width after `iqs_max_iterations`
 replays (default 4). It is also rejected when the corrector's own end power
 differs from the accepted power by more than `iqs_predictor_tol`. Before
-29 October 2026 that tolerance only shortened the *next* interval, so guard
-settings calibrated earlier need re-checking. `result.counters` reports
+29 October 2026 that tolerance only shortened the *next* interval. The HP-MR
+guard profile was re-checked under the new behaviour and kept
+([record](../benchmark-results/hpmr-iqs-gh200/README.md)). `result.counters` reports
 `iqs_corrector_iterations` (replays), `iqs_max_iteration_change_ppm`,
 `iqs_interval_rejections`, split into `iqs_predictor_interval_reductions` and
 `iqs_unconverged_rejections`, and `iqs_predictor_interval_recoveries`. It also

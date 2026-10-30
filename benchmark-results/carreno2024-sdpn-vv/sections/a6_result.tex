@@ -1,0 +1,13 @@
+On Brantley--Larsen (Table~\ref{tab:bl-a6}) the FEMFFUSION tables give a
+mesh limit 0.2~pcm from the paper's 0.80402, the re-derived tables
+$-9.9$~pcm and the printed tables $+23.6$~pcm. The paper's SDP3 results were
+therefore computed with the FEMFFUSION tables, and with them \garnet{}
+reproduces Table~6 for all seven methods. On C5G7 at $s = 4$ the FEMFFUSION
+tables raise SDP3 by 14.3~pcm and the printed ones by 15.2~pcm.
+
+Which tables are right is a question of derivation, which this benchmark
+cannot settle. The re-derived rows are the only ones of the three that follow
+from the closure the paper states, and
+\path{tests/verification/test_sdpn_derivation.py} keeps them in place. The
+choice moves $k$ by 10--15~pcm on these problems, small against SDP3's
+angular error ($-144$~pcm against OpenMOC on Brantley--Larsen).

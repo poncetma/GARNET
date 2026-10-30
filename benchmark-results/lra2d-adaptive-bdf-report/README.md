@@ -1,5 +1,12 @@
 # Adaptive BDF on LRA-2D: rendered benchmark report
 
+> **Caveat (2026-10-29).** Every adaptive run in this report used the joined
+> ("concatenated") predictor error norm. Adaptive BDF now defaults to a
+> blockwise norm (audit item O11), which changes step selection; see
+> [adaptive-bdf-error-norm](../adaptive-bdf-error-norm/). The stored histories
+> and figures are unchanged records of the old norm and reproduce with
+> `adaptive_bdf={..., "error_norm": "concatenated"}`.
+
 The primary artifact is
 [adaptive-bdf-lra-benchmark.pdf](adaptive-bdf-lra-benchmark.pdf). It evaluates
 accuracy against the original ANL-7416/2 reference data, uses FEMCORE as a

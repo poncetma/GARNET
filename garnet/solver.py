@@ -45,7 +45,8 @@ from .linalg import (bicgstab, get_linear_solver, neumann_preconditioner, pcg,
 from .materials import Material
 from .sp3 import SP3GroupOperator
 from .spn import (CongruentSDPNOperator, SDPNGroupOperator, _SDPN_C, _SDPN_G,
-                  _SPN_C, _SPN_G, _congruence_available, _diag_similarity)
+                  _SPN_C, _SPN_G, _congruence_available, _diag_similarity,
+                  _marshak_applies)
 from .stencil import BC_VACUUM, BC_ZERO_FLUX, GroupOperator
 
 
@@ -787,6 +788,12 @@ class SDP1EigenSolver(SP3EigenSolver):
     (double-PN) angular expansion, it resolves discontinuous angular flux more
     faithfully than SP3, giving more accurate results across strongly
     heterogeneous media at equal cost.
+
+    Vacuum faces always take the per-moment Robin (alpha = 1/2) term here: the
+    coupled Marshak matrix is not symmetric in this two-moment basis, so it
+    would cost the CG path this solver exists for. On a leaky core that is
+    73 pcm low on Brantley-Larsen. ``SDPNEigenSolver`` of order 1 is the same
+    SDP1 with the Marshak boundary by default (GMRES, about 5x the cost there).
     """
 
     _sp_variant = "sdp1"
@@ -826,12 +833,22 @@ class SDPNEigenSolver(_PowerIterationSolver):
     _g_coeffs = _SDPN_G            # Marshak boundary matrices for this family
 
     def __init__(self, *args, linear_solver: str | None = None,
-                 marshak_vacuum: bool = False, symmetrize: bool | None = None,
+                 marshak_vacuum: bool | None = None, symmetrize: bool | None = None,
                  spn_precondition: int | bool = 0, **kwargs):
-        # marshak_vacuum: apply the exact moment-coupled Marshak vacuum boundary
-        # (-n.D grad U = (g (x) I) U) on vacuum faces instead of the default
-        # per-moment Robin (alpha=1/2) approximation -- matches the SPN/SDPN
-        # boundary treatment of Carreno et al. (2024).
+        # marshak_vacuum: vacuum-face treatment. None (default) applies the
+        # exact moment-coupled Marshak condition -n.D grad U = (g (x) I) U, the
+        # boundary of Carreno et al. (2024), wherever it is available and has a
+        # vacuum face to act on (spn._marshak_applies: Cartesian GroupOperator
+        # grids without a hybrid mask), and the per-moment Robin (alpha = 1/2)
+        # term elsewhere, or when symmetrize=True is requested (the coupled
+        # term breaks the symmetrizing transforms). False selects per-moment
+        # Robin everywhere, the default before 2026-10-30, kept for comparison:
+        # it is 52-73 pcm low on the leaky Brantley-Larsen core and depends on
+        # the moment variables it is applied to
+        # (benchmark-results/carreno2024-sdpn-vv). True requires Marshak.
+        # Marshak makes every SDPN block non-symmetric (GMRES), which costs
+        # SDP2 its CG path (about 6x slower on Brantley-Larsen); the SPN
+        # family's Marshak g is symmetric and keeps CG.
         #
         # symmetrize (default auto): put the block in a symmetric basis so
         # the within-group solve runs on CG. Auto turns on the *diagonal
@@ -872,6 +889,11 @@ class SDPNEigenSolver(_PowerIterationSolver):
         # (cf. the same trade-off for precond_degree / Neumann-PCG).
         # Meaningless on a path that already runs symmetric/CG (the companion
         # lives in the untransformed basis), so that combination raises.
+        hybrid = kwargs.get("hybrid_mask") is not None
+        grid, bc, active, mask_bc = _peek_base_args(args, kwargs)
+        if marshak_vacuum is None:
+            marshak_vacuum = symmetrize is not True and _marshak_applies(
+                grid, bc, active, mask_bc, self._moment_op_cls, hybrid)
         self.marshak_vacuum = bool(marshak_vacuum)
         coeffs = self._coeffs if self._coeffs is not None else _SDPN_C
         r = _diag_similarity(coeffs[self._order])
@@ -880,14 +902,12 @@ class SDPNEigenSolver(_PowerIterationSolver):
         # whole domain, so it cannot carry a per-moment hybrid mask; the plain
         # non-symmetric block can. Diagonal-similarity symmetrization (SDP1/SDP2)
         # keeps the moments separable and stays compatible.
-        hybrid = kwargs.get("hybrid_mask") is not None
         if symmetrize is None:
             if r is not None:
                 symmetrize = not identity and not self.marshak_vacuum
             elif hybrid:
                 symmetrize = False
             else:
-                grid, bc, active, mask_bc = _peek_base_args(args, kwargs)
                 symmetrize = (not self.marshak_vacuum and
                               _congruence_available(self._order, grid, bc,
                                                     active, mask_bc,

@@ -48,13 +48,15 @@ def _insertion(angle_from=90.0, angle_to=94.0):
     return p0, p1, rho
 
 
-def test_unperturbed_transient_is_exactly_stationary():
+def test_unperturbed_transient_stays_stationary():
     """The sharpest invariant available: an unperturbed core started from its
-    own steady state must remain stationary to backend round-off."""
+    own steady state must remain stationary. It held to round-off only while
+    the steps went unsolved (audit O12); solved steps carry the steady state's
+    residual, 1.9e-7 from the default tolerance, 8.5e-10 from this one."""
     p = _problem(90.0)
-    r = p.transient(t_end=2.0, dt=0.05, device="cpu")
-    atol = 5 * np.finfo(r.power.dtype).eps
-    np.testing.assert_allclose(r.power, np.ones_like(r.power), rtol=0, atol=atol)
+    r = p.transient(t_end=2.0, dt=0.05, device="cpu", tol_step=1e-10,
+                    steady_kwargs=dict(tol_k=1e-12, tol_source=1e-11))
+    np.testing.assert_allclose(r.power, np.ones_like(r.power), rtol=0, atol=1e-8)
 
 
 def test_prompt_jump_matches_theory():

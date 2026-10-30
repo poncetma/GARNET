@@ -1,0 +1,19 @@
+  outer    1  k = 0.74375619  dk = 2.56e-01  src_err = 1.65e-01
+  outer    2  k = 0.76463545  dk = 2.09e-02  src_err = 9.55e-02
+  outer    3  k = 0.77576524  dk = 1.11e-02  src_err = 6.53e-02
+  outer    4  k = 0.79406528  dk = 1.83e-02  src_err = 2.08e-02
+  outer    5  k = 0.79694015  dk = 2.87e-03  src_err = 6.60e-03
+  outer    6  k = 0.79906930  dk = 2.13e-03  src_err = 2.02e-03
+  outer    7  k = 0.79822902  dk = 8.40e-04  src_err = 9.28e-04
+  outer    8  k = 0.79869415  dk = 4.65e-04  src_err = 5.38e-04
+  outer    9  k = 0.79836806  dk = 3.26e-04  src_err = 4.50e-04
+  outer   10  k = 0.79852797  dk = 1.60e-04  src_err = 3.55e-05
+  outer   11  k = 0.79850771  dk = 2.03e-05  src_err = 3.55e-05
+  outer   12  k = 0.79851935  dk = 1.16e-05  src_err = 1.20e-06
+  outer   13  k = 0.79851937  dk = 2.11e-08  src_err = 4.86e-07
+  outer   14  k = 0.79851937  dk = 5.35e-09  src_err = 1.25e-07
+  outer   15  k = 0.79851937  dk = 3.03e-10  src_err = 2.55e-08
+  outer   16  k = 0.79851937  dk = 4.57e-10  src_err = 5.48e-09
+  outer   17  k = 0.79851937  dk = 5.14e-12  src_err = 1.64e-09
+  outer   18  k = 0.79851937  dk = 2.64e-11  src_err = 2.88e-10
+RESULT bl SP3-SPN   robin     mesh  640  k=0.798519367  dk=  -684.1 pcm  conv=True  outers=  18  inners=  14207  t=  649.08s

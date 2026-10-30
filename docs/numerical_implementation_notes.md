@@ -189,6 +189,19 @@ SDP1, triangular, cylindrical and hybrid blocks fall back to the per-moment
 `α = 1/2` term. The change moved Brantley–Larsen SP3 by +53 pcm (audit item
 O8 tracks the remaining gap to the paper) and BIBLIS SP3 by +0.3 pcm.
 
+The general SPN/SDPN block applies the same coupled condition through
+`SDPNGroupOperator(boundary_g=...)`. Since 30 October 2026 it is the default
+of every SPN/SDPN eigen, transient and noise solver wherever
+`spn._marshak_applies` holds: a Cartesian, non-cylindrical `GroupOperator`
+grid with a vacuum face (or a vacuum active-mask boundary) and no hybrid mask.
+`marshak_vacuum=False` selects the per-moment Robin term, which is 52–73 pcm
+low on the leaky Brantley–Larsen core and depends on the moment variables it
+is applied to. The coupled term makes every SDPN block non-symmetric, so SDP2
+loses its diagonal-similarity CG path on such problems; the SPN family's `g`
+is symmetric and keeps CG. The dedicated SDP1 block has no coupled term and
+keeps Robin. The transient solver passes its choice to its steady-state
+solve, so an unperturbed core starts in equilibrium.
+
 ### Adjoint transposes
 
 The adjoint power iteration now uses the algebraic transpose wherever the
@@ -247,3 +260,21 @@ sector in closed form. A convex wedge is clipped by two half-planes, a reflex
 wedge is the disk minus the opposite wedge, and each piece is intersected
 with the outer and inner circles. The former barycentric sampling was biased
 by −17% to +4% per cell. HP-MR drum worths moved by +6 to +7 pcm.
+
+### Exact pin-resolved assembly fractions
+
+`benchmarks.hpmr_assembly.build_hpmr_assembly2d` gives every triangle within
+reach of a pin image its covered area per pin layer through the same
+closed-form intersection (`pin_layer_fractions`, full circles; annuli are
+differences of nested disks). Pins never overlap, so the graphite monolith is
+the remainder, and the per-cell fractions (`AssemblyProblem.cell_fractions`)
+sum to the analytic pin areas on any mesh. The former barycentric sampler used
+only the upright sub-triangle centroids: at refine 4 it gave mod_shell 0.0183
+and hp_shell 0.0278 against 0.0227 and 0.0383. The solver still sees each cell
+as its two dominant constituents (`material_map` plus one mix partner), so a
+cell holding core, shell and graphite loses its smallest part to the base
+material. That truncation is the remaining error in `volume_fractions`: at
+most 0.0074 at refine 4, 0.0030 at refine 8 and 5e-5 at refine 16. A cell
+belongs to the pin that covers most of it, which is the limit of the former
+sample vote. The periodic S_N k∞ moved from 1.24523 to 1.20632 at refine 4
+and from 1.18232 to 1.18414 at refine 8.

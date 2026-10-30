@@ -7,14 +7,13 @@ both land near K_REFERENCE; the bulk transient exercises the tri operator
 inside TransientSolver.
 """
 
-import os
-
 import numpy as np
 import pytest
 
 from garnet.benchmarks import build_vver440
 from garnet.benchmarks.vver440 import K_REFERENCE
 from garnet.tri import TriDiffusionEigenSolver
+from tests._femffusion import femffusion_path, requires_femffusion
 
 
 def test_vver440_triangular_geometry_and_k():
@@ -68,11 +67,11 @@ def test_vver440_bulk_transient():
     assert 1.08 < P[-1] < 1.20                        # ~0.1$ delayed-supercritical rise
 
 
-_MSH = os.path.expanduser(
-    "~/claude-tests/FEMFFUSION/examples/2D_VVER440/VVER440.msh")
+_MSH_REL = "examples/2D_VVER440/VVER440.msh"
+_MSH = femffusion_path(_MSH_REL)
 
 
-@pytest.mark.skipif(not os.path.exists(_MSH), reason="FEMFFUSION VVER440.msh not present")
+@requires_femffusion(_MSH_REL)
 def test_vver440_msh_matches_femffusion():
     from garnet.benchmarks.vver440 import build_vver440_msh
     from garnet.mesh import UnstructuredDiffusionSolver
@@ -82,7 +81,7 @@ def test_vver440_msh_matches_femffusion():
     assert res.k_eff == pytest.approx(K_REFERENCE, abs=1e-3)   # FEMFFUSION FE3 diffusion
 
 
-@pytest.mark.skipif(not os.path.exists(_MSH), reason="FEMFFUSION VVER440.msh not present")
+@requires_femffusion(_MSH_REL)
 def test_vver440_msh_converges_on_keff_with_loose_source_tolerance():
     # Regression for the adaptive inner-CG tolerance: converging on k_eff alone
     # (a loose source-shape tolerance) must still tighten the inner solve with the

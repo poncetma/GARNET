@@ -1,0 +1,20 @@
+For the six methods whose tables the paper and \garnet{} share (SP1--SP7,
+SDP1, SDP2), \garnet's estimate is 11--22~pcm below Table~7, and the offset
+grows with the number of moments: 11~pcm for diffusion, 15--20~pcm for
+SP3--SP7, 18--22~pcm for SDP1--SDP2. For SDP3 it is 42~pcm. The FEMFFUSION
+tables raise C5G7 SDP3 by 14~pcm at $s = 4$ (Section~\ref{sec:a6}), so with
+them the offset would be about 27~pcm, in line with the other methods.
+
+Unlike Brantley--Larsen, the two C5G7 models are not the same discrete
+problem. The paper meshes each pin with second-degree finite elements
+(its Fig.~5) and states neither how the circular pin boundary is represented
+nor a mesh study; \garnet{} blends the cells the circle cuts, with exact
+areas. The source of the 11--22~pcm offset is not identified. It is 3--5\% of
+the 320--460~pcm angular error and changes none of the orderings below.
+
+Against MCNP both codes give the same picture. Diffusion is closest
+($-330$~pcm here, $-319$~pcm in the paper), and every SP$_N$ and SDP$_N$
+order is further away ($-399$ to $-458$~pcm here, $-369$ to $-436$~pcm in the
+paper). This is the stagnation the paper reports for C5G7: on this
+lightly heterogeneous lattice, the eigenvalue is not a measure of angular
+accuracy. The pin powers are.

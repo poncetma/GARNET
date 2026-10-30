@@ -1,0 +1,207 @@
+FAIL c5g7-pin-SP1-marshak-s16 (exit 143, see logs/c5g7-pin-SP1-marshak-s16.log)
+FAIL c5g7-pin-SP3-marshak-s16 (exit 143, see logs/c5g7-pin-SP3-marshak-s16.log)
+FAIL c5g7-pin-SP1-sampled-s16 (exit 143, see logs/c5g7-pin-SP1-sampled-s16.log)
+FAIL c5g7-pin-SP3-robin-s16 (exit 143, see logs/c5g7-pin-SP3-robin-s16.log)
+FAIL c5g7-pin-SDP1-robin-s16 (exit 143, see logs/c5g7-pin-SDP1-robin-s16.log)
+FAIL c5g7-pin-SP5-marshak-s16 (exit 143, see logs/c5g7-pin-SP5-marshak-s16.log)
+FAIL c5g7-pin-SDP2-robin-s16 (exit 143, see logs/c5g7-pin-SDP2-robin-s16.log)
+FAIL c5g7-pin-SDP2-marshak-s16 (exit 143, see logs/c5g7-pin-SDP2-marshak-s16.log)
+FAIL c5g7-pin-SP5-robin-s16 (exit 143, see logs/c5g7-pin-SP5-robin-s16.log)
+FAIL c5g7-pin-SDP1-marshak-s16 (exit 143, see logs/c5g7-pin-SDP1-marshak-s16.log)
+FAIL c5g7-pin-SP7-marshak-s16 (exit 143, see logs/c5g7-pin-SP7-marshak-s16.log)
+FAIL c5g7-pin-SDP3-robin-s16 (exit 143, see logs/c5g7-pin-SDP3-robin-s16.log)
+FAIL c5g7-pin-SP7-robin-s16 (exit 143, see logs/c5g7-pin-SP7-robin-s16.log)
+FAIL c5g7-pin-SDP3-marshak-s16 (exit 143, see logs/c5g7-pin-SDP3-marshak-s16.log)
+DONE c5g7-pin-SP3-zeroflux-s8 RESULT c5g7 SP3       zero-flux mesh    8  k=1.182545852  dk=  -400.4 pcm  conv=True  outers=  67  inners=  43127  t=  722.92s
+DONE c5g7-pin-SP3-marshak-s8 RESULT c5g7 SP3       marshak   mesh    8  k=1.182559116  dk=  -399.1 pcm  conv=True  outers=  64  inners=  42789  t=  727.89s
+DONE c5g7-pin-SP3-robin-s8 RESULT c5g7 SP3       robin     mesh    8  k=1.182557160  dk=  -399.3 pcm  conv=True  outers=  66  inners=  43969  t=  784.21s
+DONE c5g7-pin-SP1-marshak-s12 RESULT c5g7 SP1       marshak   mesh   12  k=1.183218095  dk=  -333.2 pcm  conv=True  outers=  62  inners=  60387  t=  825.90s
+DONE c5g7-pin-SP1-zeroflux-s8 RESULT c5g7 SP1       zero-flux mesh    8  k=1.183289740  dk=  -326.0 pcm  conv=True  outers=  64  inners=  39112  t=  140.03s
+DONE c5g7-pin-SP1-sampled-s8 RESULT c5g7 SP1       marshak   mesh    8  k=1.183069997  dk=  -348.0 pcm  conv=True  outers=  63  inners=  39894  t=  150.92s
+DONE c5g7-pin-SP1-marshak-s8 RESULT c5g7 SP1       marshak   mesh    8  k=1.183292065  dk=  -325.8 pcm  conv=True  outers=  61  inners=  36964  t=  157.13s
+DONE c5g7-pin-SP5-robin-s8 RESULT c5g7 SP5       robin     mesh    8  k=1.182043398  dk=  -450.7 pcm  conv=True  outers=  60  inners=  40334  t= 1131.87s
+DONE c5g7-pin-SP5-marshak-s8 RESULT c5g7 SP5       marshak   mesh    8  k=1.182046216  dk=  -450.4 pcm  conv=True  outers=  63  inners=  42964  t= 1228.38s
+DONE c5g7-pin-SP5-zeroflux-s8 RESULT c5g7 SP5       zero-flux mesh    8  k=1.182032727  dk=  -451.7 pcm  conv=True  outers=  63  inners=  42333  t= 1227.90s
+DONE c5g7-pin-SP7-robin-s8 RESULT c5g7 SP7       robin     mesh    8  k=1.182149966  dk=  -440.0 pcm  conv=True  outers=  54  inners=  34980  t= 1377.20s
+DONE c5g7-pin-SP7-zeroflux-s8 RESULT c5g7 SP7       zero-flux mesh    8  k=1.182139217  dk=  -441.1 pcm  conv=True  outers=  59  inners=  38479  t= 1417.12s
+DONE c5g7-pin-SP7-marshak-s8 RESULT c5g7 SP7       marshak   mesh    8  k=1.182152818  dk=  -439.7 pcm  conv=True  outers=  57  inners=  37160  t= 1562.72s
+DONE c5g7-pin-SDP2-zeroflux-s8 RESULT c5g7 SDP2      zero-flux mesh    8  k=1.182032131  dk=  -451.8 pcm  conv=True  outers=  57  inners=  35857  t=  796.32s
+DONE c5g7-pin-SDP1-zeroflux-s8 RESULT c5g7 SDP1      zero-flux mesh    8  k=1.182241240  dk=  -430.9 pcm  conv=True  outers=  64  inners=  40472  t=  546.78s
+DONE c5g7-pin-SDP1-robin-s8 RESULT c5g7 SDP1      robin     mesh    8  k=1.182251975  dk=  -429.8 pcm  conv=True  outers=  55  inners=  35136  t=  464.34s
+DONE c5g7-pin-SDP2-robin-s8 RESULT c5g7 SDP2      robin     mesh    8  k=1.182042874  dk=  -450.7 pcm  conv=True  outers=  59  inners=  36889  t=  824.72s
+DONE c5g7-pin-SP3-marshak-s12 RESULT c5g7 SP3       marshak   mesh   12  k=1.182442163  dk=  -410.8 pcm  conv=True  outers=  63  inners=  65402  t= 2317.20s
+DONE c5g7-hom-SP3-zeroflux-s8 RESULT c5g7 SP3       zero-flux mesh    8  k=1.188458945  dk=  +190.9 pcm  conv=True  outers=  63  inners=  42720  t=  517.50s
+DONE c5g7-pin-SDP3-zeroflux-s8 RESULT c5g7 SDP3      zero-flux mesh    8  k=1.182554570  dk=  -399.5 pcm  conv=True  outers=  61  inners=  38870  t= 1769.32s
+DONE c5g7-hom-SP5-zeroflux-s8 RESULT c5g7 SP5       zero-flux mesh    8  k=1.188575953  dk=  +202.6 pcm  conv=True  outers=  60  inners=  40528  t=  796.44s
+DONE c5g7-hom-SP1-zeroflux-s8 RESULT c5g7 SP1       zero-flux mesh    8  k=1.187078099  dk=   +52.8 pcm  conv=True  outers=  63  inners=  38833  t=  139.47s
+DONE c5g7-hom-SP1-marshak-s8 RESULT c5g7 SP1       marshak   mesh    8  k=1.187080373  dk=   +53.0 pcm  conv=True  outers=  60  inners=  36586  t=  131.55s
+DONE c5g7-hom-SP5-marshak-s8 RESULT c5g7 SP5       marshak   mesh    8  k=1.188588986  dk=  +203.9 pcm  conv=True  outers=  65  inners=  43962  t=  914.80s
+DONE c5g7-hom-SP3-marshak-s8 RESULT c5g7 SP3       marshak   mesh    8  k=1.188471835  dk=  +192.2 pcm  conv=True  outers=  59  inners=  39043  t=  509.19s
+DONE c5g7-hom-SP7-zeroflux-s8 RESULT c5g7 SP7       zero-flux mesh    8  k=1.188655792  dk=  +210.6 pcm  conv=True  outers=  63  inners=  40757  t= 1311.80s
+DONE c5g7-hom-SP7-marshak-s8 RESULT c5g7 SP7       marshak   mesh    8  k=1.188668867  dk=  +211.9 pcm  conv=True  outers=  66  inners=  43161  t= 1537.36s
+DONE c5g7-hom-SDP1-zeroflux-s8 RESULT c5g7 SDP1      zero-flux mesh    8  k=1.188499388  dk=  +194.9 pcm  conv=True  outers=  60  inners=  38144  t=  485.19s
+DONE c5g7-hom-SDP2-zeroflux-s8 RESULT c5g7 SDP2      zero-flux mesh    8  k=1.188647175  dk=  +209.7 pcm  conv=True  outers=  62  inners=  39660  t=  854.72s
+DONE c5g7-pin-SP5-marshak-s6 RESULT c5g7 SP5       marshak   mesh    6  k=1.182439422  dk=  -411.1 pcm  conv=True  outers=  67  inners=  32204  t=  364.20s
+DONE c5g7-pin-SP1-marshak-s6 RESULT c5g7 SP1       marshak   mesh    6  k=1.183436319  dk=  -311.4 pcm  conv=True  outers=  64  inners=  28702  t=   67.29s
+DONE c5g7-pin-SP7-marshak-s6 RESULT c5g7 SP7       marshak   mesh    6  k=1.182628448  dk=  -392.2 pcm  conv=True  outers=  55  inners=  25337  t=  470.40s
+DONE c5g7-pin-SP3-marshak-s6 RESULT c5g7 SP3       marshak   mesh    6  k=1.182825431  dk=  -372.5 pcm  conv=True  outers=  71  inners=  33593  t=  195.81s
+FAIL c5g7-hom-SDP1-marshak-s8 (exit 143, see logs/c5g7-hom-SDP1-marshak-s8.log)
+FAIL c5g7-pin-SDP1-marshak-s8 (exit 143, see logs/c5g7-pin-SDP1-marshak-s8.log)
+FAIL c5g7-pin-SDP2-marshak-s8 (exit 143, see logs/c5g7-pin-SDP2-marshak-s8.log)
+FAIL c5g7-hom-SDP2-marshak-s8 (exit 143, see logs/c5g7-hom-SDP2-marshak-s8.log)
+FAIL c5g7-pin-SDP1-marshak-s12 (exit 143, see logs/c5g7-pin-SDP1-marshak-s12.log)
+FAIL c5g7-pin-SDP3-marshak-s8 (exit 143, see logs/c5g7-pin-SDP3-marshak-s8.log)
+FAIL c5g7-hom-SDP3-marshak-s8 (exit 143, see logs/c5g7-hom-SDP3-marshak-s8.log)
+FAIL c5g7-pin-SDP2-marshak-s12 (exit 143, see logs/c5g7-pin-SDP2-marshak-s12.log)
+FAIL c5g7-pin-SDP3-marshak-s12 (exit 143, see logs/c5g7-pin-SDP3-marshak-s12.log)
+DONE c5g7-pin-SP1-marshak-s4 RESULT c5g7 SP1       marshak   mesh    4  k=1.183932330  dk=  -261.8 pcm  conv=True  outers=  61  inners=  17347  t=   12.87s
+DONE c5g7-pin-SP1-sampled-s4 RESULT c5g7 SP1       marshak   mesh    4  k=1.186193331  dk=   -35.7 pcm  conv=True  outers=  61  inners=  17061  t=   14.50s
+DONE c5g7-pin-SP3-robin-s4 RESULT c5g7 SP3       robin     mesh    4  k=1.183753382  dk=  -279.7 pcm  conv=True  outers=  65  inners=  19491  t=   31.52s
+DONE c5g7-pin-SP5-marshak-s12 RESULT c5g7 SP5       marshak   mesh   12  k=1.181865393  dk=  -468.5 pcm  conv=True  outers=  66  inners=  68250  t= 4634.03s
+DONE c5g7-pin-SP3-marshak-s4 RESULT c5g7 SP3       marshak   mesh    4  k=1.183755325  dk=  -279.5 pcm  conv=True  outers=  62  inners=  18641  t=   45.02s
+DONE c5g7-pin-SP3-SPN-marshak-s4 RESULT c5g7 SP3-SPN   marshak   mesh    4  k=1.183755318  dk=  -279.5 pcm  conv=True  outers=  67  inners=  20430  t=   46.09s
+DONE c5g7-pin-SP5-robin-s4 RESULT c5g7 SP5       robin     mesh    4  k=1.183714383  dk=  -283.6 pcm  conv=True  outers=  66  inners=  20431  t=   55.81s
+DONE c5g7-pin-SP5-marshak-s4 RESULT c5g7 SP5       marshak   mesh    4  k=1.183717177  dk=  -283.3 pcm  conv=True  outers=  68  inners=  20778  t=   79.40s
+DONE c5g7-pin-SDP1-robin-s4 RESULT c5g7 SDP1      robin     mesh    4  k=1.183605614  dk=  -294.4 pcm  conv=True  outers=  63  inners=  17995  t=   31.81s
+FAIL c5g7-pin-SDP2-marshak-s6 (exit 143, see logs/c5g7-pin-SDP2-marshak-s6.log)
+FAIL c5g7-pin-SDP1-marshak-s6 (exit 143, see logs/c5g7-pin-SDP1-marshak-s6.log)
+FAIL c5g7-pin-SDP3-marshak-s6 (exit 143, see logs/c5g7-pin-SDP3-marshak-s6.log)
+FAIL c5g7-pin-SP7-marshak-s12 (exit 143, see logs/c5g7-pin-SP7-marshak-s12.log)
+DONE c5g7-pin-SP7-robin-s4 RESULT c5g7 SP7       robin     mesh    4  k=1.184073174  dk=  -247.7 pcm  conv=True  outers=  64  inners=  18676  t=   93.72s
+DONE c5g7-pin-SDP2-robin-s4 RESULT c5g7 SDP2      robin     mesh    4  k=1.183963727  dk=  -258.6 pcm  conv=True  outers=  61  inners=  18449  t=   51.99s
+DONE c5g7-pin-SP7-marshak-s4 RESULT c5g7 SP7       marshak   mesh    4  k=1.184075988  dk=  -247.4 pcm  conv=True  outers=  59  inners=  17579  t=   94.93s
+DONE c5g7-hom-SDP3-zeroflux-s8 RESULT c5g7 SDP3      zero-flux mesh    8  k=1.188733436  dk=  +218.3 pcm  conv=True  outers=  59  inners=  37600  t= 1631.12s
+DONE c5g7-pin-SDP1-SDPN-marshak-s4 RESULT c5g7 SDP1-SDPN marshak   mesh    4  k=1.183607373  dk=  -294.3 pcm  conv=True  outers=  64  inners=  17242  t=   89.41s
+DONE c5g7-pin-SDP1-marshak-s4 RESULT c5g7 SDP1      marshak   mesh    4  k=1.183607373  dk=  -294.3 pcm  conv=True  outers=  64  inners=  17242  t=  103.83s
+DONE c5g7-pin-SDP2-marshak-s4 RESULT c5g7 SDP2      marshak   mesh    4  k=1.183966544  dk=  -258.3 pcm  conv=True  outers=  90  inners=  20432  t=  254.50s
+DONE bl-SP1-marshak-n640 RESULT bl SP1       marshak   mesh  640  k=0.776814304  dk= -2854.6 pcm  conv=True  outers=  17  inners=  13401  t=  203.19s
+DONE c5g7-pin-SDP3-robin-s4 RESULT c5g7 SDP3      robin     mesh    4  k=1.184602494  dk=  -194.8 pcm  conv=True  outers= 106  inners=  22399  t=  346.17s
+DONE c5g7-pin-SDP3-marshak-s4 RESULT c5g7 SDP3      marshak   mesh    4  k=1.184605321  dk=  -194.5 pcm  conv=True  outers= 106  inners=  22254  t=  414.09s
+DONE bl-SP3-SPN-marshak-n640 RESULT bl SP3-SPN   marshak   mesh  640  k=0.799054771  dk=  -630.5 pcm  conv=True  outers=  18  inners=  14279  t=  517.98s
+DONE bl-SP3-SPN-robin-n640 RESULT bl SP3-SPN   robin     mesh  640  k=0.798519367  dk=  -684.1 pcm  conv=True  outers=  18  inners=  14207  t=  649.08s
+DONE bl-SP3-marshak-n640 RESULT bl SP3       marshak   mesh  640  k=0.799054771  dk=  -630.5 pcm  conv=True  outers=  18  inners=  14140  t=  652.02s
+DONE bl-SP3-robin-n640 RESULT bl SP3       robin     mesh  640  k=0.798526206  dk=  -683.4 pcm  conv=True  outers=  22  inners=  16929  t=  714.93s
+DONE c5g7-hom-SP7-zeroflux-s4 RESULT c5g7 SP7       zero-flux mesh    4  k=1.188517640  dk=  +196.8 pcm  conv=True  outers=  65  inners=  19773  t=  115.51s
+DONE c5g7-hom-SP7-marshak-s4 RESULT c5g7 SP7       marshak   mesh    4  k=1.188530693  dk=  +198.1 pcm  conv=True  outers=  63  inners=  19473  t=  126.87s
+DONE c5g7-hom-SP5-zeroflux-s4 RESULT c5g7 SP5       zero-flux mesh    4  k=1.188427331  dk=  +187.7 pcm  conv=True  outers=  60  inners=  18959  t=   63.69s
+DONE bl-SP5-marshak-n640 RESULT bl SP5       marshak   mesh  640  k=0.802822815  dk=  -253.7 pcm  conv=True  outers=  18  inners=  14149  t=  827.28s
+DONE c5g7-hom-SP3-zeroflux-s4 RESULT c5g7 SP3       zero-flux mesh    4  k=1.188303895  dk=  +175.4 pcm  conv=True  outers=  63  inners=  19095  t=   32.18s
+DONE c5g7-hom-SP3-marshak-s4 RESULT c5g7 SP3       marshak   mesh    4  k=1.188316765  dk=  +176.7 pcm  conv=True  outers=  59  inners=  17347  t=   31.06s
+DONE c5g7-hom-SP5-marshak-s4 RESULT c5g7 SP5       marshak   mesh    4  k=1.188440348  dk=  +189.0 pcm  conv=True  outers=  55  inners=  16826  t=   50.09s
+DONE c5g7-hom-SP1-zeroflux-s4 RESULT c5g7 SP1       zero-flux mesh    4  k=1.186956586  dk=   +40.7 pcm  conv=True  outers=  60  inners=  17506  t=   11.20s
+DONE c5g7-hom-SP1-marshak-s4 RESULT c5g7 SP1       marshak   mesh    4  k=1.186958857  dk=   +40.9 pcm  conv=True  outers=  60  inners=  17374  t=   11.32s
+DONE bl-SDP1-SDPN-robin-n640 RESULT bl SDP1-SDPN robin     mesh  640  k=0.800897707  dk=  -446.2 pcm  conv=True  outers=  22  inners=  16962  t=  659.99s
+DONE c5g7-hom-SDP2-zeroflux-s4 RESULT c5g7 SDP2      zero-flux mesh    4  k=1.188506856  dk=  +195.7 pcm  conv=True  outers=  60  inners=  17699  t=   59.60s
+DONE c5g7-hom-SDP1-zeroflux-s4 RESULT c5g7 SDP1      zero-flux mesh    4  k=1.188343410  dk=  +179.3 pcm  conv=True  outers=  63  inners=  18929  t=   32.58s
+DONE bl-SDP1-robin-n640 RESULT bl SDP1      robin     mesh  640  k=0.800901215  dk=  -445.9 pcm  conv=True  outers=  21  inners=  16185  t=  596.90s
+DONE bl-SP5-robin-n640 RESULT bl SP5       robin     mesh  640  k=0.802289303  dk=  -307.1 pcm  conv=True  outers=  18  inners=  14172  t=  966.44s
+DONE c5g7-hom-SDP3-zeroflux-s4 RESULT c5g7 SDP3      zero-flux mesh    4  k=1.188607528  dk=  +205.8 pcm  conv=True  outers=  58  inners=  16999  t=  127.12s
+DONE c5g7-hom-SDP1-marshak-s4 RESULT c5g7 SDP1      marshak   mesh    4  k=1.188355533  dk=  +180.6 pcm  conv=True  outers=  71  inners=  17980  t=  101.41s
+DONE bl-SP7-robin-n320 RESULT bl SP7       robin     mesh  320  k=0.803088798  dk=  -227.1 pcm  conv=True  outers=  18  inners=   6528  t=  113.52s
+DONE bl-SP5-robin-n320 RESULT bl SP5       robin     mesh  320  k=0.802347226  dk=  -301.3 pcm  conv=True  outers=  18  inners=   6819  t=   85.81s
+DONE c5g7-hom-SDP2-marshak-s4 RESULT c5g7 SDP2      marshak   mesh    4  k=1.188519905  dk=  +197.0 pcm  conv=True  outers=  74  inners=  19329  t=  196.80s
+DONE bl-SP5-marshak-n320 RESULT bl SP5       marshak   mesh  320  k=0.802880820  dk=  -247.9 pcm  conv=True  outers=  18  inners=   6773  t=   81.31s
+DONE c5g7-hom-SDP3-marshak-s4 RESULT c5g7 SDP3      marshak   mesh    4  k=1.188620599  dk=  +207.1 pcm  conv=True  outers=  67  inners=  16077  t=  209.60s
+DONE bl-SP7-marshak-n320 RESULT bl SP7       marshak   mesh  320  k=0.803627268  dk=  -173.3 pcm  conv=True  outers=  18  inners=   6675  t=  117.69s
+DONE bl-SP1-marshak-n320 RESULT bl SP1       marshak   mesh  320  k=0.776854977  dk= -2850.5 pcm  conv=True  outers=  17  inners=   6469  t=    9.90s
+DONE bl-SP3-SPN-robin-n320 RESULT bl SP3-SPN   robin     mesh  320  k=0.798573150  dk=  -678.7 pcm  conv=True  outers=  22  inners=   8120  t=   39.18s
+DONE bl-SP3-SPN-marshak-n320 RESULT bl SP3-SPN   marshak   mesh  320  k=0.799108585  dk=  -625.1 pcm  conv=True  outers=  21  inners=   7942  t=   36.63s
+DONE bl-SP3-marshak-n320 RESULT bl SP3       marshak   mesh  320  k=0.799108585  dk=  -625.1 pcm  conv=True  outers=  18  inners=   6782  t=   38.50s
+DONE bl-SP3-robin-n320 RESULT bl SP3       robin     mesh  320  k=0.798579987  dk=  -678.0 pcm  conv=True  outers=  21  inners=   7824  t=   46.90s
+DONE bl-SDP1-SDPN-robin-n320 RESULT bl SDP1-SDPN robin     mesh  320  k=0.800953167  dk=  -440.7 pcm  conv=True  outers=  22  inners=   8046  t=   40.60s
+DONE bl-SDP1-robin-n320 RESULT bl SDP1      robin     mesh  320  k=0.800956675  dk=  -440.3 pcm  conv=True  outers=  22  inners=   7947  t=   39.80s
+DONE bl-SDP2-robin-n320 RESULT bl SDP2      robin     mesh  320  k=0.803283532  dk=  -207.6 pcm  conv=True  outers=  18  inners=   6622  t=   71.40s
+DONE bl-SDP2-robin-n640 RESULT bl SDP2      robin     mesh  640  k=0.803223040  dk=  -213.7 pcm  conv=True  outers=  18  inners=  13910  t= 1092.98s
+DONE c5g7-hom-SP7-zeroflux-s2 RESULT c5g7 SP7       zero-flux mesh    2  k=1.188061888  dk=  +151.2 pcm  conv=True  outers=  55  inners=   7960  t=    9.28s
+DONE c5g7-hom-SP5-zeroflux-s2 RESULT c5g7 SP5       zero-flux mesh    2  k=1.187951033  dk=  +140.1 pcm  conv=True  outers=  62  inners=   8775  t=    6.31s
+DONE c5g7-hom-SP7-marshak-s2 RESULT c5g7 SP7       marshak   mesh    2  k=1.188074879  dk=  +152.5 pcm  conv=True  outers=  65  inners=   9467  t=   12.03s
+DONE c5g7-hom-SP5-marshak-s2 RESULT c5g7 SP5       marshak   mesh    2  k=1.187963977  dk=  +141.4 pcm  conv=True  outers=  60  inners=   8640  t=    7.79s
+DONE c5g7-hom-SP3-zeroflux-s2 RESULT c5g7 SP3       zero-flux mesh    2  k=1.187786888  dk=  +123.7 pcm  conv=True  outers=  78  inners=   9453  t=    4.57s
+DONE c5g7-hom-SP3-marshak-s2 RESULT c5g7 SP3       marshak   mesh    2  k=1.187799687  dk=  +125.0 pcm  conv=True  outers=  62  inners=   8597  t=    5.29s
+DONE c5g7-hom-SP1-zeroflux-s2 RESULT c5g7 SP1       zero-flux mesh    2  k=1.186501057  dk=    -4.9 pcm  conv=True  outers=  64  inners=   8626  t=    1.99s
+DONE c5g7-hom-SP1-marshak-s2 RESULT c5g7 SP1       marshak   mesh    2  k=1.186503319  dk=    -4.7 pcm  conv=True  outers=  61  inners=   8189  t=    2.12s
+DONE c5g7-hom-SDP3-zeroflux-s2 RESULT c5g7 SDP3      zero-flux mesh    2  k=1.188160248  dk=  +161.0 pcm  conv=True  outers=  63  inners=   9230  t=   13.49s
+DONE c5g7-hom-SDP2-zeroflux-s2 RESULT c5g7 SDP2      zero-flux mesh    2  k=1.188051154  dk=  +150.1 pcm  conv=True  outers=  62  inners=   8904  t=    7.93s
+DONE c5g7-hom-SDP3-marshak-s2 RESULT c5g7 SDP3      marshak   mesh    2  k=1.188173247  dk=  +162.3 pcm  conv=True  outers=  71  inners=   8031  t=   20.58s
+DONE c5g7-hom-SDP1-zeroflux-s2 RESULT c5g7 SDP1      zero-flux mesh    2  k=1.187835563  dk=  +128.6 pcm  conv=True  outers=  55  inners=   7117  t=    3.79s
+DONE c5g7-hom-SDP2-marshak-s2 RESULT c5g7 SDP2      marshak   mesh    2  k=1.188064134  dk=  +151.4 pcm  conv=True  outers=  72  inners=   8035  t=   16.08s
+DONE c5g7-hom-SDP1-marshak-s2 RESULT c5g7 SDP1      marshak   mesh    2  k=1.187847617  dk=  +129.8 pcm  conv=True  outers=  74  inners=   7632  t=    9.31s
+DONE bl-SP7-robin-n160 RESULT bl SP7       robin     mesh  160  k=0.803330526  dk=  -202.9 pcm  conv=True  outers=  18  inners=   3094  t=    8.29s
+DONE bl-SP7-marshak-n160 RESULT bl SP7       marshak   mesh  160  k=0.803869471  dk=  -149.1 pcm  conv=True  outers=  18  inners=   3088  t=    7.98s
+DONE bl-SP5-robin-n160 RESULT bl SP5       robin     mesh  160  k=0.802577982  dk=  -278.2 pcm  conv=True  outers=  18  inners=   3144  t=    4.87s
+DONE bl-SP5-marshak-n160 RESULT bl SP5       marshak   mesh  160  k=0.803111903  dk=  -224.8 pcm  conv=True  outers=  18  inners=   3139  t=    5.20s
+DONE bl-SP3-SPN-robin-n160 RESULT bl SP3-SPN   robin     mesh  160  k=0.798787882  dk=  -657.2 pcm  conv=True  outers=  19  inners=   3400  t=    2.93s
+DONE bl-SP3-SPN-marshak-n160 RESULT bl SP3-SPN   marshak   mesh  160  k=0.799323447  dk=  -603.7 pcm  conv=True  outers=  18  inners=   3278  t=    3.53s
+DONE bl-SP3-robin-n160 RESULT bl SP3       robin     mesh  160  k=0.798794714  dk=  -656.5 pcm  conv=True  outers=  18  inners=   3224  t=    2.89s
+DONE bl-SDP1-SDPN-marshak-n320 RESULT bl SDP1-SDPN marshak   mesh  320  k=0.801686604  dk=  -367.3 pcm  conv=True  outers=  23  inners=  13064  t=  187.42s
+DONE bl-SP3-marshak-n160 RESULT bl SP3       marshak   mesh  160  k=0.799323447  dk=  -603.7 pcm  conv=True  outers=  17  inners=   3121  t=    3.27s
+DONE bl-SP1-marshak-n160 RESULT bl SP1       marshak   mesh  160  k=0.777017559  dk= -2834.2 pcm  conv=True  outers=  18  inners=   3357  t=    1.41s
+DONE bl-SDP2-robin-n160 RESULT bl SDP2      robin     mesh  160  k=0.803523954  dk=  -183.6 pcm  conv=True  outers=  18  inners=   3081  t=    4.77s
+DONE bl-SDP1-SDPN-robin-n160 RESULT bl SDP1-SDPN robin     mesh  160  k=0.801174494  dk=  -418.6 pcm  conv=True  outers=  18  inners=   3227  t=    3.05s
+DONE bl-SDP2-marshak-n160 RESULT bl SDP2      marshak   mesh  160  k=0.804049644  dk=  -131.0 pcm  conv=True  outers=  26  inners=   4738  t=   26.11s
+DONE bl-SDP3-robin-n160 RESULT bl SDP3      robin     mesh  160  k=0.803727695  dk=  -163.2 pcm  conv=True  outers=  28  inners=   4803  t=   37.00s
+DONE bl-SDP3-marshak-n160 RESULT bl SDP3      marshak   mesh  160  k=0.804265973  dk=  -109.4 pcm  conv=True  outers=  29  inners=   4923  t=   40.76s
+DONE bl-SDP1-robin-n160 RESULT bl SDP1      robin     mesh  160  k=0.801177998  dk=  -418.2 pcm  conv=True  outers=  19  inners=   3313  t=    3.20s
+DONE bl-SDP1-SDPN-marshak-n160 RESULT bl SDP1-SDPN marshak   mesh  160  k=0.801908096  dk=  -345.2 pcm  conv=True  outers=  24  inners=   4877  t=   16.17s
+DONE bl-SDP1-marshak-n320 RESULT bl SDP1      marshak   mesh  320  k=0.801686604  dk=  -367.3 pcm  conv=True  outers=  23  inners=  13064  t=  218.18s
+DONE c5g7-hom-SP7-zeroflux-s1 RESULT c5g7 SP7       zero-flux mesh    1  k=1.186395633  dk=   -15.4 pcm  conv=True  outers=  62  inners=   4505  t=    2.12s
+DONE bl-SDP1-marshak-n160 RESULT bl SDP1      marshak   mesh  160  k=0.801908096  dk=  -345.2 pcm  conv=True  outers=  24  inners=   4877  t=   15.29s
+DONE c5g7-hom-SP7-marshak-s1 RESULT c5g7 SP7       marshak   mesh    1  k=1.186408396  dk=   -14.2 pcm  conv=True  outers=  61  inners=   4460  t=    2.88s
+DONE c5g7-hom-SP5-zeroflux-s1 RESULT c5g7 SP5       zero-flux mesh    1  k=1.186300261  dk=   -25.0 pcm  conv=True  outers=  71  inners=   5105  t=    1.61s
+DONE c5g7-hom-SP5-marshak-s1 RESULT c5g7 SP5       marshak   mesh    1  k=1.186312984  dk=   -23.7 pcm  conv=True  outers=  72  inners=   5102  t=    2.32s
+DONE c5g7-hom-SP3-zeroflux-s1 RESULT c5g7 SP3       zero-flux mesh    1  k=1.186109228  dk=   -44.1 pcm  conv=True  outers=  66  inners=   4496  t=    1.08s
+DONE c5g7-hom-SP1-zeroflux-s1 RESULT c5g7 SP1       zero-flux mesh    1  k=1.184902647  dk=  -164.7 pcm  conv=True  outers=  56  inners=   3594  t=    0.51s
+DONE c5g7-hom-SP3-marshak-s1 RESULT c5g7 SP3       marshak   mesh    1  k=1.186121794  dk=   -42.8 pcm  conv=True  outers=  60  inners=   4168  t=    1.51s
+DONE c5g7-hom-SP1-marshak-s1 RESULT c5g7 SP1       marshak   mesh    1  k=1.184904876  dk=  -164.5 pcm  conv=True  outers=  60  inners=   3841  t=    0.51s
+DONE c5g7-hom-SDP3-zeroflux-s1 RESULT c5g7 SDP3      zero-flux mesh    1  k=1.186469843  dk=    -8.0 pcm  conv=True  outers=  62  inners=   4509  t=    3.17s
+DONE c5g7-hom-SDP2-zeroflux-s1 RESULT c5g7 SDP2      zero-flux mesh    1  k=1.186392054  dk=   -15.8 pcm  conv=True  outers=  65  inners=   4503  t=    1.67s
+DONE c5g7-hom-SDP3-marshak-s1 RESULT c5g7 SDP3      marshak   mesh    1  k=1.186482633  dk=    -6.7 pcm  conv=True  outers=  71  inners=   4239  t=    3.70s
+DONE c5g7-hom-SDP1-zeroflux-s1 RESULT c5g7 SDP1      zero-flux mesh    1  k=1.186173532  dk=   -37.6 pcm  conv=True  outers=  56  inners=   3710  t=    0.91s
+DONE c5g7-hom-SDP2-marshak-s1 RESULT c5g7 SDP2      marshak   mesh    1  k=1.186404814  dk=   -14.5 pcm  conv=True  outers=  65  inners=   3803  t=    3.06s
+DONE bl-SP7-robin-n80 RESULT bl SP7       robin     mesh   80  k=0.804272896  dk=  -108.7 pcm  conv=True  outers=  19  inners=   1578  t=    1.02s
+DONE c5g7-hom-SDP1-marshak-s1 RESULT c5g7 SDP1      marshak   mesh    1  k=1.186185368  dk=   -36.5 pcm  conv=True  outers=  66  inners=   3656  t=    1.87s
+DONE bl-SP5-robin-n80 RESULT bl SP5       robin     mesh   80  k=0.803487590  dk=  -187.2 pcm  conv=True  outers=  18  inners=   1474  t=    0.73s
+DONE bl-SP7-marshak-n80 RESULT bl SP7       marshak   mesh   80  k=0.804813661  dk=   -54.6 pcm  conv=True  outers=  19  inners=   1568  t=    1.29s
+DONE bl-SP5-marshak-n80 RESULT bl SP5       marshak   mesh   80  k=0.804022783  dk=  -133.7 pcm  conv=True  outers=  19  inners=   1533  t=    0.90s
+DONE bl-SP3-SPN-robin-n80 RESULT bl SP3-SPN   robin     mesh   80  k=0.799641476  dk=  -571.9 pcm  conv=True  outers=  19  inners=   1610  t=    0.51s
+DONE bl-SP3-SPN-marshak-n80 RESULT bl SP3-SPN   marshak   mesh   80  k=0.800177547  dk=  -518.2 pcm  conv=True  outers=  19  inners=   1602  t=    0.71s
+DONE bl-SP7-marshak-n640 RESULT bl SP7       marshak   mesh  640  k=0.803566280  dk=  -179.4 pcm  conv=True  outers=  18  inners=  13958  t= 1432.08s
+DONE bl-SP3-robin-n80 RESULT bl SP3       robin     mesh   80  k=0.799648287  dk=  -571.2 pcm  conv=True  outers=  19  inners=   1606  t=    0.49s
+DONE bl-SP1-marshak-n80 RESULT bl SP1       marshak   mesh   80  k=0.777667042  dk= -2769.3 pcm  conv=True  outers=  18  inners=   1515  t=    0.22s
+DONE bl-SP3-marshak-n80 RESULT bl SP3       marshak   mesh   80  k=0.800177547  dk=  -518.2 pcm  conv=True  outers=  18  inners=   1523  t=    0.60s
+DONE bl-SDP2-marshak-n320 RESULT bl SDP2      marshak   mesh  320  k=0.803808532  dk=  -155.1 pcm  conv=True  outers=  25  inners=  13429  t=  327.32s
+DONE bl-SDP2-robin-n80 RESULT bl SDP2      robin     mesh   80  k=0.804463707  dk=   -89.6 pcm  conv=True  outers=  19  inners=   1513  t=    0.68s
+DONE bl-SDP1-SDPN-robin-n80 RESULT bl SDP1-SDPN robin     mesh   80  k=0.802052646  dk=  -330.7 pcm  conv=True  outers=  19  inners=   1568  t=    0.56s
+DONE bl-SDP3-robin-n80 RESULT bl SDP3      robin     mesh   80  k=0.804699307  dk=   -66.1 pcm  conv=True  outers=  28  inners=   1841  t=    2.60s
+DONE bl-SDP1-SDPN-marshak-n80 RESULT bl SDP1-SDPN marshak   mesh   80  k=0.802786891  dk=  -257.3 pcm  conv=True  outers=  21  inners=   1688  t=    1.51s
+DONE bl-SDP2-marshak-n80 RESULT bl SDP2      marshak   mesh   80  k=0.804992047  dk=   -36.8 pcm  conv=True  outers=  29  inners=   1938  t=    2.61s
+DONE bl-SDP3-marshak-n80 RESULT bl SDP3      marshak   mesh   80  k=0.805240993  dk=   -11.9 pcm  conv=True  outers=  25  inners=   1728  t=    2.94s
+DONE bl-SDP1-robin-n80 RESULT bl SDP1      robin     mesh   80  k=0.802056135  dk=  -330.4 pcm  conv=True  outers=  20  inners=   1651  t=    0.44s
+DONE bl-SP7-robin-n40 RESULT bl SP7       robin     mesh   40  k=0.807761153  dk=  +240.1 pcm  conv=True  outers=  20  inners=    740  t=    0.23s
+DONE bl-SP7-marshak-n40 RESULT bl SP7       marshak   mesh   40  k=0.808308199  dk=  +294.8 pcm  conv=True  outers=  20  inners=    753  t=    0.35s
+DONE bl-SDP1-marshak-n80 RESULT bl SDP1      marshak   mesh   80  k=0.802786891  dk=  -257.3 pcm  conv=True  outers=  21  inners=   1688  t=    1.31s
+DONE bl-SP5-robin-n40 RESULT bl SP5       robin     mesh   40  k=0.806950187  dk=  +159.0 pcm  conv=True  outers=  19  inners=    772  t=    0.18s
+DONE bl-SP5-marshak-n40 RESULT bl SP5       marshak   mesh   40  k=0.807489979  dk=  +213.0 pcm  conv=True  outers=  19  inners=    764  t=    0.23s
+DONE bl-SP3-SPN-robin-n40 RESULT bl SP3-SPN   robin     mesh   40  k=0.802979663  dk=  -238.0 pcm  conv=True  outers=  19  inners=    781  t=    0.12s
+DONE bl-SP3-SPN-marshak-n40 RESULT bl SP3-SPN   marshak   mesh   40  k=0.803517595  dk=  -184.2 pcm  conv=True  outers=  19  inners=    775  t=    0.18s
+DONE bl-SP3-robin-n40 RESULT bl SP3       robin     mesh   40  k=0.802986391  dk=  -237.4 pcm  conv=True  outers=  19  inners=    762  t=    0.11s
+DONE bl-SP3-marshak-n40 RESULT bl SP3       marshak   mesh   40  k=0.803517595  dk=  -184.2 pcm  conv=True  outers=  18  inners=    738  t=    0.18s
+DONE bl-SP1-marshak-n40 RESULT bl SP1       marshak   mesh   40  k=0.780255209  dk= -2510.5 pcm  conv=True  outers=  18  inners=    732  t=    0.09s
+DONE bl-SDP3-robin-n40 RESULT bl SDP3      robin     mesh   40  k=0.808168304  dk=  +280.8 pcm  conv=True  outers=  25  inners=    717  t=    0.39s
+DONE bl-SDP2-robin-n40 RESULT bl SDP2      robin     mesh   40  k=0.807960568  dk=  +260.1 pcm  conv=True  outers=  19  inners=    739  t=    0.20s
+DONE bl-SDP3-marshak-n40 RESULT bl SDP3      marshak   mesh   40  k=0.808720462  dk=  +336.0 pcm  conv=True  outers=  25  inners=    704  t=    0.51s
+DONE bl-SDP2-marshak-n40 RESULT bl SDP2      marshak   mesh   40  k=0.808498065  dk=  +313.8 pcm  conv=True  outers=  24  inners=    719  t=    0.38s
+DONE bl-SDP1-SDPN-robin-n40 RESULT bl SDP1-SDPN robin     mesh   40  k=0.805464152  dk=   +10.4 pcm  conv=True  outers=  20  inners=    786  t=    0.13s
+DONE bl-SDP1-robin-n40 RESULT bl SDP1      robin     mesh   40  k=0.805467584  dk=   +10.8 pcm  conv=True  outers=  20  inners=    773  t=    0.11s
+DONE bl-SDP1-SDPN-marshak-n40 RESULT bl SDP1-SDPN marshak   mesh   40  k=0.806200707  dk=   +84.1 pcm  conv=True  outers=  22  inners=    712  t=    0.31s
+DONE bl-SDP1-marshak-n40 RESULT bl SDP1      marshak   mesh   40  k=0.806200707  dk=   +84.1 pcm  conv=True  outers=  22  inners=    712  t=    0.30s
+DONE bl-SDP3-marshak-n320 RESULT bl SDP3      marshak   mesh  320  k=0.804010889  dk=  -134.9 pcm  conv=True  outers=  28  inners=  11284  t=  384.54s
+DONE bl-SDP3-robin-n320 RESULT bl SDP3      robin     mesh  320  k=0.803473532  dk=  -188.6 pcm  conv=True  outers=  34  inners=  12885  t=  415.70s
+DONE bl-SP7-robin-n640 RESULT bl SP7       robin     mesh  640  k=0.803027930  dk=  -233.2 pcm  conv=True  outers=  21  inners=  16231  t= 1569.09s
+FAIL bl-SDP2-marshak-n640 (exit 143, see logs/bl-SDP2-marshak-n640.log)
+FAIL bl-SDP3-marshak-n640 (exit 143, see logs/bl-SDP3-marshak-n640.log)
+FAIL bl-SDP3-robin-n640 (exit 143, see logs/bl-SDP3-robin-n640.log)
+DONE c5g7-pin-SDP3-robin-s8 RESULT c5g7 SDP3      robin     mesh    8  k=1.182565411  dk=  -398.5 pcm  conv=True  outers= 136  inners=  73671  t= 5753.97s
+DONE bl-SDP1-SDPN-marshak-n640 RESULT bl SDP1-SDPN marshak   mesh  640  k=0.801631102  dk=  -372.9 pcm  conv=True  outers=  28  inners=  39343  t= 2762.96s
+DONE bl-SDP1-marshak-n640 RESULT bl SDP1      marshak   mesh  640  k=0.801631102  dk=  -372.9 pcm  conv=True  outers=  28  inners=  39343  t= 2586.71s
+SWEEP FINISHED all

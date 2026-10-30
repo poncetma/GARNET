@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
-# Run the complete GARNET regression suite on one Merlin GPU.
+# Run the complete GARNET regression suite on one Merlin GPU (A100 or GH200).
 # The project normally excludes tests marked "slow"; this job clears the
 # configured addopts so every collected regression is included.
+# GARNET_PYTEST_TARGETS (paths relative to the repo) narrows the run;
+# GARNET_PYTEST_ARGS replaces the pytest options.
 
 #SBATCH --job-name=garnet-gpu-regression
 #SBATCH --cluster=gmerlin7
@@ -19,7 +21,16 @@
 
 set -euo pipefail
 
-default_python="/opt/psi/conda-envs/x86_64/ra-standard_py312/bin/python"
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    default_python="/data/scratch/shared/poncet_m/garnet-gh-py313-v1/bin/python"
+    # The CUDA 12.6 runtime libraries come from the environment's nvidia-* wheels.
+    for lib in "$(dirname "$(dirname "${GARNET_PYTHON_BIN:-$default_python}")")"/lib/python3.13/site-packages/nvidia/*/lib; do
+        LD_LIBRARY_PATH="$lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    done
+    export LD_LIBRARY_PATH
+else
+    default_python="/opt/psi/conda-envs/x86_64/ra-standard_py312/bin/python"
+fi
 python_bin="${GARNET_PYTHON_BIN:-$default_python}"
 if [[ ! -x "$python_bin" ]]; then
     if [[ -n "${MODULESHOME:-}" ]]; then
@@ -53,12 +64,12 @@ if [[ -z "$python_bin" ]]; then
     echo "error: no usable Python interpreter found" >&2
     exit 127
 fi
-if [[ ! -d "$test_deps" ]]; then
-    echo "error: pytest dependency directory does not exist: $test_deps" >&2
-    exit 1
+# The GH200 environment ships pytest; the x86 conda Python needs test_deps.
+if [[ -d "$test_deps" ]]; then
+    export PYTHONPATH="$test_deps:$repo${PYTHONPATH:+:$PYTHONPATH}"
+else
+    export PYTHONPATH="$repo${PYTHONPATH:+:$PYTHONPATH}"
 fi
-
-export PYTHONPATH="$test_deps:$repo${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export PYTHONUNBUFFERED=1
 
@@ -95,12 +106,15 @@ else
     pytest_args=(-ra -q -o addopts= --durations=25)
 fi
 
+if [[ -f "$repo/PROVENANCE.txt" ]]; then cat "$repo/PROVENANCE.txt"; fi
+read -r -a targets <<<"${GARNET_PYTEST_TARGETS:-tests}"
+
 printf 'pytest arguments:'
-printf ' %q' "${pytest_args[@]}"
-printf ' %q\n' "$repo/tests"
+printf ' %q' "${pytest_args[@]}" "${targets[@]}"
+printf '\n'
 
 set +e
-"$python_bin" -u -m pytest "${pytest_args[@]}" "$repo/tests"
+"$python_bin" -u -m pytest "${pytest_args[@]}" "${targets[@]}"
 status=$?
 set -e
 

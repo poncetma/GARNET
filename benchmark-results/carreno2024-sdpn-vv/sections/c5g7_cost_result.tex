@@ -1,0 +1,17 @@
+Table~\ref{tab:c5g7-cost}. On one CPU thread at $s = 4$ (41\,616 cells,
+seven groups) the SP$_N$ solves take 6--40~s and the SDP$_N$ solves
+49--124~s. With Marshak vacuum every SDP$_N$ block is non-symmetric and runs
+GMRES. At $s = 4$ its outer iteration count is still close to SP$_N$'s (64--106
+against 59--68), but from $s = 8$ on it roughly doubles (121--161 against
+57--73), and at $s = 24$ the inner applies are 2.9--3.6 times those of
+SP3--SP7. On the
+GH200 at $s = 24$ (1.5 million cells) SP$_N$ takes 30--271~s and SDP$_N$
+1580--1969~s. At $s = 32$ none of the SDP$_N$ solves converged: in the first
+outer iteration GMRES with Jacobi preconditioning stopped at 5000 iterations,
+1.3--4.8 times above its tolerance (finding~5 in
+Section~\ref{sec:findings}). The SP$_N$ solves ran to $s = 48$ (6.0 million
+cells) in 2--14 minutes each.
+
+The pin-resolved study is a GPU calculation: on the shared CPU node, with up
+to 16 runs at once, the SP$_N$ solves at $s = 12$ took 14--77 minutes each and
+an SDP3 solve at $s = 12$ was projected at over 20 hours.

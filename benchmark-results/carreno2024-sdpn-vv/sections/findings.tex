@@ -1,0 +1,90 @@
+\section{Findings and recommendations}
+\label{sec:findings}
+
+\begin{enumerate}
+\item \textbf{Code verification passes.} On Brantley--Larsen, with the
+  paper's Marshak boundary, \garnet's mesh limits equal Table~6 within
+  0.6~pcm for SP1, SP3, SP5, SP7, SDP1 and SDP2, and within 0.2~pcm for SDP3
+  run with the authors' FEMFFUSION tables. On C5G7 the pin powers reproduce
+  the paper's AVG and RMSE within 0.04 percentage points.
+
+\item \textbf{The paper's SDP3 results use tables that differ from both the
+  printed Eq.~(A.6) and the derivation.} The FEMFFUSION tables reproduce the
+  paper's SDP3 eigenvalue; the printed ones are 24~pcm off, and \garnet's
+  re-derived ones 10~pcm (Brantley--Larsen) to 14~pcm (C5G7) lower.
+  \garnet{} keeps the re-derived tables. No code change is needed; the
+  difference is documented in \code{garnet/spn.py}.
+
+\item \textbf{The vacuum default was inconsistent across the family;
+  Marshak is now the default.} When this study started, only the dedicated
+  SP3 solver defaulted to the coupled Marshak condition. SP5, SP7 and the
+  SDP$_N$ solvers defaulted to the per-moment Robin term, which is 52--73~pcm
+  low on Brantley--Larsen and depends on the moment variables it is applied
+  to (0.35--0.7~pcm between equivalent solvers); on a reflected core such as
+  C5G7 the choice is irrelevant (0.3~pcm). Following this study, every
+  SP$_N$/SDP$_N$ eigen, transient and noise solver applies Marshak by default
+  wherever the coupled term exists (a Cartesian grid with a vacuum face and no
+  hybrid mask) and Robin elsewhere; \code{marshak\_vacuum=False} restores
+  Robin for comparison. This moves SP5, SP7, SDP2 and SDP3 results on
+  problems with vacuum faces, by about $+53$~pcm on Brantley--Larsen. SDP2
+  pays for it: it loses its CG path and runs GMRES, 5.8 times slower at
+  $n = 160$ (Table~\ref{tab:bl-cost}); SDP3 already ran GMRES, and SP$_N$
+  keeps CG. The dedicated SDP1 solver, eigen and transient, keeps Robin,
+  because the coupled matrix is not symmetric in its two-moment basis; the
+  general SDP$_N$ block of order~1 gives SDP1 with Marshak. Very large
+  SDP$_N$ meshes are subject to finding~5.
+
+\item \textbf{The C5G7 builder's sampled pin areas are biased.} In the
+  pin-resolved model, each cell that the $r = 0.54$~cm fuel circle cuts is a
+  blend of pin and water weighted by its covered fraction, so a pin's fuel
+  inventory is the sum of those fractions. By default each fraction is
+  estimated by counting which of $16 \times 16$ sample points in the cell fall
+  inside the circle. All 1056 fuel pins are cut identically, so this error
+  does not average out over the core: it is a systematic error in the fuel
+  inventory, of irregular sign and size, $-0.66$\% at $s = 4$, $+0.12$\% at 6,
+  $+0.06$\% at 8 and $-0.02$\% at 16. In this lattice $k$ moves by about
+  $-35$~pcm per $+0.1$\% of fuel area, so the sampled model is 226~pcm high at
+  $s = 4$ and 22~pcm low at $s = 8$, more than any difference between methods
+  in this study and enough to make a mesh study irregular. With
+  \code{exact\_area=True} each fraction is the closed-form area of the
+  square--disk intersection (the routine of the HP-MR fix, audit item O6), and
+  the fuel inventory equals $\pi r^2$ per pin to round-off on every mesh.
+  \emph{Recommendation:} make exact areas the default. No test or stored
+  result depends on the sampled default (the colorset ADF study already
+  samples $256 \times 256$ points); it would change the output of the
+  examples \code{c5g7\_meshconv.py}, \code{sdpn\_c5g7.py --pin-resolved} and
+  \code{c5g7\_td.py --pin-resolved}, whose C5G7-TD builder uses the same
+  sampling. The builder's zero-flux outer faces are within 1.4~pcm of vacuum
+  and can stay.
+
+\item \textbf{The non-symmetric SDP$_N$ solve does not scale to the finest
+  C5G7 meshes.} With Marshak vacuum, SDP1, SDP2 and SDP3 at $s = 32$
+  (2.7~million cells) all stopped in the first outer iteration: GMRES with
+  the default Jacobi preconditioner did not reach its tolerance in 5000
+  iterations (residual 1.3--4.8 times the target). Up to $s = 24$ they
+  converged, but with 121--161 outer iterations against 57--73 for the
+  CG-solved SP$_N$ blocks.
+  Tracked as audit item O14. \emph{Recommendation:} precondition the large
+  non-symmetric blocks (for example \code{spn\_precondition}, already
+  available) and decide whether an inner solve that misses its tolerance in
+  an early outer iteration should abort the eigenvalue solve.
+
+\item \textbf{Mesh requirements.} Brantley--Larsen on the
+  $80 \times 80$ test mesh carries $+87$ to $+132$~pcm of mesh error.
+  Pin-resolved C5G7 needs at least 16 cells per pin side for a 4~pcm
+  eigenvalue; at 4 cells it is 68--216~pcm off, and its convergence is not
+  monotone.
+
+\item \textbf{C5G7 offset.} \garnet's pin-resolved C5G7 eigenvalues are
+  11--22~pcm below the paper's, growing with angular order. The models
+  differ in the pin-boundary representation, which the paper does not
+  specify; the offset is 3--5\% of the angular error and is left
+  unexplained.
+
+\item \textbf{The C5G7 regression test's agreement with MCNP is a
+  cancellation} of $+380$ to $+660$~pcm homogenization error and about
+  $-225$~pcm mesh error. Its docstrings now say so; its envelopes are kept.
+
+\item \textbf{Devices agree.} CPU and GH200 give the same $k$ to
+  $1.3 \times 10^{-13}$ in 18 configurations.
+\end{enumerate}

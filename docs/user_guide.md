@@ -437,8 +437,10 @@ fixed-cadence IQS. The r4, 11-group GH200 calibration uses
 `residual_tol=2e-3`, `fallback_residual=1e-2`,
 `iqs_predictor_tol=2e-2`, and `adjoint_every=5`: it reduced maximum sampled
 power error against the available full-diffusion reference from 5.708% to
-0.173% at a 25.5% transient-time cost. That calibration predates the
-2026-10-29 predictor–corrector IQS and must be re-checked. The HPMR example applies this guard
+0.173% at a 25.5% transient-time cost. A re-check under the 2026-10-29
+predictor–corrector IQS kept the profile. On a stronger +0.309 $ insertion,
+the guarded error was 0.181% where the full-diffusion reference is reliable,
+against 8.2% for fixed cadence, at 2.0× the fixed-cadence time. The HPMR example applies this guard
 profile automatically when IQS is selected; pass `--unguarded-iqs` only for
 fixed-cadence benchmark comparisons. See
 [`benchmark-results/hpmr-iqs-gh200`](../benchmark-results/hpmr-iqs-gh200/README.md).
@@ -552,11 +554,15 @@ print(adaptive.step_widths, adaptive.local_errors,
 Rejected attempts roll back flux, precursor, and BDF history and do not invoke
 the accepted `on_step` hook. The controller measures flux and precursor
 defects; coupled drivers may append temperature or other external accepted
-state through `adaptive_error_state`. The LRA driver uses that seam for its
+state through `adaptive_error_state`. Each field must pass the tolerance
+against its own scale (`error_norm="blockwise"`, the default);
+`error_norm="concatenated"` reproduces the paper's joined-state norm, under
+which the field with the largest values in its own units decides
+([measured effect](../benchmark-results/adaptive-bdf-error-norm/)). The LRA driver uses that seam for its
 fully implicit temperature. With `automatic_order=True`, full-state
 `q-1/q/q+1` predictor defects compete by proposed safe width; event restarts
-still force order one. The corrected LRA CPU gate shows a 5.18x matched-error
-speedup over adaptive backward Euler. Error-scaled rejection with a 0.5 cap
+still force order one. The corrected LRA CPU gate showed a 5.18x matched-error
+speedup over adaptive backward Euler with the concatenated norm. Error-scaled rejection with a 0.5 cap
 reduced practical-tolerance LRA work by 5.6%; the default factor-two policy is
 retained for paper reproduction. Rejected-attempt time, width, and order are
 available in `rejected_times`, `rejected_step_widths`, and

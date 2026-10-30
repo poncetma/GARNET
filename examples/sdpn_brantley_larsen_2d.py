@@ -102,7 +102,9 @@ def main():
             print(f"{name:6s}{kinf:>12.5f}{PAPER[name]:>10.5f}"
                   f"{(kinf - PAPER[name]) * 1e5:>9.1f}")
         print("\nWith the coupled Marshak boundary, garnet reproduces the paper's "
-              "Table 6 k_eff\n(SDP3 carries a small residual). d = garnet - paper, pcm.")
+              "Table 6 k_eff.\nSDP3 sits about -10 pcm off: garnet uses re-derived SDP3 "
+              "tables, the paper\nthe tables of the authors' FEMFFUSION code "
+              "(see garnet/spn.py). d = garnet - paper, pcm.")
     else:
         n = int(args[0]) if args else 80
         hdr = f"{'method':6s}{'k_eff':>10s}{'paper k':>10s}{'d (pcm)':>9s}"

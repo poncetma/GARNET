@@ -194,13 +194,16 @@ _SDPN_C = {
     # moments of the PN system truncated at l = 2N+1, odd moments eliminated,
     # U-transform of Eq. (13), D = diag(1/3, 1/7, 1/11, 1/15) Sigma^-1). The
     # derivation machinery reproduces the paper's SDP1 and SDP2 tables (and the
-    # SDP3 Marshak g of (A.7)) exactly, but NOT its printed SDP3 rows 2-3 --
-    # which also appear verbatim in the authors' FEMFFUSION code and look like a
-    # transcription chimera (c^(1)/c^(2) row 2 are the SP7 rows, c^(3) row 2
-    # carries SDP2's closure value 36/55). Note the true c^(4) has a nonzero
-    # (2,3) entry, absent from the paper's sparsity pattern. On the paper's
-    # Fig. 3 benchmark these tables give k = 0.80394 vs the published 0.80402
-    # (-9 pcm); the paper's own tables give +24 pcm.
+    # SDP3 Marshak g of (A.7)) exactly, but NOT its printed SDP3 rows 2-3,
+    # which look like a transcription chimera (c^(1)/c^(2) row 2 are the SP7
+    # rows, c^(3) row 2 carries SDP2's closure value 36/55). The authors'
+    # FEMFFUSION code has the same rows except c^(3) row 2 = (9/25, -54/175).
+    # Note the true c^(4) has a nonzero (2,3) entry, absent from the paper's
+    # sparsity pattern. Mesh-converged on the paper's Fig. 3 benchmark
+    # (Marshak vacuum), these tables give k = 0.80392 against the published
+    # 0.80402 (-9.9 pcm); the FEMFFUSION tables give 0.80402 (-0.2 pcm), so
+    # the paper's SDP3 results were computed with them, and the printed (A.6)
+    # gives +23.6 pcm. See benchmark-results/carreno2024-sdpn-vv/.
     3: [
         [[1.0, -2.0 / 3.0, 8.0 / 15.0, -16.0 / 35.0],
          [-2.0 / 3.0, 4.0 / 9.0, -16.0 / 45.0, 32.0 / 105.0],
@@ -412,6 +415,26 @@ def _strip_vacuum(bc):
     coupled Marshak boundary); other faces are unchanged. bc is normalized."""
     return tuple(tuple(BC_REFLECTIVE if f == BC_VACUUM else f for f in axis)
                  for axis in bc)
+
+
+def _marshak_applies(grid, bc, active=None, mask_bc=BC_VACUUM, op_cls=None,
+                     hybrid=False):
+    """True when the coupled Marshak vacuum is available and has a face to act
+    on: a Cartesian, non-cylindrical grid with the GroupOperator stencil (the
+    triangular and cylindrical stencils have no coupled face term), no hybrid
+    mask, and a vacuum box face or, with an active mask, a vacuum mask
+    boundary. The SPN/SDPN solvers apply Marshak by default exactly when this
+    holds and fall back to the per-moment Robin term otherwise."""
+    if hybrid or op_cls not in (None, GroupOperator) or grid is None:
+        return False
+    if getattr(grid, "cylindrical_metrics", lambda: None)() is not None:
+        return False
+    try:
+        faces = [f for axis in normalize_bc(bc) for f in axis]
+    except (ValueError, TypeError):
+        return False
+    mask_vacuum = active is not None and _face_valid(mask_bc) == BC_VACUUM
+    return mask_vacuum or any(f == BC_VACUUM for f in faces)
 
 
 def _congruence_available(order, grid, bc, active, mask_bc, coeffs=None):

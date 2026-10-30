@@ -87,7 +87,7 @@ def _lin(xs, coeffs):
 
 
 def _error_norm_sums(corrected, predicted, rtol, atol):
-    """Return defect/scale squared norms with one device-to-host transfer.
+    """Return per-field defect/scale squared norms with one host transfer.
 
     Reductions remain as zero-dimensional device arrays while all state fields
     are visited.  Besides requiring only one GPU synchronization for the whole
@@ -95,20 +95,18 @@ def _error_norm_sums(corrected, predicted, rtol, atol):
     complete copies of that state as residual and scale lists.
     """
     xp = kernels.module_of(corrected[0])
-    numerator = denominator = None
+    sums = []
     for c, p in zip(corrected, predicted):
         residual = c - p
-        n = kernels.dot(xp, residual, residual)
+        sums.append(kernels.dot(xp, residual, residual))
         if atol == 0.0:
-            d = (rtol * rtol) * kernels.dot(xp, c, c)
+            sums.append((rtol * rtol) * kernels.dot(xp, c, c))
         else:
             scale = atol + rtol * xp.abs(c)
-            d = kernels.dot(xp, scale, scale)
-        numerator = n if numerator is None else numerator + n
-        denominator = d if denominator is None else denominator + d
-    # A single two-scalar copy is the only synchronization in this routine.
-    pair = asnumpy(xp.stack((numerator, denominator)))
-    return float(pair[0]), float(pair[1])
+            sums.append(kernels.dot(xp, scale, scale))
+    # A single copy of 2 scalars per field is the only synchronization here.
+    pairs = asnumpy(xp.stack(sums)).reshape(-1, 2)
+    return pairs[:, 0], pairs[:, 1]
 
 
 def physical_state_errors(fine, coarse, previous, *, rtol, atol=0.0, weights=None):
@@ -816,16 +814,23 @@ class BDF(TimeScheme):
         return self.predict_history(
             self._history_u, dt, max_degree=max_degree)
 
+    error_norms = ("concatenated", "blockwise")
+
     @staticmethod
-    def error_norm(corrected, predicted, *, rtol, atol=0.0):
+    def error_norm(corrected, predicted, *, rtol, atol=0.0, norm="concatenated"):
         """Normalized predictor--corrector defect used for step acceptance.
 
         This follows Eq. (44) of Cherezov et al.: the Euclidean norm of the
         state correction divided by the norm of ``atol + rtol*corrected``.
-        Both arguments are iterables so multigroup fluxes, precursor families,
-        and thermal fields can be evaluated independently or concatenated.
-        A value no greater than one passes the local error test.
+        Both arguments are iterables of fields (group fluxes, precursor
+        families, thermal or other coupled state). ``"concatenated"`` applies
+        Eq. (44) to all fields joined, so the field with the largest values in
+        its own units dominates both norms. ``"blockwise"`` applies it to each
+        field and returns the largest, so every field meets the tolerance
+        relative to its own scale. A value no greater than one passes.
         """
+        if norm not in BDF.error_norms:
+            raise ValueError(f"BDF error norm must be one of {BDF.error_norms}")
         rtol, atol = float(rtol), float(atol)
         if not np.isfinite(rtol) or rtol <= 0.0:
             raise ValueError("BDF error rtol must be finite and positive")
@@ -837,9 +842,15 @@ class BDF(TimeScheme):
                              "non-zero lengths")
         numerator, denominator = _error_norm_sums(
             corrected, predicted, rtol, atol)
-        if denominator == 0.0:
-            return 0.0 if numerator == 0.0 else np.inf
-        return float(np.sqrt(numerator / denominator))
+        if norm == "concatenated":
+            # Plain left-to-right sums, as the fields were always accumulated
+            # (Python's sum() of floats is compensated since 3.12).
+            numerator = np.add.accumulate(numerator)[-1:]
+            denominator = np.add.accumulate(denominator)[-1:]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(denominator > 0.0, numerator / denominator,
+                             np.where(numerator == 0.0, 0.0, np.inf))
+        return float(np.sqrt(ratio.max()))
 
     def push(self, u_new):
         self._history_u.insert(0, list(u_new))

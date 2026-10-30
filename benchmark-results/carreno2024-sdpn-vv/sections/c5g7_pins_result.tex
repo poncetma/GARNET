@@ -1,0 +1,22 @@
+Table~\ref{tab:c5g7-pins} and Fig.~\ref{fig:c5g7-pins}. Unlike $k$, the pin
+powers improve with angular order: AVG falls from 1.43\% for diffusion to
+0.74\% for SP3, 0.66\% for SDP1 and 0.53--0.57\% for SP5, SP7, SDP2 and
+SDP3. These are the paper's Table~7 values within 0.04 percentage points
+for SP1 to SP7, SDP1 and SDP2 (SP1 1.43 against 1.43, SP3 0.74
+against 0.75), and the paper's RMSE measure agrees as well. The agreement
+shows that the paper scored its pin powers against the NEA MCNP reference
+used here, and that the two codes' solutions match pin by pin, not only in
+$k$.
+
+For the higher orders AVG converges with mesh more slowly than $k$ and from
+below: SP7 rises from 0.47\% at $s = 8$ to 0.54\% at $s = 48$, SDP3 from
+0.49\% at $s = 8$ to 0.56\% at $s = 24$, still climbing. The remaining gap
+to the paper for SP7, SDP2 and SDP3 (0.03--0.08 points, largest for SDP3 at
+its coarser finest mesh) is consistent with that. Pin-power results from
+$s \le 12$ therefore understate the converged error.
+
+The largest pin error is 2.6--2.9\% for every transport method and 5.8\% for
+diffusion. In every case it is a corner pin of the outer UO$_2$ assembly next
+to the reflector, where the power is lowest (0.23--0.29) and the MCNP
+reference itself is least precise. The largest pin power is within 1\% of
+MCNP's 2.498, and every assembly power within 0.65\%.

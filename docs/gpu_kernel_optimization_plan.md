@@ -481,7 +481,11 @@ diagnosis, and the general lesson:
   first-order convergence to ~1.6266196, i.e. **error ~ 150 x tol_step**. At the
   default 1e-6 the solver's own answer is uncertain at **1.5e-4** — so the
   CPU/GPU gap of 3.1e-5 is *five times smaller than the convergence error*. The
-  buses agree better than the tolerance guarantees.
+  buses agree better than the tolerance guarantees. *(Superseded 2026-10-30,
+  audit O12: the step now also stops on the balance estimate of the amplitude
+  error and rebalances on every sweep. The same kind of ladder now gives about
+  8 × tol_step, 8.3e-6 at the default, at fewer sweeps; see the `tol_step`
+  docstring.)*
 - Two hypotheses were tested and **rejected** on the way, which is why the
   ladder was worth running: (a) that the batched assembly reorders the group
   sums — it does not, batch-on vs batch-off is bit-identical on CPU at both 1e-6

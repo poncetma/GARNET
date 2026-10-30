@@ -1,0 +1,21 @@
+  outer    1  k = 0.75414340  dk = 2.46e-01  src_err = 1.59e-01
+  outer    2  k = 0.77359353  dk = 1.95e-02  src_err = 9.49e-02
+  outer    3  k = 0.78462511  dk = 1.10e-02  src_err = 6.53e-02
+  outer    4  k = 0.80307199  dk = 1.84e-02  src_err = 2.12e-02
+  outer    5  k = 0.80582590  dk = 2.75e-03  src_err = 6.89e-03
+  outer    6  k = 0.80828625  dk = 2.46e-03  src_err = 2.31e-03
+  outer    7  k = 0.80747616  dk = 8.10e-04  src_err = 1.04e-03
+  outer    8  k = 0.80785089  dk = 3.75e-04  src_err = 3.47e-04
+  outer    9  k = 0.80775186  dk = 9.90e-05  src_err = 8.57e-05
+  outer   10  k = 0.80774816  dk = 3.70e-06  src_err = 4.43e-05
+  outer   11  k = 0.80776347  dk = 1.53e-05  src_err = 1.29e-05
+  outer   12  k = 0.80776149  dk = 1.98e-06  src_err = 3.08e-06
+  outer   13  k = 0.80776112  dk = 3.71e-07  src_err = 9.00e-07
+  outer   14  k = 0.80776113  dk = 1.12e-08  src_err = 2.06e-07
+  outer   15  k = 0.80776116  dk = 2.52e-08  src_err = 6.33e-08
+  outer   16  k = 0.80776115  dk = 5.17e-09  src_err = 1.82e-08
+  outer   17  k = 0.80776115  dk = 1.41e-09  src_err = 4.20e-09
+  outer   18  k = 0.80776115  dk = 3.39e-10  src_err = 4.97e-10
+  outer   19  k = 0.80776115  dk = 2.90e-10  src_err = 1.79e-10
+  outer   20  k = 0.80776115  dk = 2.02e-12  src_err = 5.80e-11
+RESULT bl SP7       robin     mesh   40  k=0.807761153  dk=  +240.1 pcm  conv=True  outers=  20  inners=    740  t=    0.23s

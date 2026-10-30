@@ -150,6 +150,35 @@ def test_bdf_predictor_corrector_error_matches_published_norm():
         == pytest.approx(numerator / denominator)
 
 
+def test_blockwise_bdf_error_norm_is_per_field_and_unit_invariant():
+    """Audit O11: the concatenated norm lets the field with the largest values
+    in its own units decide. Blockwise applies Eq. (44) per field and takes
+    the largest, so rescaling a field (P/P0 vs kelvin) cannot hide another."""
+    flux_c, flux_p = np.array([2.0e8, 1.0e8]), np.array([2.0002e8, 1.0e8])
+    temp_c, temp_p = np.array([600.0, 900.0]), np.array([603.0, 900.0])
+    corrected, predicted = [flux_c, temp_c], [flux_p, temp_p]
+    rtol = 1e-3
+    per_field = [np.linalg.norm(c - p) / (rtol * np.linalg.norm(c))
+                 for c, p in zip(corrected, predicted)]
+    blockwise = BDF.error_norm(corrected, predicted, rtol=rtol, norm="blockwise")
+    assert blockwise == pytest.approx(max(per_field))
+    assert per_field[1] > 1.0 > per_field[0]           # the temperature fails
+    assert BDF.error_norm(corrected, predicted, rtol=rtol) < 1.0   # but is hidden
+    # Blockwise does not depend on the units of either field.
+    rescaled = BDF.error_norm([1e-8 * flux_c, 1e3 * temp_c],
+                              [1e-8 * flux_p, 1e3 * temp_p], rtol=rtol, norm="blockwise")
+    assert rescaled == pytest.approx(blockwise, rel=1e-12)
+    # One field: both norms are the published Eq. (44).
+    assert BDF.error_norm([temp_c], [temp_p], rtol=rtol, norm="blockwise") \
+        == BDF.error_norm([temp_c], [temp_p], rtol=rtol)
+    # A zero field passes only with a zero defect.
+    zero = np.zeros(2)
+    assert BDF.error_norm([temp_c, zero], [temp_c, zero], rtol=rtol, norm="blockwise") == 0.0
+    assert BDF.error_norm([zero], [zero + 1e-30], rtol=rtol, norm="blockwise") == np.inf
+    with pytest.raises(ValueError, match="error norm"):
+        BDF.error_norm([temp_c], [temp_p], rtol=rtol, norm="max")
+
+
 def test_bdf_step_controller_rejects_by_half_and_bounds_growth():
     controller = BDFStepController(max_factor=4.0)
     assert controller.propose(0.08, 1.01, 5) == pytest.approx(0.04)

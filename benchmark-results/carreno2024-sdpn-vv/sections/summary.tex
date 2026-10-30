@@ -1,0 +1,40 @@
+\section*{Summary}
+
+This report verifies \garnet's SP$_N$ and SDP$_N$ solvers against the two
+two-dimensional problems of Carre\~no et al.\ (2024), the paper whose
+equations they implement, after the October 2026 code audit (item O10).
+
+\begin{itemize}
+\item \textbf{Brantley--Larsen, code verification.} With the paper's coupled
+  Marshak vacuum, \garnet's mesh limits equal the paper's Table~6 within
+  0.6~pcm for SP1, SP3, SP5, SP7, SDP1 and SDP2. Convergence is second order
+  (observed 1.93--2.00), and the extrapolation is good to about 0.2~pcm.
+\item \textbf{SDP3 coefficient tables.} The paper's SDP3 results were
+  computed with the tables in the authors' FEMFFUSION code: with them,
+  \garnet{} reproduces Table~6 within 0.2~pcm. Those tables differ from the
+  paper's printed Eq.~(A.6) (which gives $+24$~pcm) and from the
+  first-principles tables \garnet{} uses ($-10$~pcm on Brantley--Larsen,
+  about $-14$~pcm on C5G7).
+\item \textbf{C5G7, pin-resolved.} The pin powers reproduce the paper's
+  Table~7 AVG and RMSE against the NEA MCNP reference within 0.04
+  percentage points (AVG 1.43\% for diffusion down to 0.53--0.57\% for SP5,
+  SP7 and SDP2). The eigenvalues are 11--22~pcm below the paper's (42~pcm
+  for SDP3 with \garnet's tables), a model difference of 3--5\% of the
+  angular error whose source is not identified. Both codes
+  show the paper's C5G7 conclusion: $k$ stagnates with angular order while
+  the pin powers improve.
+\item \textbf{Flux shapes.} Along the lines the paper plots, \garnet{} agrees
+  with the OpenMOC and OpenMC profiles as closely as the paper's own
+  solutions do (0.4\% of the peak on Brantley--Larsen, 1.1--1.7\% on C5G7
+  for SDP3).
+\item \textbf{Findings for the code} (Section~\ref{sec:findings}): the
+  per-moment Robin vacuum, then the default of every solver except SP3, is
+  52--73~pcm low on a leaky core, so Marshak is now the default wherever it is
+  available, with Robin kept for comparison; the C5G7 builder's sampled pin
+  areas misstate the fuel inventory and move $k$ by up to 226~pcm (exact areas
+  are now an option); and the non-symmetric SDP$_N$ solve failed to converge
+  at 2.7 million cells.
+\item \textbf{Tests.} The Brantley--Larsen mesh-limit test now covers every
+  method at 4~pcm (was SP3 and SDP1 at 10~pcm); a slow pin-resolved C5G7
+  test checks diffusion against the paper's $k$ and pin powers.
+\end{itemize}

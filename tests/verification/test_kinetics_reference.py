@@ -228,8 +228,9 @@ def test_adaptive_bdf_survives_fast_neutron_step_at_default_rtol():
     """Audit H12: the first step (no history) used a constant predictor, an
     O(h) defect, and rejected down to min_dt ('adaptive BDF error 2.5e+01
     exceeds one at min_dt = 1e-7 s'). The explicit-Euler startup predictor
-    resolves the ~5 us prompt jump instead: 48 accepted steps, 13 rejections
-    (all on the first step), P(t_end) error 1.8e-4."""
+    resolves the ~5 us prompt jump instead: 53 accepted steps, 13 rejections
+    (all on the first step), P(t_end) error 3.7e-5 with the default blockwise
+    norm (49 steps and 1.8e-4 with error_norm='concatenated', audit O11)."""
     kinetics = Kinetics(velocities=[2.2e9], beta=BETA, decay=LAM)
     result = _solve(_step_problem(_one_group(), _one_group(STEP)), kinetics,
                     dt=1e-3, time_scheme="bdf2", step_solver="monolithic",
@@ -381,3 +382,24 @@ def test_sn_bdf3_runs_to_completion():
     # Identical BDF1/BDF2 startup, then close higher-order continuations.
     np.testing.assert_array_equal(powers["bdf3"][:3], powers["bdf2"][:3])
     np.testing.assert_allclose(powers["bdf6"], powers["bdf3"], rtol=1e-5)
+
+
+# Audit O12: near criticality the change between fission-source sweeps
+# understates the amplitude error by 1 / (1 - k_prompt), ~100x here, and the
+# first sweep's group solves ran at 1e-6 of the group source. A slow step could
+# therefore pass on its first sweep with the warm start untouched, at any
+# tol_step. At the default tol_step the 0.002 $ Anderson run was 9.6e-5 off
+# the tight solve and the 0.02 $ rebalanced-Picard run 3.7e-4 off, at
+# 100-200 sweeps a step; both are now within 1.4e-11.
+@pytest.mark.parametrize("dollars", [0.002, 0.02])
+@pytest.mark.parametrize("outer", [{}, dict(rebalance=True, anderson_depth=1)],
+                         ids=["anderson", "rebalanced-picard"])
+def test_slow_steps_are_solved_not_accepted_unchanged(dollars, outer):
+    problem = _step_problem(_one_group(), _one_group(dollars * BETA.sum() * SIGMA_A))
+    power = {tol: TransientSolver(GRID, problem, KIN, bc="reflective",
+                                  device="cpu").solve(
+                 t_end=10.0, dt=0.05, tol_step=tol, time_scheme="backward-euler",
+                 **outer).power
+             for tol in (1e-6, 1e-12)}
+    assert np.all(np.diff(power[1e-6]) > 0.0)   # every step moves
+    assert np.abs(power[1e-6] / power[1e-12] - 1.0).max() < 1e-5

@@ -269,10 +269,14 @@ class LRAAdiabaticState:
     def uniform(cls, shape, temperature=INITIAL_TEMPERATURE_K):
         return cls(np.full(shape, float(temperature)))
 
+    def predicted(self, power_density_w_cm3, dt: float):
+        """Temperature after ``dt`` at a fixed power density (explicit Euler)."""
+        return (self.temperature
+                + float(dt) * (ADIABATIC_ALPHA / FISSION_ENERGY_J)
+                * power_density_w_cm3)
+
     def advance(self, power_density_w_cm3, dt: float):
-        self.temperature[...] = (self.temperature
-                                 + float(dt) * (ADIABATIC_ALPHA / FISSION_ENERGY_J)
-                                 * power_density_w_cm3)
+        self.temperature[...] = self.predicted(power_density_w_cm3, dt)
 
     def hook(self, temperature=None, axial_buckling2=0.0):
         temperature = self.temperature if temperature is None else temperature
@@ -462,6 +466,14 @@ def run_lra2d_cpu(*, refine: int = 1, dt=0.01, bdf_order: int = 5,
         return thermal_zone_average(
             INITIAL_POWER_DENSITY_W_CM3 * n_core * fission)
 
+    # The thermal startup predictor (t=0 and the 2 s restart) needs the power
+    # density of the accepted flux. At t=0 that is the steady flux scaled as
+    # TransientSolver scales it, to a unit total fission source.
+    steady_flux = np.asarray(steady.flux)
+    accepted_power_density = power_density(
+        steady_flux / float(np.sum((nf[0] * steady_flux[0]
+                                    + nf[1] * steady_flux[1]) / k0)))
+
     def prepare_thermal_step(step, width):
         thermal_bdf.prepare_step(step, width)
         return (thermal_bdf.carried(step)[0], thermal_bdf.a0(step))
@@ -511,8 +523,11 @@ def run_lra2d_cpu(*, refine: int = 1, dt=0.01, bdf_order: int = 5,
                           buckling2)
 
     def on_step(_t, flux, _relative_power):
+        nonlocal accepted_power_density
         step = callback_step + 1
         width = attempted_width(_t)
+        if adaptive_bdf is not None:
+            accepted_power_density = power_density(flux)
         if implicit_feedback:
             # The constituent callback below only updates this provisional
             # endpoint. Commit thermal/BDF history here, after the neutron
@@ -552,7 +567,17 @@ def run_lra2d_cpu(*, refine: int = 1, dt=0.01, bdf_order: int = 5,
         return False
 
     def adaptive_error_state(_t, width):
-        """Add the paper's coupled thermal unknown to the BDF defect norm."""
+        """Add the paper's coupled thermal unknown to the BDF defect norm.
+
+        With one accepted thermal state (t=0 and the 2 s restart) a constant
+        prediction is an O(h) defect. Explicit Euler at the accepted power
+        density is O(h**2), like the neutron startup predictor. The heating
+        rate depends only on the flux, which is continuous at the rod-law
+        corner, so the accepted rate is already the right limit.
+        """
+        if thermal_bdf.history_length == 1:
+            return ([trial_temperature],
+                    [state.predicted(accepted_power_density, width)])
         predicted = thermal_bdf.predict(
             width,
             max_degree=(thermal_bdf.order_at(callback_step + 1)

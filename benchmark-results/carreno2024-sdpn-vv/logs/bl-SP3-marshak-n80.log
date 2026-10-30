@@ -1,0 +1,19 @@
+  outer    1  k = 0.74642955  dk = 2.54e-01  src_err = 1.63e-01
+  outer    2  k = 0.76676341  dk = 2.03e-02  src_err = 9.46e-02
+  outer    3  k = 0.77767387  dk = 1.09e-02  src_err = 6.48e-02
+  outer    4  k = 0.79573247  dk = 1.81e-02  src_err = 2.07e-02
+  outer    5  k = 0.79847376  dk = 2.74e-03  src_err = 6.59e-03
+  outer    6  k = 0.80073394  dk = 2.26e-03  src_err = 2.15e-03
+  outer    7  k = 0.79986889  dk = 8.65e-04  src_err = 1.01e-03
+  outer    8  k = 0.80031739  dk = 4.49e-04  src_err = 4.57e-04
+  outer    9  k = 0.80009405  dk = 2.23e-04  src_err = 2.61e-04
+  outer   10  k = 0.80017952  dk = 8.55e-05  src_err = 2.52e-05
+  outer   11  k = 0.80017977  dk = 2.45e-07  src_err = 1.09e-05
+  outer   12  k = 0.80017777  dk = 2.00e-06  src_err = 3.11e-06
+  outer   13  k = 0.80017745  dk = 3.20e-07  src_err = 7.16e-07
+  outer   14  k = 0.80017753  dk = 8.32e-08  src_err = 2.44e-07
+  outer   15  k = 0.80017755  dk = 1.72e-08  src_err = 5.81e-08
+  outer   16  k = 0.80017755  dk = 2.78e-09  src_err = 1.09e-08
+  outer   17  k = 0.80017755  dk = 1.35e-09  src_err = 3.82e-09
+  outer   18  k = 0.80017755  dk = 5.01e-11  src_err = 6.36e-10
+RESULT bl SP3       marshak   mesh   80  k=0.800177547  dk=  -518.2 pcm  conv=True  outers=  18  inners=   1523  t=    0.60s

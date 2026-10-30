@@ -107,6 +107,60 @@ def test_lra_adiabatic_heat_and_doppler_laws_are_exact():
     assert np.all(state.temperature == pytest.approx(expected))
 
 
+def test_lra_thermal_startup_prediction_is_second_order():
+    """Audit O2: with one accepted thermal state (t=0 and the 2 s restart) the
+    adaptive error estimate predicted a constant temperature, an O(h) defect.
+    Explicit Euler at the accepted power density is O(h**2): for a power
+    rising as exp(w*t) its defect against the exact adiabatic temperature
+    quarters when h halves, where the constant one only halves."""
+    p = build_lra2d()
+    state = LRAAdiabaticState.uniform(p.grid.shape)
+    q0, w, c = 2.0e3, 50.0, 3.83e-11 / 3.204e-11
+    q = np.full(p.grid.shape, q0)
+    euler, constant = [], []
+    for h in (4e-3, 2e-3, 1e-3):
+        exact = 300.0 + c * q0 * np.expm1(w * h) / w
+        euler.append(np.abs(state.predicted(q, h) - exact).max())
+        constant.append(np.abs(state.temperature - exact).max())
+    np.testing.assert_allclose(np.log2(np.divide(euler[:-1], euler[1:])), 2.0, atol=0.1)
+    np.testing.assert_allclose(np.log2(np.divide(constant[:-1], constant[1:])), 1.0, atol=0.1)
+    assert np.all(state.temperature == 300.0)           # predicted() is pure
+
+
+def test_adaptive_lra_restart_uses_the_thermal_startup_predictor(monkeypatch):
+    """The coupled driver hands the explicit-Euler temperature to the BDF
+    error norm on the first step after the 2 s restart. Its defect is 35x to
+    2000x below the constant prediction's (about 52 K at h ~ 1e-2 s). The
+    flux blocks dominate this absolute norm after the excursion, so the
+    trajectory is unchanged to round-off; P(3 s) at rtol 1e-3 stays within
+    1e-3 of an rtol 1e-5 run (112.790 W/cm3)."""
+    import garnet.transient as transient
+    from garnet.benchmarks import run_lra2d_cpu
+
+    calls = []
+    init = transient.TransientSolver.__init__
+
+    def recording_init(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        inner = self.adaptive_error_state
+
+        def recorded(t, width):
+            corrected, predicted = inner(t, width)
+            calls.append((t, corrected[0].copy(), predicted[0].copy()))
+            return corrected, predicted
+        self.adaptive_error_state = recorded
+
+    monkeypatch.setattr(transient.TransientSolver, "__init__", recording_init)
+    result = run_lra2d_cpu(refine=1, dt=1e-6, bdf_order=2, implicit_feedback=True,
+                           adaptive_bdf={"rtol": 1e-3, "min_dt": 1e-7, "max_dt": 0.1})
+    accepted_at_restart = [c for c in calls if c[0] == 2.0][-1][1]
+    for _, corrected, predicted in [c for c in calls if c[0] > 2.0][:3]:
+        euler = np.abs(corrected - predicted).max()
+        constant = np.abs(corrected - accepted_at_restart).max()
+        assert euler < 0.1 * constant, (euler, constant)
+    assert result.average_power_w_cm3[-1] == pytest.approx(112.790, rel=1e-3)
+
+
 def test_lra_doppler_does_not_scale_axial_leakage():
     from garnet.solver import Fields
 

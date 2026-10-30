@@ -1,0 +1,26 @@
+  outer    1  k = 0.75149346  dk = 2.49e-01  src_err = 1.63e-01
+  outer    2  k = 0.76887179  dk = 1.74e-02  src_err = 9.35e-02
+  outer    3  k = 0.77981301  dk = 1.09e-02  src_err = 6.42e-02
+  outer    4  k = 0.79753646  dk = 1.77e-02  src_err = 2.09e-02
+  outer    5  k = 0.80103372  dk = 3.50e-03  src_err = 6.37e-03
+  outer    6  k = 0.80323579  dk = 2.20e-03  src_err = 1.56e-03
+  outer    7  k = 0.80347385  dk = 2.38e-04  src_err = 1.15e-03
+  outer    8  k = 0.80396139  dk = 4.88e-04  src_err = 1.02e-03
+  outer    9  k = 0.80399042  dk = 2.90e-05  src_err = 3.55e-04
+  outer   10  k = 0.80396235  dk = 2.81e-05  src_err = 4.43e-04
+  outer   11  k = 0.80393971  dk = 2.26e-05  src_err = 2.79e-04
+  outer   12  k = 0.80387965  dk = 6.01e-05  src_err = 1.19e-04
+  outer   13  k = 0.80382752  dk = 5.21e-05  src_err = 7.79e-06
+  outer   14  k = 0.80381401  dk = 1.35e-05  src_err = 1.34e-05
+  outer   15  k = 0.80381277  dk = 1.25e-06  src_err = 8.40e-06
+  outer   16  k = 0.80381055  dk = 2.21e-06  src_err = 3.29e-06
+  outer   17  k = 0.80380911  dk = 1.44e-06  src_err = 8.51e-07
+  outer   18  k = 0.80380865  dk = 4.66e-07  src_err = 1.18e-07
+  outer   19  k = 0.80380855  dk = 9.61e-08  src_err = 6.72e-08
+  outer   20  k = 0.80380853  dk = 2.08e-08  src_err = 3.91e-08
+  outer   21  k = 0.80380854  dk = 4.30e-09  src_err = 2.88e-08
+  outer   22  k = 0.80380853  dk = 1.65e-09  src_err = 3.83e-09
+  outer   23  k = 0.80380853  dk = 7.66e-10  src_err = 2.68e-09
+  outer   24  k = 0.80380853  dk = 1.29e-09  src_err = 2.86e-09
+  outer   25  k = 0.80380853  dk = 8.16e-11  src_err = 6.46e-10
+RESULT bl SDP2      marshak   mesh  320  k=0.803808532  dk=  -155.1 pcm  conv=True  outers=  25  inners=  13429  t=  327.32s

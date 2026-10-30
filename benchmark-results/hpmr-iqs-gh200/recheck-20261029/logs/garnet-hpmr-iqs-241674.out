@@ -1,0 +1,106 @@
+=== GARNET HP-MR IQS case reference started at 2026-10-29T15:34:17+01:00 on gpu002 ===
+job=241674 partition=gh-daily repo=/data/scratch/shared/poncet_m/garnet-hpmr-iqs-stage/repo python=/data/scratch/shared/poncet_m/garnet-gh-py313-v1/bin/python results=/data/scratch/shared/poncet_m/garnet-hpmr-iqs/results/241674-reference
+name, driver_version, memory.total [MiB]
+NVIDIA GH200 120GB, 595.91.07, 97871 MiB
+preflight: numpy=2.3.2 scipy=1.16.3 cupy=13.6.0 devices=1 device0=NVIDIA GH200 120GB
+HP-MR coupled transient — 3D, refine 4, nz 20, 11 groups, 105,600 active cells
+  drums 90° → 90.35° over 4 s starting at t = 1 s   (+0.309 $ actually inserted)   (2 MWt rated)
+  200 s at dt = 0.05 s → 4,000 neutronics steps; thermal step 0.5 s
+  fuel thermal time constant rho*cp/h = 268 s (1.3x the run length)
+
+  t =  10.0000 s   P/P0 = 2.81328   (235 sweeps)
+  t =  20.0000 s   P/P0 = 5.22037   (170 sweeps)
+  t =  30.0000 s   P/P0 = 7.02402   (352 sweeps)
+  t =  40.0000 s   P/P0 = 7.31198   (250 sweeps)
+  t =  50.0000 s   P/P0 = 6.58694   (174 sweeps)
+  t =  60.0000 s   P/P0 = 5.58607   (227 sweeps)
+  t =  70.0000 s   P/P0 = 4.67902   (237 sweeps)
+  t =  80.0000 s   P/P0 = 3.94800   (235 sweeps)
+  t =  90.0000 s   P/P0 = 3.37747   (229 sweeps)
+  t = 100.0000 s   P/P0 = 2.93243   (221 sweeps)
+  t = 110.0000 s   P/P0 = 2.58163   (214 sweeps)
+  t = 120.0000 s   P/P0 = 2.30162   (207 sweeps)
+  t = 130.0000 s   P/P0 = 2.07563   (199 sweeps)
+  t = 140.0000 s   P/P0 = 1.89176   (192 sweeps)
+  t = 150.0000 s   P/P0 = 1.74148   (183 sweeps)
+  t = 160.0000 s   P/P0 = 1.61852   (175 sweeps)
+  t = 170.0000 s   P/P0 = 1.51825   (165 sweeps)
+  t = 180.0000 s   P/P0 = 1.43807   (1 sweeps)
+  t = 190.0000 s   P/P0 = 1.37401   (1 sweeps)
+  t = 200.0000 s   P/P0 = 1.32411   (1 sweeps)
+
+  steady state (before t=0)       : 5 coupling iterations, 27.5 s
+  k_eff at the initial state      : 1.086885
+  transient treatment             : full diffusion
+  peak P/P0                       : 7.3746 at t = 37.00 s
+  final P/P0                      : 1.3241
+  fuel temperature rise           : +49.81 K mean, +92.58 K peak
+  peak fuel temperature           : 979.9 K
+
+  problem build + drum frames     : 127.6 s
+  transient                       : 45638.0 s  (4,000 steps, 11409.5 ms/step)
+  device                          : gpu
+
+  transient phase timings (overlap-free CUDA events on GPU):
+    feedback_update                 18.509 s
+    initial_eigen_solve              0.074 s
+    neutronics_solve             45570.225 s
+    operator_rebuild                18.977 s
+    power_edit                       0.673 s
+    result_transfer                  0.000 s
+    telemetry_transfer               0.158 s
+    thermal_solve                    0.414 s
+    transient_total              45611.772 s
+  counters:
+    adjoint_coarse_setups        0
+    coupled_steady_reuses        0
+    cuda_graph_captures          0
+    cuda_graph_errors            0
+    cuda_graph_replays           0
+    feedback_updates             400
+    fgmres_workspace_bytes       0
+    group_batch_active           1
+    initial_eigen_inner_iterations 23,644
+    initial_eigen_outer_iterations 301
+    initial_state_reuses         1
+    mixed_precision_fallbacks    0
+    neutron_bdf_max_order        1
+    neutron_fixed_point_sweeps   713,805
+    neutron_ftm_fallbacks        0
+    neutron_inner_iterations     192,591,864
+    neutron_monolithic_steps     0
+    neutron_operator_rebuilds    410
+    neutron_outer_iterations     713,805
+    neutron_rejected_outer_iterations 0
+    neutron_rejected_steps       0
+    neutron_total_outer_iterations 713,805
+    neutronics_steps             4,000
+    operator_rebuilds            409
+    result_transfers             1
+    telemetry_transfers          400
+    thermal_diagnostics          0
+    thermal_iterations           1,592
+    thermal_steps                400
+
+  t =    0.00 s   P/P0 =  1.0000   T_fuel =  797.93 K  
+  t =   10.00 s   P/P0 =  2.8133   T_fuel =  799.26 K  #############
+  t =   20.00 s   P/P0 =  5.2204   T_fuel =  804.67 K  ##############################
+  t =   30.00 s   P/P0 =  7.0240   T_fuel =  813.85 K  ###########################################
+  t =   40.00 s   P/P0 =  7.3120   T_fuel =  824.50 K  ##############################################
+  t =   50.00 s   P/P0 =  6.5869   T_fuel =  834.13 K  ########################################
+  t =   60.00 s   P/P0 =  5.5861   T_fuel =  841.69 K  #################################
+  t =   70.00 s   P/P0 =  4.6790   T_fuel =  847.18 K  ###########################
+  t =   80.00 s   P/P0 =  3.9480   T_fuel =  850.98 K  #####################
+  t =   90.00 s   P/P0 =  3.3775   T_fuel =  853.47 K  #################
+  t =  100.00 s   P/P0 =  2.9324   T_fuel =  854.97 K  ##############
+  t =  110.00 s   P/P0 =  2.5816   T_fuel =  855.71 K  ###########
+  t =  120.00 s   P/P0 =  2.3016   T_fuel =  855.88 K  #########
+  t =  130.00 s   P/P0 =  2.0756   T_fuel =  855.61 K  ########
+  t =  140.00 s   P/P0 =  1.8918   T_fuel =  854.99 K  ######
+  t =  150.00 s   P/P0 =  1.7415   T_fuel =  854.12 K  #####
+  t =  160.00 s   P/P0 =  1.6185   T_fuel =  853.06 K  ####
+  t =  170.00 s   P/P0 =  1.5183   T_fuel =  851.85 K  ####
+  t =  180.00 s   P/P0 =  1.4381   T_fuel =  850.53 K  ###
+  t =  190.00 s   P/P0 =  1.3740   T_fuel =  849.15 K  ###
+  t =  200.00 s   P/P0 =  1.3241   T_fuel =  847.74 K  ##
+=== GARNET HP-MR IQS case reference finished at 2026-10-30T04:17:04+01:00 with status 0 ===

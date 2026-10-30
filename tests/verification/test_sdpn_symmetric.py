@@ -165,13 +165,26 @@ def test_sdp3_k_invariant_under_congruence():
 
 
 def test_auto_selection_paths():
+    """On vacuum faces the default is the coupled Marshak boundary: SDPN blocks
+    are then non-symmetric (GMRES), the SPN block stays symmetric (CG). With the
+    per-moment Robin vacuum SDP2 keeps its symmetrized CG path."""
+    from garnet.linalg import gmres, pcg
+
     grid, mats, mmap, bc = _bl_problem(20)
-    sdp2 = SDP2EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu")
+    sdp2 = SDP2EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu",
+                           marshak_vacuum=False)
     assert sdp2._symmetrize and all(op.symmetric for op in sdp2.ops)
+    sdp2m = SDP2EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu")
+    assert sdp2m.marshak_vacuum and not sdp2m._symmetrize and sdp2m._linsolve is gmres
     sdp3 = SDP3EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu")
-    assert not sdp3._symmetrize and not any(op.symmetric for op in sdp3.ops)
+    assert sdp3.marshak_vacuum and not sdp3._symmetrize
+    assert not any(op.symmetric for op in sdp3.ops)
     sp5 = SP5EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu")
-    assert not sp5._symmetrize and all(op.symmetric for op in sp5.ops)
+    assert sp5.marshak_vacuum and not sp5._symmetrize
+    assert all(op.symmetric for op in sp5.ops) and sp5._linsolve is pcg
+    # No vacuum face, nothing for the coupled boundary to act on: SDP2 keeps CG.
+    refl = SDP2EigenSolver(grid, mats, material_map=mmap, bc="reflective", device="cpu")
+    assert not refl.marshak_vacuum and refl._symmetrize
 
 
 def test_auto_congruence_from_boundary_conditions():
@@ -222,6 +235,29 @@ def test_transient_auto_congruence_from_boundary_conditions():
     assert not tr_off._symmetrize and tr_off._linsolve is bicgstab
 
 
+def test_transient_explicit_gmres_matches_default_bicgstab():
+    """``linear_solver`` swaps only the inner Krylov solver of the
+    non-symmetric SDP3 block: the power trajectory of a fuel absorption step
+    agrees with the default BiCGStab to the outer tolerance."""
+    import dataclasses
+    from garnet.linalg import bicgstab, gmres
+    from garnet.transient import Kinetics, TransientSDPNSolver
+
+    grid, mats, mmap, bc = _bl_problem(10)
+    fuel = mats[0]
+    stepped = [dataclasses.replace(fuel, sigma_a=[0.995 * fuel.sigma_a[0]]), mats[1]]
+    kin = Kinetics(beta=[0.0065], decay=[0.08], velocities=[2.2e5])
+    problem_at = lambda t: ((mats if t <= 0.0 else stepped), mmap)
+    power = {}
+    for name, expected in ((None, bicgstab), ("gmres", gmres)):
+        tr = TransientSDPNSolver(grid, problem_at, kin, order=3, bc=bc,
+                                 device="cpu", linear_solver=name)
+        assert not tr._symmetrize and tr._linsolve is expected
+        power[name] = tr.solve(t_end=0.1, dt=0.01, tol_step=1e-9).power
+    assert power[None][-1] > 1.2                     # a real excursion
+    np.testing.assert_allclose(power["gmres"], power[None], rtol=1e-6)
+
+
 def test_spn_preconditioned_bicgstab_k_invariant():
     """The SPN-companion Neumann preconditioner must not move the eigenvalue:
     same k as plain Jacobi-BiCGStab on the vacuum-face BL core (where the
@@ -256,7 +292,7 @@ def test_spn_precondition_marshak_and_symmetric_guard():
     # the combination is rejected.
     with pytest.raises(ValueError, match="non-symmetric SDPN path"):
         SDP2EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu",
-                        spn_precondition=1)
+                        marshak_vacuum=False, spn_precondition=1)
     with pytest.raises(ValueError, match="non-symmetric SDPN path"):
         SP5EigenSolver(grid, mats, material_map=mmap, bc=bc, device="cpu",
                        spn_precondition=1)

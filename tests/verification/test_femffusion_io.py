@@ -7,24 +7,23 @@ reader against values read straight off the C5G7 file, including the
 SigmaS[to, from] -> sigma_s[from, to] transpose and upscatter.
 """
 
-import os
-
 import numpy as np
 import pytest
 
 from garnet.benchmarks.vver440 import _XS
 from garnet.femffusion import read_material_xml, read_xsec
+from tests._femffusion import femffusion_path, requires_femffusion
 
-FEMFFUSION = os.environ.get(
-    "FEMFFUSION_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "..", "FEMFFUSION"))
-VVER_XSEC = os.path.join(FEMFFUSION, "examples", "2D_VVER440", "2D_VVER440.xsec")
-C5G7_XML = os.path.join(FEMFFUSION, "examples", "2D_C5G7", "input.mat.xml")
+VVER_XSEC_REL = "examples/2D_VVER440/2D_VVER440.xsec"
+C5G7_XML_REL = "examples/2D_C5G7/input.mat.xml"
+VVER_XSEC = femffusion_path(VVER_XSEC_REL)
+C5G7_XML = femffusion_path(C5G7_XML_REL)
 
-needs_femffusion = pytest.mark.skipif(
-    not os.path.isdir(FEMFFUSION), reason="FEMFFUSION checkout not available")
+needs_vver_xsec = requires_femffusion(VVER_XSEC_REL)
+needs_c5g7_xml = requires_femffusion(C5G7_XML_REL)
 
 
-@needs_femffusion
+@needs_vver_xsec
 def test_xsec_matches_vver440_transcription():
     xs = read_xsec(VVER_XSEC)
     assert len(xs.materials) == 8
@@ -38,7 +37,7 @@ def test_xsec_matches_vver440_transcription():
         np.testing.assert_allclose(m.chi, [1, 0])
 
 
-@needs_femffusion
+@needs_vver_xsec
 def test_xsec_core_map_and_kinetics():
     xs = read_xsec(VVER_XSEC)
     # 25 hex rows; 349 assemblies + reflector ring = 421 entries, ids 1..8
@@ -52,7 +51,7 @@ def test_xsec_core_map_and_kinetics():
     np.testing.assert_allclose(xs.kinetics.velocities, [1.25e7, 2.5e5])
 
 
-@needs_femffusion
+@needs_vver_xsec
 def test_xsec_solves_vver440():
     # End-to-end: file -> materials -> tri solver reproduces the benchmark k.
     from garnet.benchmarks import build_vver440
@@ -68,7 +67,7 @@ def test_xsec_solves_vver440():
     assert res.k_eff == pytest.approx(1.0035, abs=6e-3)
 
 
-@needs_femffusion
+@needs_c5g7_xml
 def test_xml_c5g7_values_and_transpose():
     mats = read_material_xml(C5G7_XML)
     assert all(m.n_groups == 7 for m in mats)
@@ -86,7 +85,7 @@ def test_xml_c5g7_values_and_transpose():
     np.testing.assert_allclose(fuel.chi.sum(), 1.0)
 
 
-@needs_femffusion
+@needs_c5g7_xml
 def test_xml_c5g7_cross_transcription():
     # The FEMFFUSION XML and GARNET's OpenMOC-derived table are independent
     # transcriptions of the same NEA C5G7 set; after the SigmaS transpose they

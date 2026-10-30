@@ -1,0 +1,11 @@
+Table~\ref{tab:bl-cost}. At $n = 160$ (25\,600 cells, one group) the SP$_N$
+solves take 0.8--3.8~s with nearly the same inner work for every order
+(3088--3357 operator applies): the cost grows with the size of the block,
+not with the number of iterations, and the Marshak boundary costs SP$_N$
+nothing measurable (CG either way). SDP1 and SDP2 with Robin vacuum are
+symmetrized and solved by CG at about the cost of SP3 and SP5. With Marshak
+their block is non-symmetric and runs GMRES: 1.5 times the applies but 5--6
+times the time (8.0 and 13.0~s), the rest being GMRES's orthogonalization.
+SDP3 has no symmetric form once a vacuum face is present and runs GMRES with
+either boundary (18--19~s). The paper's CPU times refer to its own mesh and
+machine and are listed for scale only.

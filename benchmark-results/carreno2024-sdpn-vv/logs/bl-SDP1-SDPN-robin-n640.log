@@ -1,0 +1,23 @@
+  outer    1  k = 0.74617212  dk = 2.54e-01  src_err = 1.65e-01
+  outer    2  k = 0.76696750  dk = 2.08e-02  src_err = 9.53e-02
+  outer    3  k = 0.77806982  dk = 1.11e-02  src_err = 6.53e-02
+  outer    4  k = 0.79640884  dk = 1.83e-02  src_err = 2.09e-02
+  outer    5  k = 0.79928863  dk = 2.88e-03  src_err = 6.68e-03
+  outer    6  k = 0.80144681  dk = 2.16e-03  src_err = 2.04e-03
+  outer    7  k = 0.80060797  dk = 8.39e-04  src_err = 9.24e-04
+  outer    8  k = 0.80106915  dk = 4.61e-04  src_err = 5.28e-04
+  outer    9  k = 0.80074698  dk = 3.22e-04  src_err = 4.46e-04
+  outer   10  k = 0.80090349  dk = 1.57e-04  src_err = 3.05e-05
+  outer   11  k = 0.80088576  dk = 1.77e-05  src_err = 3.61e-05
+  outer   12  k = 0.80088919  dk = 3.44e-06  src_err = 2.56e-05
+  outer   13  k = 0.80089722  dk = 8.03e-06  src_err = 4.13e-06
+  outer   14  k = 0.80089756  dk = 3.38e-07  src_err = 1.20e-06
+  outer   15  k = 0.80089771  dk = 1.53e-07  src_err = 3.86e-07
+  outer   16  k = 0.80089770  dk = 1.09e-08  src_err = 1.04e-07
+  outer   17  k = 0.80089771  dk = 6.26e-09  src_err = 5.30e-08
+  outer   18  k = 0.80089771  dk = 9.92e-10  src_err = 1.48e-08
+  outer   19  k = 0.80089771  dk = 4.19e-10  src_err = 4.41e-09
+  outer   20  k = 0.80089771  dk = 1.84e-10  src_err = 1.05e-09
+  outer   21  k = 0.80089771  dk = 1.00e-10  src_err = 2.19e-10
+  outer   22  k = 0.80089771  dk = 6.59e-12  src_err = 5.08e-11
+RESULT bl SDP1-SDPN robin     mesh  640  k=0.800897707  dk=  -446.2 pcm  conv=True  outers=  22  inners=  16962  t=  659.99s

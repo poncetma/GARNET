@@ -1,0 +1,127 @@
+=== GARNET HP-MR IQS case guarded-0.005 started at 2026-10-29T15:11:57+01:00 on gpu001 ===
+job=241675 partition=gh-daily repo=/data/scratch/shared/poncet_m/garnet-hpmr-iqs-stage/repo python=/data/scratch/shared/poncet_m/garnet-gh-py313-v1/bin/python results=/data/scratch/shared/poncet_m/garnet-hpmr-iqs/results/241675-guarded-0.005
+name, driver_version, memory.total [MiB]
+NVIDIA GH200 120GB, 595.91.07, 97871 MiB
+preflight: numpy=2.3.2 scipy=1.16.3 cupy=13.6.0 devices=1 device0=NVIDIA GH200 120GB
+HP-MR coupled transient — 3D, refine 4, nz 20, 11 groups, 105,600 active cells
+  drums 90° → 90.35° over 4 s starting at t = 1 s   (+0.309 $ actually inserted)   (2 MWt rated)
+  200 s at dt = 0.05 s → 4,000 neutronics steps; thermal step 0.5 s
+  fuel thermal time constant rho*cp/h = 268 s (1.3x the run length)
+
+  t =   10.000 s   P/P0 = 2.81544   T_fuel = 799.26 K   shape updates = 27
+  t =   20.000 s   P/P0 = 5.22513   T_fuel = 804.68 K   shape updates = 48
+  t =   30.000 s   P/P0 = 7.02832   T_fuel = 813.87 K   shape updates = 71
+  t =   40.000 s   P/P0 = 7.31416   T_fuel = 824.52 K   shape updates = 87
+  t =   50.000 s   P/P0 = 6.57674   T_fuel = 834.14 K   shape updates = 102
+  t =   60.000 s   P/P0 = 5.57634   T_fuel = 841.67 K   shape updates = 116
+  t =   70.000 s   P/P0 = 4.67058   T_fuel = 847.15 K   shape updates = 126
+  t =   80.000 s   P/P0 = 3.94091   T_fuel = 850.94 K   shape updates = 136
+  t =   90.000 s   P/P0 = 3.37153   T_fuel = 853.42 K   shape updates = 141
+  t =  100.000 s   P/P0 = 2.92740   T_fuel = 854.91 K   shape updates = 146
+  t =  110.000 s   P/P0 = 2.57730   T_fuel = 855.65 K   shape updates = 151
+  t =  120.000 s   P/P0 = 2.29784   T_fuel = 855.81 K   shape updates = 156
+  t =  130.000 s   P/P0 = 2.07228   T_fuel = 855.54 K   shape updates = 161
+  t =  140.000 s   P/P0 = 1.88877   T_fuel = 854.92 K   shape updates = 166
+  t =  150.000 s   P/P0 = 1.73877   T_fuel = 854.05 K   shape updates = 171
+  t =  160.000 s   P/P0 = 1.61605   T_fuel = 852.98 K   shape updates = 176
+  t =  170.000 s   P/P0 = 1.51596   T_fuel = 851.77 K   shape updates = 181
+  t =  180.000 s   P/P0 = 1.43499   T_fuel = 850.45 K   shape updates = 186
+  t =  190.000 s   P/P0 = 1.37045   T_fuel = 849.07 K   shape updates = 191
+  t =  200.000 s   P/P0 = 1.32029   T_fuel = 847.65 K   shape updates = 197
+
+  steady state (before t=0)       : 5 coupling iterations, 36.1 s
+  k_eff at the initial state      : 1.086885
+  transient treatment             : guarded adaptive, iqs quasi-static, shape dt 2 s
+  peak P/P0                       : 7.3762 at t = 37.00 s
+  final P/P0                      : 1.3203
+  fuel temperature rise           : +49.72 K mean, +92.85 K peak
+  peak fuel temperature           : 980.3 K
+
+  problem build + drum frames     : 165.5 s
+  transient                       : 4563.9 s  (4,000 steps, 1141.0 ms/step)
+  device                          : gpu
+  shape / adjoint solves          : 186 / 50
+  max IQS predictor disagreement  : 0.5% at t = 24.00 s
+
+  transient phase timings (overlap-free CUDA events on GPU):
+    adjoint_shape_solve            552.015 s
+    amplitude_solve                  0.301 s
+    feedback_update                  0.005 s
+    full_diffusion_fallback        124.102 s
+    initial_adjoint_solve           14.372 s
+    initial_coupled_solve           36.139 s
+    iqs_shape_solve               3758.968 s
+    operator_rebuild                37.016 s
+    power_edit                       0.157 s
+    power_shape                      0.685 s
+    quasistatic_total             4512.966 s
+    reactivity_projection           10.384 s
+    result_transfer                  0.000 s
+    shape_operator_rebuild          17.563 s
+    shape_residual                   2.692 s
+    telemetry_transfer               0.518 s
+    thermal_solve                    0.560 s
+  counters:
+    adjoint_eigen_solves         50
+    adjoint_residual_evaluations 0
+    adjoint_residual_refreshes   0
+    adjoint_shape_inner_iterations 1,988,486
+    adjoint_shape_outer_iterations 24,195
+    amplitude_steps              4,009
+    fallback_fixed_point_sweeps  1,527
+    fallback_inner_iterations    411,164
+    feedback_updates             414
+    forward_shape_solves         0
+    full_diffusion_fallbacks     12
+    iqs_corrector_iterations     0
+    iqs_corrector_substeps       186
+    iqs_fixed_point_sweeps       48,687
+    iqs_inner_iterations         13,191,500
+    iqs_interval_rejections      1
+    iqs_max_amplitude_error_ppm  4,743
+    iqs_max_iteration_change_ppm 0
+    iqs_max_precursor_shape_change_ppm 27
+    iqs_precursor_shape_corrections 185
+    iqs_predictor_checks         185
+    iqs_predictor_interval_recoveries 4
+    iqs_predictor_interval_reductions 1
+    iqs_predictor_tol_accepts    0
+    iqs_shape_solves             186
+    iqs_unconverged_accepts      0
+    iqs_unconverged_rejections   0
+    max_adjoint_residual_ppm     0
+    max_shape_derivative_correction_ppm 276
+    operator_rebuilds            1,018
+    reactivity_projections       791
+    residual_evaluations         407
+    result_transfers             1
+    shape_derivative_corrections 197
+    shape_updates                197
+    telemetry_transfers          414
+    thermal_diagnostics          0
+    thermal_iterations           1,656
+    thermal_redos                13
+    thermal_steps                414
+
+  t =    0.00 s   P/P0 =  1.0000   T_fuel =  797.93 K  
+  t =   10.00 s   P/P0 =  2.8154   T_fuel =  799.26 K  #############
+  t =   20.00 s   P/P0 =  5.2251   T_fuel =  804.68 K  ##############################
+  t =   30.00 s   P/P0 =  7.0283   T_fuel =  813.87 K  ###########################################
+  t =   40.00 s   P/P0 =  7.3141   T_fuel =  824.52 K  ##############################################
+  t =   50.00 s   P/P0 =  6.5767   T_fuel =  834.14 K  ########################################
+  t =   60.00 s   P/P0 =  5.5763   T_fuel =  841.67 K  #################################
+  t =   70.00 s   P/P0 =  4.6706   T_fuel =  847.15 K  ##########################
+  t =   80.00 s   P/P0 =  3.9409   T_fuel =  850.94 K  #####################
+  t =   90.00 s   P/P0 =  3.3715   T_fuel =  853.42 K  #################
+  t =  100.00 s   P/P0 =  2.9274   T_fuel =  854.91 K  ##############
+  t =  110.00 s   P/P0 =  2.5773   T_fuel =  855.65 K  ###########
+  t =  120.00 s   P/P0 =  2.2978   T_fuel =  855.81 K  #########
+  t =  130.00 s   P/P0 =  2.0723   T_fuel =  855.54 K  ########
+  t =  140.00 s   P/P0 =  1.8888   T_fuel =  854.92 K  ######
+  t =  150.00 s   P/P0 =  1.7388   T_fuel =  854.05 K  #####
+  t =  160.00 s   P/P0 =  1.6161   T_fuel =  852.98 K  ####
+  t =  170.00 s   P/P0 =  1.5160   T_fuel =  851.77 K  ####
+  t =  180.00 s   P/P0 =  1.4350   T_fuel =  850.45 K  ###
+  t =  190.00 s   P/P0 =  1.3705   T_fuel =  849.07 K  ###
+  t =  200.00 s   P/P0 =  1.3203   T_fuel =  847.65 K  ##
+=== GARNET HP-MR IQS case guarded-0.005 finished at 2026-10-29T16:30:51+01:00 with status 0 ===

@@ -73,7 +73,7 @@ from .backend import asnumpy, device_name, get_backend, synchronize
 from .grid import Grid
 from .linalg import cocg, fgmres_c, neumann_preconditioner
 from .materials import Kinetics
-from .spn import SDPNGroupOperator, _SPN_C, _SPN_G
+from .spn import SDPNGroupOperator, _SPN_C, _SPN_G, _marshak_applies
 from .stencil import BC_VACUUM, BC_ZERO_FLUX, GroupOperator
 from .solver import DiffusionEigenSolver, SPNEigenSolver
 from .tri import (TriGrid, TriGroupOperator, TriDiffusionEigenSolver,
@@ -226,13 +226,15 @@ class NoiseSolver:
         only the operator, the moment state and the RHS distribution change. SPN
         captures the transport effects (steep gradients, strong absorbers) that
         diffusion noise misses.
-    marshak_vacuum : use the exact moment-coupled Marshak vacuum boundary on
-        vacuum faces (SPN only; the coupled -n.D grad U = (g (x) I) U condition
-        of the SPN family) instead of the per-moment Robin (alpha=1/2)
-        approximation. Diffusion's vacuum boundary already *is* the Marshak
-        condition (alpha=1/2), so the flag is inert there. Matches FEMFFUSION's
-        SPN noise boundary treatment; leaves reflective/zero-flux faces
-        unchanged.
+    marshak_vacuum : vacuum-face treatment of the SPN orders. None (default)
+        applies the exact moment-coupled Marshak condition -n.D grad U =
+        (g (x) I) U wherever it is available (Cartesian grids without a hybrid
+        mask; see spn._marshak_applies) and the per-moment Robin (alpha=1/2)
+        term elsewhere, as the SPN eigensolvers do; False selects per-moment
+        Robin everywhere, True requires Marshak. Diffusion's vacuum boundary
+        already *is* the Marshak condition (alpha=1/2), so the flag is inert
+        there. Matches FEMFFUSION's SPN noise boundary treatment; leaves
+        reflective/zero-flux faces unchanged.
     bc, device, dtype, active, mask_bc, precond_degree : as for the eigensolver.
     """
 
@@ -240,7 +242,7 @@ class NoiseSolver:
 
     def __init__(self, grid: Grid, materials, material_map=None,
                  *, kinetics: Kinetics, angular: str = "diffusion",
-                 marshak_vacuum: bool = False,
+                 marshak_vacuum: bool | None = None,
                  bc=BC_ZERO_FLUX, device: str = "auto",
                  dtype=np.float64, active=None, mask_bc=BC_VACUUM,
                  mix_material=None, mix_weight=None, precond_degree: int = 0):
@@ -261,6 +263,9 @@ class NoiseSolver:
         # the operator class and the static eigensolver differ.
         self._tri = isinstance(grid, TriGrid)
         self._op_cls = TriGroupOperator if self._tri else GroupOperator
+        if marshak_vacuum is None:
+            marshak_vacuum = self._spn and _marshak_applies(
+                grid, bc, active, mask_bc, self._op_cls)
         self.marshak_vacuum = bool(marshak_vacuum)
         self.grid = grid
         self.kinetics = kinetics

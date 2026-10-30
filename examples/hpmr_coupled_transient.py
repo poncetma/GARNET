@@ -88,13 +88,22 @@ ap.add_argument("--fallback-residual", type=float, default=None,
 ap.add_argument("--iqs-predictor-tol", type=float, default=None,
                 help="reject and halve an IQS shape interval when the corrector "
                      "disagrees with the amplitude march by this relative amount "
-                     "(guarded IQS default: 0.02, calibrated under the pre-2026-10-29 "
-                     "semantics; see docs/qa/code_audit_2026-10-28.md item O3)")
+                     "(guarded IQS default: 0.02; re-checked on the GH200 under the "
+                     "predictor-corrector IQS, where 0.01 and 0.02 never bind; see "
+                     "benchmark-results/hpmr-iqs-gh200)")
 ap.add_argument("--unguarded-iqs", action="store_true",
                 help="disable the preferred HP-MR IQS residual, fallback, and "
                      "predictor guards for fixed-cadence benchmark comparisons")
 ap.add_argument("--quiet", action="store_true")
+ap.add_argument("--json", default=None,
+                help="write the run record (arguments, power/temperature "
+                     "histories, counters and IQS shape/fallback events) here")
+ap.add_argument("--progress", default=None,
+                help="full diffusion only: append 't P/P0' after every accepted "
+                     "step, so a reference cut off by a time limit keeps its history")
 args = ap.parse_args()
+if args.progress is not None and args.quasistatic_shape_dt is not None:
+    ap.error("--progress applies to the full-diffusion reference only")
 
 guarded_iqs = (args.quasistatic_shape_dt is not None
                and args.shape_method == "iqs" and not args.unguarded_iqs)
@@ -153,10 +162,16 @@ print(f"  fuel thermal time constant rho*cp/h = {tau:.0f} s "
 
 t0 = time.perf_counter()
 if args.quasistatic_shape_dt is None:
+    on_step = None
+    if args.progress is not None:
+        progress = open(args.progress, "a", buffering=1)
+
+        def on_step(t, _flux, power, _temperature):
+            progress.write(f"{t:.6f} {float(power):.12e}\n")
     res = coupled_transient(
         ctx, t_end=args.t_end, dt=args.dt,
         dt_thermal=args.dt_thermal, problem_at=problem_at,
-        verbose=not args.quiet, profile=args.profile)
+        verbose=not args.quiet, profile=args.profile, on_step=on_step)
     mode = "full diffusion"
 else:
     res = quasistatic_coupled_transient(
@@ -219,3 +234,21 @@ for j in np.linspace(0, len(res.times) - 1, min(21, len(res.times))).astype(int)
 
 if args.groups != "11":
     print("\n(placeholder 2-group cross sections: illustrative, not predictive)")
+
+if args.json is not None:
+    import json
+
+    record = dict(args=vars(args), mode=mode, insertion=insertion, k0=res.k0,
+                  device=res.device, steps=res.steps, build_seconds=t_build,
+                  transient_seconds=wall, times=res.times, power=res.power,
+                  mean_temperature=res.mean_temperature,
+                  peak_temperature=res.peak_temperature,
+                  counters=res.counters, phase_seconds=res.phase_seconds)
+    for name in ("shape_update_times", "shape_update_reasons", "fallback_times",
+                 "predictor_disagreement_times", "predictor_disagreement",
+                 "residual_times", "shape_residual"):
+        if hasattr(res, name):
+            record[name] = getattr(res, name)
+    with open(args.json, "w") as f:
+        json.dump(record, f, indent=1,
+                  default=lambda v: v.tolist() if hasattr(v, "tolist") else str(v))

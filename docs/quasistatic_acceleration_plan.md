@@ -118,8 +118,10 @@ The detailed configuration, counters, timing, sampled reference comparison,
 and limitations are recorded in
 [`benchmark-results/hpmr-iqs-gh200`](../benchmark-results/hpmr-iqs-gh200/README.md).
 This profile was calibrated under the explicit-shape IQS that preceded the
-2026-10-29 predictor–corrector fix. Re-check it on the GH200 before relying on
-it (audit open item O3 in
+2026-10-29 predictor–corrector fix. It was re-checked on the GH200 under the
+new IQS and kept: 0.181% maximum error where the full-diffusion reference is
+reliable, against 8.2% for fixed cadence. `iqs_predictor_tol` never binds at
+0.01 or 0.02 (audit item O3 in
 [code_audit_2026-10-28.md](qa/code_audit_2026-10-28.md)).
 
 ## Predictor-corrector IQS (2026-10-29 audit fix)

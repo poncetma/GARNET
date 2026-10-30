@@ -1,0 +1,57 @@
+=== GARNET full GPU regression started at 2026-10-29T15:32:35+01:00 on gpu002 ===
+job=241680 repo=/data/scratch/shared/poncet_m/garnet-gpu-paths-stage/repo python=/data/scratch/shared/poncet_m/garnet-gh-py313-v1/bin/python test_deps=/data/scratch/shared/poncet_m/garnet-test-deps/pytest8
+preflight: pytest=8.4.2 numpy=2.3.2 scipy=1.16.3 cupy=13.6.0
+preflight: cuda_devices=1 device0=NVIDIA GH200 120GB
+preflight: TransientSolver, MultigroupStepOperator
+staged: 2026-10-29T15:15:49+01:00 by poncet_m on cn000
+source: /data/user/poncet_m/GARNET
+commit: 20967d3db1007abd53d10b56102c75c40ad8ec28 2026-10-29 11:04:07 +0100 Merge remote-tracking branch 'origin/audit-fixes'
+
+# git status --short
+ M docs/numerical_implementation_notes.md
+ M docs/qa/code_audit_2026-10-28.md
+ M docs/verification_validation.md
+ M examples/hpmr_coupled_transient.py
+ M garnet/benchmarks/hpmr_assembly.py
+ M garnet/benchmarks/lra.py
+ M garnet/transient.py
+ M slurm/run_garnet_gpu_regression.sh
+ M slurm/stage_and_submit_gpu_regression.sh
+ M tests/README.md
+ M tests/validation/test_lra2d.py
+ M tests/validation/test_vver440.py
+ M tests/verification/test_femffusion_io.py
+ M tests/verification/test_hpmr_assembly_pin_power.py
+ M tests/verification/test_sdpn_symmetric.py
+?? benchmark-results/transient-sdpn-inner-solver/
+?? slurm/run_garnet_hpmr_iqs_gh.sh
+?? slurm/stage_and_submit_hpmr_iqs_gh.sh
+?? tests/_femffusion.py
+?? tests/verification/test_gpu_paths.py
+pytest arguments: -ra -q -o addopts= -p no:cacheprovider --durations=20 --junitxml=/data/scratch/shared/poncet_m/garnet-regression-logs/gpu-paths-gh200-20261029.xml tests/verification/test_gpu_paths.py tests/verification/test_cartesian_adf.py tests/verification/test_fused_kernels.py tests/verification/test_linalg_krylov.py
+........................................................................ [ 58%]
+...................................................                      [100%]
+- generated xml file: /data/scratch/shared/poncet_m/garnet-regression-logs/gpu-paths-gh200-20261029.xml -
+============================= slowest 20 durations =============================
+4.99s call     tests/verification/test_fused_kernels.py::test_tri_sn_sweep_is_unchanged_by_the_fused_contractions[scb]
+3.28s call     tests/verification/test_fused_kernels.py::test_tri_sn_sweep_is_unchanged_by_the_fused_contractions[step]
+2.13s call     tests/verification/test_cartesian_adf.py::test_gpu_adf_fused_matches_unfused[False-float32-shape0]
+1.14s call     tests/verification/test_gpu_paths.py::test_gpu_sdp3_forward_and_adjoint_match_cpu
+0.72s call     tests/verification/test_gpu_paths.py::test_gpu_fused_sdpn_block_matches_unfused_and_cpu
+0.59s call     tests/verification/test_cartesian_adf.py::test_gpu_two_group_adf_solve_matches_cpu
+0.45s call     tests/verification/test_cartesian_adf.py::test_gpu_adf_fused_matches_unfused[False-float64-shape0]
+0.43s call     tests/verification/test_cartesian_adf.py::test_gpu_adf_fused_matches_unfused[True-float64-shape0]
+0.41s call     tests/verification/test_gpu_paths.py::test_gpu_per_material_beta_transient_matches_cpu
+0.38s call     tests/verification/test_cartesian_adf.py::test_gpu_adf_fused_matches_unfused[False-float32-shape2]
+0.33s call     tests/verification/test_fused_kernels.py::test_batched_group_loop_reproduces_the_unbatched_solve
+0.31s call     tests/verification/test_cartesian_adf.py::test_gpu_adf_fused_matches_unfused[False-float64-shape2]
+0.30s call     tests/verification/test_linalg_krylov.py::test_transient_matches_cg[gmres]
+0.28s call     tests/verification/test_fused_kernels.py::test_dsa_solver_accepts_a_host_residual[garnet.sn-SNTransportSolver-args0]
+0.24s call     tests/verification/test_linalg_krylov.py::test_transient_matches_cg[bicgstab]
+0.20s call     tests/verification/test_gpu_paths.py::test_gpu_gmres_cgs2_matches_host_mgs
+0.19s call     tests/verification/test_cartesian_adf.py::test_gpu_bernal_base_case_matches_cpu
+0.15s call     tests/verification/test_gpu_paths.py::test_gpu_pcg_graph_capture_matches_direct_iterations
+0.14s call     tests/verification/test_cartesian_adf.py::test_gpu_adf_fused_matches_unfused[True-float32-shape0]
+0.14s call     tests/verification/test_fused_kernels.py::test_cmfd_lu_solver_bridges_the_bus_on_a_device_backend
+123 passed in 18.28s
+=== GARNET full GPU regression finished at 2026-10-29T15:32:57+01:00 with status 0 ===

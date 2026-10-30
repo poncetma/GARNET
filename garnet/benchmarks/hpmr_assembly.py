@@ -114,13 +114,31 @@ PIN_XS_IDS = (803, 801, 802, 816, 815, 817)   # ordered as PIN_MATERIAL_NAMES
 _SQRT3 = math.sqrt(3.0)
 
 
-def _barycentric_samples(k):
-    """k-order barycentric sample points (u, v) inside the unit triangle."""
-    pts = []
-    for i in range(k):
-        for j in range(k - i):
-            pts.append(((i + 1.0 / 3.0) / k, (j + 1.0 / 3.0) / k))
-    return pts
+# Concentric layers of each pin kind, innermost first: (outer radius, material).
+_PIN_LAYERS = {
+    "fuel": ((R_FUEL, FUEL),),
+    "mod": ((R_MOD, MODERATOR), (R_MOD_SHELL, MOD_SHELL)),
+    "hp": ((R_HP, HEATPIPE), (R_HP_SHELL, HP_SHELL)),
+}
+
+
+def pin_layer_fractions(vertices, centre, kind):
+    """Exact fractions of a triangle's area in each layer of one pin.
+
+    Returns ``[(material, fraction), ...]`` innermost first. Each disk area is
+    the closed-form polygon/circle intersection of
+    :func:`garnet.model.annular_sector_fraction` over the full circle; annulus
+    areas are differences of nested disks.
+    """
+    from ..model import annular_sector_fraction
+
+    out, inside = [], 0.0
+    for radius, material in _PIN_LAYERS[kind]:
+        covered = annular_sector_fraction(vertices, centre, 0.0, radius,
+                                          0.0, math.pi)
+        out.append((material, max(covered - inside, 0.0)))
+        inside = covered
+    return out
 
 
 def vtb_pin_lattice(pitch=PIN_PITCH, lattice_map=VTB_LATTICE_MAP):
@@ -136,9 +154,10 @@ def vtb_pin_lattice(pitch=PIN_PITCH, lattice_map=VTB_LATTICE_MAP):
     lattice vectors used here lie at 0 and 60 degrees, which tile a flat-x one.
     Skipping the rotation leaves the cluster 27.600 cm across against a 26.752
     cm lattice pitch, so pins in neighbouring assemblies overlap -- measured at
-    0.848 cm between centres where 2.07 cm is needed. Voronoi assignment then
-    clips them and the pin volume fractions come out ~2% low, with the error
-    GROWING under refinement rather than converging.
+    0.848 cm between centres where 2.07 cm is needed. The former Voronoi
+    sample assignment clipped them and the pin volume fractions came out ~2%
+    low, with the error GROWING under refinement rather than converging; the
+    exact cell areas in :func:`build_hpmr_assembly2d` assume pins never overlap.
     """
     xy, kinds = [], []
     for j, row in enumerate(lattice_map):
@@ -165,10 +184,11 @@ class AssemblyProblem:
     pin_centres: np.ndarray         # (n_pins, 2) xy of each pin
     pin_kind: list                  # "fuel" | "mod" | "hp" per pin
     volume_fractions: dict          # achieved, by material name
+    cell_fractions: np.ndarray | None = None   # (nr, nc, 2, 6) exact area fractions
 
 
 def build_hpmr_assembly2d(refine=8, materials=None, lattice_map=None,
-                          samples=6):
+                          samples=None):
     """Pin-resolved HP-MR assembly on the periodic rhombic unit cell.
 
     refine : mesh cells per pin pitch. The triangle side is
@@ -176,6 +196,10 @@ def build_hpmr_assembly2d(refine=8, materials=None, lattice_map=None,
              cells across a fuel-compact radius. The achieved volume fractions
              (returned) are the convergence measure -- compare them against
              hpmr._ASSEMBLY_VOLUME_FRACTIONS.
+    samples : retained for compatibility and ignored. It was the order of a
+             barycentric sub-sampling lattice that used only the upright
+             sub-triangle centroids and biased the shell fractions (mod_shell
+             0.0183 against 0.0227 at refine 4); cell areas are now exact.
 
     Returns an :class:`AssemblyProblem`. Solve it with periodic BCs:
 
@@ -210,54 +234,41 @@ def build_hpmr_assembly2d(refine=8, materials=None, lattice_map=None,
     shift = 0.5 * (A1 + A2)
     cpin = centres + shift
 
-    # Sub-sample each triangle and assign every sample to its nearest pin over
-    # the 9 periodic images (a pin near an edge serves cells on the far side,
-    # which is what makes the lattice continuous). Nearest-pin is a Voronoi
-    # assignment, which also resolves the slight pin overlap noted in the module
-    # docstring without double-counting area.
-    tri_a1, tri_a2 = a1, a2
-    bary = _barycentric_samples(samples)
-    frac_counts = np.zeros((n * n * 2, len(PIN_MATERIAL_NAMES)))
-    pin_votes = np.full((n * n * 2, len(bary)), -1, dtype=np.int64)
-    kind_arr = np.array([{"fuel": 0, "mod": 1, "hp": 2}[k] for k in kinds])
+    # Exact constituent areas. Every triangle within reach of a pin image (9
+    # periodic images: a pin near an edge serves cells on the far side, which
+    # is what makes the lattice continuous) gets its covered area per pin
+    # layer in closed form. Pins never overlap, so areas add and the graphite
+    # monolith is the remainder.
+    kind_of = list(kinds)
     images = np.concatenate([cpin + di * A1 + dj * A2
                              for di in (-1, 0, 1) for dj in (-1, 0, 1)])
     img_pin = np.tile(np.arange(len(cpin)), 9)
-    try:
-        from scipy.spatial import cKDTree
-        tree = cKDTree(images)
-    except ImportError:                       # pragma: no cover
-        tree = None
-
-    for s, (u, v) in enumerate(bary):
-        # sample point inside each triangle, in the same down/up convention
-        pts = np.empty((n, n, 2, 2))
-        off = u * tri_a1 + v * tri_a2
-        pts[:, :, 0, :] = base + off
-        pts[:, :, 1, :] = base + (tri_a1 + tri_a2) - off
-        q = pts.reshape(-1, 2)
-        if tree is not None:
-            d, k = tree.query(q)
-        else:
-            dd = np.linalg.norm(q[:, None, :] - images[None, :, :], axis=2)
-            k = dd.argmin(axis=1); d = dd[np.arange(dd.shape[0]), k]
-        pin = img_pin[k]
-        kk = kind_arr[pin]
-        mat_s = np.full(q.shape[0], GRAPHITE, dtype=np.int64)
-        inpin = np.zeros(q.shape[0], bool)
-        for is_k, rin, rout, m_in, m_out in (
-                (kk == 0, R_FUEL, None, FUEL, None),
-                (kk == 1, R_MOD, R_MOD_SHELL, MODERATOR, MOD_SHELL),
-                (kk == 2, R_HP, R_HP_SHELL, HEATPIPE, HP_SHELL)):
-            sel = is_k & (d <= rin)
-            mat_s[sel] = m_in; inpin |= sel
-            if rout is not None:
-                sel = is_k & (d > rin) & (d <= rout)
-                mat_s[sel] = m_out; inpin |= sel
-        frac_counts[np.arange(q.shape[0]), mat_s] += 1.0
-        pin_votes[inpin, s] = pin[inpin]
-
-    frac_cell = frac_counts / len(bary)
+    corners = np.empty((n, n, 2, 3, 2))
+    corners[:, :, 0] = base[:, :, None, :] + np.array([np.zeros(2), a1, a2])
+    corners[:, :, 1] = base[:, :, None, :] + np.array([a1, a2, a1 + a2])
+    corners = corners.reshape(-1, 3, 2)
+    cen_flat = cen.reshape(-1, 2)
+    reach = side / _SQRT3                     # triangle circumradius
+    frac_cell = np.zeros((cen_flat.shape[0], len(PIN_MATERIAL_NAMES)))
+    covered_by = np.zeros(cen_flat.shape[0])
+    pin_of = np.full(cen_flat.shape[0], -1, dtype=np.int64)
+    for c, pin in zip(images, img_pin):
+        layers = _PIN_LAYERS[kind_of[pin]]
+        d = np.hypot(cen_flat[:, 0] - c[0], cen_flat[:, 1] - c[1])
+        for cell in np.flatnonzero(d < layers[-1][0] + reach):
+            if d[cell] + reach <= layers[0][0]:          # wholly inside the core
+                parts = [(layers[0][1], 1.0)]
+            else:
+                parts = pin_layer_fractions(corners[cell], c, kind_of[pin])
+            covered = 0.0
+            for material, f in parts:
+                frac_cell[cell, material] += f
+                covered += f
+            # A cell's pin ownership is the pin covering most of it.
+            if covered > covered_by[cell]:
+                covered_by[cell], pin_of[cell] = covered, pin
+    frac_cell[:, GRAPHITE] = 1.0 - frac_cell.sum(axis=1)
+    frac_cell[frac_cell < 1e-12] = 0.0        # round-off, not a constituent
     order = np.argsort(-frac_cell, axis=1)
     base_mat = order[:, 0]
     second = order[:, 1]
@@ -270,17 +281,12 @@ def build_hpmr_assembly2d(refine=8, materials=None, lattice_map=None,
     mix_material = np.where(w2 > 0.0, second, -1).astype(np.int64).reshape(n, n, 2)
     mix_weight = np.where(w2 > 0.0, w2, 0.0).reshape(n, n, 2)
 
-    # A cell's pin ownership is the pin most of its in-pin samples voted for.
-    pin_of = np.full(n * n * 2, -1, dtype=np.int64)
-    for c in range(pin_votes.shape[0]):
-        v = pin_votes[c][pin_votes[c] >= 0]
-        if v.size:
-            pin_of[c] = np.bincount(v).argmax()
-
     material_map = base_mat.reshape(n, n, 2)
     pin_index = pin_of.reshape(n, n, 2)
     # Achieved fractions from the MIXED representation, which is what the solver
-    # actually sees: (1-w) to the base material and w to the partner.
+    # actually sees: (1-w) to the base material and w to the partner. A cell
+    # with three constituents (core, shell and graphite) loses its smallest one
+    # to the base material, so these differ from the exact cell_fractions.
     frac = {}
     tot = frac_cell.shape[0]
     mw_f, mm_f = mix_weight.reshape(-1), mix_material.reshape(-1)
@@ -295,7 +301,8 @@ def build_hpmr_assembly2d(refine=8, materials=None, lattice_map=None,
                            materials=materials, mix_material=mix_material,
                            mix_weight=mix_weight, pin_index=pin_index,
                            pin_centres=cpin, pin_kind=kinds,
-                           volume_fractions=frac)
+                           volume_fractions=frac,
+                           cell_fractions=frac_cell.reshape(n, n, 2, -1))
 
 
 def pin_materials_builtin():

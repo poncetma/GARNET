@@ -1,0 +1,19 @@
+  outer    1  k = 0.74650477  dk = 2.53e-01  src_err = 1.64e-01
+  outer    2  k = 0.76723178  dk = 2.07e-02  src_err = 9.53e-02
+  outer    3  k = 0.77832008  dk = 1.11e-02  src_err = 6.53e-02
+  outer    4  k = 0.79666448  dk = 1.83e-02  src_err = 2.09e-02
+  outer    5  k = 0.79952584  dk = 2.86e-03  src_err = 6.67e-03
+  outer    6  k = 0.80173018  dk = 2.20e-03  src_err = 2.09e-03
+  outer    7  k = 0.80088626  dk = 8.44e-04  src_err = 9.32e-04
+  outer    8  k = 0.80129880  dk = 4.13e-04  src_err = 4.08e-04
+  outer    9  k = 0.80111233  dk = 1.86e-04  src_err = 1.96e-04
+  outer   10  k = 0.80117951  dk = 6.72e-05  src_err = 2.65e-05
+  outer   11  k = 0.80116898  dk = 1.05e-05  src_err = 1.87e-05
+  outer   12  k = 0.80117438  dk = 5.40e-06  src_err = 2.06e-06
+  outer   13  k = 0.80117450  dk = 1.18e-07  src_err = 4.71e-07
+  outer   14  k = 0.80117449  dk = 8.70e-09  src_err = 1.45e-07
+  outer   15  k = 0.80117449  dk = 1.92e-09  src_err = 2.70e-08
+  outer   16  k = 0.80117449  dk = 1.45e-10  src_err = 4.24e-09
+  outer   17  k = 0.80117449  dk = 6.38e-10  src_err = 1.48e-09
+  outer   18  k = 0.80117449  dk = 1.27e-11  src_err = 3.97e-10
+RESULT bl SDP1-SDPN robin     mesh  160  k=0.801174494  dk=  -418.6 pcm  conv=True  outers=  18  inners=   3227  t=    3.05s

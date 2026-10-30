@@ -14,20 +14,36 @@ thermal coupling, SPH and readers, the `Model` API and non-Cartesian meshes)
 fixed 4 critical and 13 high-severity defects plus many smaller ones. The
 [audit note](qa/code_audit_2026-10-28.md) lists each finding and fix, the
 results that moved, and the open items: the BDF3–6 fixed-step order cap,
-the LRA adaptive temperature predictor, re-checking the GH200 IQS guard
-settings, unexecuted GPU-only paths, SPH D-scaling normalization, HP-MR
-assembly pin sampling, the transient SDPN inner-solver default, and the
-skipped external-file tests (the Brantley–Larsen SP3 offset, O8, is resolved
-as mesh error), plus a development item (O10) to review the Brantley–Larsen
-cases and prepare a dedicated V&V report for them. The 17 new
+SPH D-scaling normalization, the change-only stopping test of the SDP1,
+SDPN and S_N transients (O13), and the GMRES solve of non-symmetric SDPN
+blocks on very large meshes (O14). Resolved since: the SPN/SDPN V&V report
+against Carreño et al. (2024), Brantley–Larsen and C5G7
+([report](../benchmark-results/carreno2024-sdpn-vv/carreno2024-sdpn-vv.pdf), O10), the diffusion transient step, which could accept slow
+steps unsolved (O12), the GH200 IQS guard settings, re-checked and kept (O3), the GPU-only paths,
+now executed on a GH200 together with the full suite (O4), the Brantley–Larsen SP3 offset (O8, mesh error), the LRA adaptive
+temperature predictor (O2; no result moved), the unit-mixed adaptive BDF
+error norm (O11; blockwise is now the default), exact HP-MR assembly pin fractions (O6), the transient SDPN
+inner-solver default (O7, BiCGStab kept on measurement; `linear_solver`
+added) and the external-file tests, which now find a FEMFFUSION checkout and
+run (O9). The 17 new
 regression modules (231 cases, about 26 s on CPU) and the extended existing
 modules are mapped to their features in the tables below.
 
 The fixes were verified with targeted test runs. The last full regular-suite
 CPU run, made after the first batch of fixes, gave **1039 passed, 26 skipped,
-6 xfailed**; those six expected failures have since been resolved. The full
-suite was not rerun after the second batch of fixes, and no GPU was
-available. The full-suite records in the sections below predate the audit.
+6 xfailed**; those six expected failures have since been resolved.
+
+On 2026-10-30, after the O12 fix, the regular CPU suite gave **1258 passed,
+24 skipped** on merlin7 `cn000`, plus one failure in a test that relied on
+unsolved steps; that test was then given a tight steady state and its module
+passes. After O10 and the Marshak vacuum default, the same suite gave **1275 passed, 24 skipped**; the new
+slow Brantley–Larsen and C5G7 tests pass when selected with `-m slow`. One test,
+`test_cross_example_import_works_from_documented_entry_point`, fails
+intermittently there: it allows 10 s for an example's cold `--help`, which
+takes 8–11 s on that shared node. The full suite including slow tests gave
+**1283 passed, 4 skipped, 0 failed** on a GH200
+([record](../benchmark-results/gpu-paths-gh200/)). The full-suite records in
+the sections below predate the audit.
 
 Recorded values moved by the fixes:
 
@@ -41,6 +57,9 @@ Recorded values moved by the fixes:
 | HP-MR locally refined mesh `k` error | about −10 pcm → +3 to +10 pcm |
 | HP-MR drum ramp, IQS maximum power error | 1.52% → 0.46% (predictor–corrector IQS) |
 | Adaptive LRA-2D BDF2 P(3 s) | −3.6e-5 relative; TWIGL and fixed-step LRA bit-identical |
+| Adaptive LRA-2D (refine 1), BDF2 rtol 1e-3 | blockwise error norm: 453 → 539 steps, peak power error −1.23e-2 → −5.7e-3, P(3 s) unchanged (O11) |
+| HP-MR periodic assembly S_N `k∞` | 1.24523 → 1.20632 at refine 4, 1.18232 → 1.18414 at refine 8 (exact pin fractions, O6) |
+| SP5/SP7/SDP2/SDP3 `k` with vacuum faces | coupled Marshak vacuum now the default: Brantley–Larsen +53 pcm, BIBLIS +0.9 pcm (per-moment Robin kept as `marshak_vacuum=False`) |
 
 Three test limits changed: VVER-440 from 600 to 250 pcm, TWIGL model-API
 power samples from `0.02` to `0.005`, and the SPH leaky-colorset ratio from
@@ -295,7 +314,7 @@ also converged on CPU and returned the documented `(2, 24, 24, 24)` flux shape.
 | Cylindrical r-z diffusion | Bare-cylinder Bessel-mode eigenvalue: finest-mesh absolute error below `5e-6`; successive errors decrease by about four. Changing the boundary specification at the zero-area axis leaves the answer unchanged within `1e-12`. A scalar `bc` acts only on the wall and end caps: default, scalar and explicit specifications agree within `1e-12`. | [Cylindrical tests](../tests/verification/test_cylindrical.py) |
 | Triangular and prismatic geometry | Reflective tri-prisms recover infinite-medium `k` within `1e-9`; axial slab errors decrease by `4 ± 0.3` under refinement. Reflective extrusion of VVER-440 preserves its 2-D eigenvalue within `1e-7`. Without an active mask, outer in-plane edges take `bc` and match a void-padded core within `1e-8`; masking off top layers matches the shorter core. The discontinuity-factor adjoint matches the dense left eigenvector. 3-D prismatic fluxes give pin powers per layer, at one layer, or axially integrated. | [Tri-prisms](../tests/verification/test_tri_prisms.py), [triangular SP3](../tests/verification/test_tri_sp3.py), [hexagonal geometry](../tests/verification/test_hex_lattice.py), [tri/hex boundaries](../tests/verification/test_tri_boundaries.py), [3-D pin power](../tests/verification/test_pin_power_3d.py) |
 | Unstructured diffusion | Compare structured and unstructured finite volumes on matching meshes; check reflective limits, boundary treatments and general (not only 2:1) hanging nodes. With the non-orthogonal correction, skewed diagonal-cut triangles converge at second order (error ratio above 2.5 per halving, below 100 pcm at n = 32) and jittered meshes reach below 10 pcm at n = 64; uncorrected two-point flux is shown to be inconsistent. The Gmsh 2.x reader accepts any tag count and non-contiguous node ids and refuses MSH 4, binary and higher-order files. The full-core 3-D HP-MR comparison is a separate slow test. | [Mesh verification](../tests/verification/test_unstructured_mesh.py), [skewed meshes](../tests/verification/test_mesh_skewed.py), [Gmsh reader](../tests/verification/test_mesh_gmsh.py), [local refinement](../tests/validation/test_local_refine.py), [3-D HP-MR comparison](../tests/validation/test_hpmr_3d_mesh.py) |
-| SPN and SDPN | SP3 analytic eigenvalues and second-order refinement; independent angular-coefficient derivation; symmetry and transformed-operator equivalence. Coupled Marshak SP3/SDP1 eigenvalues extrapolate to the Brantley–Larsen literature values within `1e-4`; on the 80×80 mesh every method is within 150 pcm of the paper. The dedicated SP3 block applies the coupled Marshak vacuum by default and matches the U-form SP3 within `1e-6`; with an active mask the term sits on core/void faces (embedded box = bare box within `1e-8`). | [SP3 analytics](../tests/verification/test_sp3_analytic.py), [SDPN derivation](../tests/verification/test_sdpn_derivation.py), [operator symmetry](../tests/verification/test_sdpn_symmetric.py), [Marshak boundary](../tests/verification/test_spn_marshak.py), [Brantley–Larsen](../tests/validation/test_brantley_larsen_2d.py) |
+| SPN and SDPN | SP3 analytic eigenvalues and second-order refinement; independent angular-coefficient derivation; symmetry and transformed-operator equivalence. With the coupled Marshak vacuum every method's Brantley–Larsen mesh limit matches Carreño et al. (2024) Table 6 within 4 pcm (SDP3 with the authors' FEMFFUSION tables; garnet's re-derived SDP3 sits 10 pcm below, by design); on the 80×80 mesh every method is within 150 pcm of the paper. Full study: the [V&V report](../benchmark-results/carreno2024-sdpn-vv/carreno2024-sdpn-vv.pdf). Every SPN/SDPN solver except the dedicated SDP1 applies the coupled Marshak vacuum by default where it is available, and the per-moment Robin term with `marshak_vacuum=False`; the dedicated SP3 block matches the U-form SP3 within `1e-6`; with an active mask the term sits on core/void faces (embedded box = bare box within `1e-8`). | [SP3 analytics](../tests/verification/test_sp3_analytic.py), [SDPN derivation](../tests/verification/test_sdpn_derivation.py), [operator symmetry](../tests/verification/test_sdpn_symmetric.py), [Marshak boundary](../tests/verification/test_spn_marshak.py), [Brantley–Larsen](../tests/validation/test_brantley_larsen_2d.py) |
 | Adjoint and perturbation theory | Forward and adjoint eigenvalues agree within `1e-7`. The adjoint-weighted absorption perturbation predicts a separately re-solved reactivity change within 2%. This also checks the importance flux. SP3/SPN/SDPN adjoints match an independently assembled dense transpose (Cartesian and r-z): `k` within relative `1e-9`, importance within `1e-7`. The r-z divergence-form adjoint equals the radius-scaled symmetric one. First-order reactivity is volume-weighted on r-z (zero perturbation below `1e-9`) and rejects block solvers. | [Adjoint](../tests/verification/test_adjoint.py), [SDPN adjoint](../tests/verification/test_sdpn_adjoint.py), [perturbations](../tests/verification/test_perturbation.py) |
 | SPH and homogenization | Reaction-rate preservation, material consistency, and preservation of fission-energy coefficients. On a leaky colorset the SPH eigenvalue error must be below 0.3 of the homogenized error (see the audit section above). Per-cell and r-z volumes are honoured; empty regions and unknown `d_scaling` values are rejected. Slow HP-MR checks require corrected diffusion to recover each selected transport-family reference within 15 pcm. | [SPH verification](../tests/verification/test_sph.py), [κΣf consistency](../tests/verification/test_kappa_consistency.py), [HP-MR SPH](../tests/validation/test_hpmr_sph.py), [reference families](../tests/validation/test_hpmr_sph_reference_families.py) |
 | Cross-section input | Griffin material balances and conventions; FEMFFUSION files compared with independent benchmark transcriptions, including scattering direction and upscatter. Missing required Griffin tags raise an error; `.xsec` `PLANE` headers give per-plane maps, and Σf is stored as κΣf. | [Griffin readers](../tests/verification/test_griffin_xs.py), [FEMFFUSION readers](../tests/verification/test_femffusion_io.py) |
@@ -316,13 +335,13 @@ physical behavior. They should be read with their modeling assumptions.
 
 | Benchmark | What is compared | Evidence and scope |
 |---|---|---|
-| OECD/NEA C5G7, 2-D | Seven-group eigenvalue, geometry, homogenization, and SPN/SDPN hierarchy against the transport reference `k = 1.18655`. | [Tests](../tests/validation/test_c5g7.py). Pin-cell-homogenized calculations: the coarse diffusion test allows 2% relative error; the angular-family comparison allows 0.5%. This is not a pin-resolved transport validation. |
+| OECD/NEA C5G7, 2-D | Seven-group eigenvalue, geometry, homogenization, and SPN/SDPN hierarchy against the transport reference `k = 1.18655`. | [Tests](../tests/validation/test_c5g7.py). Pin-cell-homogenized calculations: the coarse diffusion test allows 2% relative error; the angular-family comparison allows 0.5%. Their closeness to the reference is a cancellation of homogenization and mesh errors, so they guard the hierarchy's ordering only. A slow pin-resolved test (exact pin areas, vacuum) checks diffusion against Carreño et al. (2024): `k` within 10 pcm and pin-power AVG against the NEA MCNP pin powers within 0.06 points. The pin-resolved study of every method is in the [V&V report](../benchmark-results/carreno2024-sdpn-vv/carreno2024-sdpn-vv.pdf). |
 | BIBLIS and IAEA-3D | Eigenvalues, active masks, material symmetry, and Robin/albedo boundaries. | [Tests](../tests/validation/test_biblis_iaea.py). BIBLIS uses a coarse-mesh envelope; IAEA-3D checks absolute eigenvalue error below `1e-3` against `1.02903`. |
 | VVER-440 | Body-fitted triangular geometry, 60° rotational symmetry of the placed assembly map, eigenvalue, and a bulk transient; optional unstructured solve on the FEMFFUSION mesh. | [Tests](../tests/validation/test_vver440.py). The coarsest triangular test allows `2.5e-3` absolute eigenvalue error, about twice its −111 pcm discretization error (−14 pcm at refine 8). The external-mesh comparison allows `1e-3`; it skips without the external mesh and was not rerun after the audit. |
 | TWIGL step and ramp | Static eigenvalue, transient power samples, and the public Model API. | [Model tests](../tests/validation/test_model_twigl.py), [solver tests](../tests/validation/test_twigl_langenbuch.py), [worked example](model_api.md#worked-example-the-twigl-benchmark-validated-against-literature). Fine static `k` is within `1e-4` of `0.91321`; API transient samples are within `0.005` in normalized power, the rounding of the published values (measured within 0.0013). |
 | Langenbuch/LMW | Three-dimensional moving rod-bank maps and transient peak/decline. | [Tests](../tests/validation/test_twigl_langenbuch.py). A coarse regression with a peak-power envelope, rather than a fine convergence study. |
 | ANL-7416 8-A1 | Cylindrical static and transient results, including alternative Krylov solvers and divergence-form operators. | [Tests](../tests/validation/test_anl7416_8a1.py). Early power samples allow 3%; later published traces use a wider envelope, with an independent 4 s comparison. |
-| LRA-2D with thermal feedback | Original ANL specification, reflector-data audit, static mesh convergence, power/temperature histories, adaptive BDF, and matched-error work. | [Tests](../tests/validation/test_lra2d.py), [study and data](../benchmark-results/lra2d-adaptive-bdf-report/), [PDF](../benchmark-results/lra2d-adaptive-bdf-report/adaptive-bdf-lra-benchmark.pdf). The archived 3.75 cm run reports first-peak power 3.48% above the original reference; finer-mesh and feedback-zone effects are documented. |
+| LRA-2D with thermal feedback | Original ANL specification, reflector-data audit, static mesh convergence, power/temperature histories, adaptive BDF (including the explicit-Euler thermal startup prediction at the 2 s restart), and matched-error work. | [Tests](../tests/validation/test_lra2d.py), [study and data](../benchmark-results/lra2d-adaptive-bdf-report/), [PDF](../benchmark-results/lra2d-adaptive-bdf-report/adaptive-bdf-lra-benchmark.pdf). The archived 3.75 cm run reports first-peak power 3.48% above the original reference; finer-mesh and feedback-zone effects are documented. |
 | HP-MR | Assembly counts, symmetry, absorber volume mixing, drum-worth ordering, mesh stability, 3-D extrusion, and SPH reference recovery. | [Geometry and worth tests](../tests/validation/test_hpmr.py), [SPH study tests](../tests/validation/test_hpmr_sph_reference_families.py), [drum absorber areas](../tests/verification/test_drum_absorber.py). Absorber areas match the analytic annular sectors to relative `1e-12`. The default two-group data are placeholders. Checks against GARNET transport references establish numerical consistency, not independent validation of a physical microreactor. |
 
 ## Thermal and coupling checks
@@ -370,7 +389,7 @@ execution, memory use, and performance need hardware measurements as well.
 
 | Study | Recorded result | Scope |
 |---|---|---|
-| [Guarded IQS on GH200](../benchmark-results/hpmr-iqs-gh200/) | Maximum sampled power error of 0.173%, versus 5.708% for fixed-cadence IQS. The guarded 200 s run made 131 shape updates and two full-diffusion fallbacks. | 105,600 active cells, 11 groups, 20 axial layers. Accuracy was compared every 10 s through 110 s, where the full-diffusion reference ends. [Machine-readable record](../benchmark-results/hpmr-iqs-gh200/adaptive-fallback-r4-nz20.json). Recorded with the explicit-shape IQS that preceded the October 2026 audit; its guard settings need re-checking (open item O3). |
+| [Guarded IQS on GH200](../benchmark-results/hpmr-iqs-gh200/) | Re-check, 2026-10-29, predictor–corrector IQS, +0.309 $: maximum power error 0.181% at every step where the reference is reliable, versus 8.155% for fixed-cadence IQS. The run made 163 shape solves, 46 adjoints and 12 fallbacks, at 2.0× the fixed-cadence time. August 2026 calibration, explicit-shape IQS, +0.248 $: 0.173% versus 5.708% at 10 s samples through 110 s. | 105,600 active cells, 11 groups, 20 axial layers. The re-check's full-diffusion reference runs to 200 s but stalls in 31–50 s and 165–200 s, where it is good to only about 0.4% and 0.1% (audit O12, fixed after these runs); those windows are excluded. `iqs_predictor_tol` 0.01 and 0.02 give bitwise-identical runs. [Re-check records](../benchmark-results/hpmr-iqs-gh200/recheck-20261029/), [August record](../benchmark-results/hpmr-iqs-gh200/adaptive-fallback-r4-nz20.json). |
 | [LRA adaptive-BDF study](../benchmark-results/lra2d-adaptive-bdf-report/) | Temporal/spatial convergence, controller histories, and a 5.18× CPU speedup over adaptive backward Euler at matched error. | An LRA-specific result. The report also records a coupled 11-group HP-MR case where BDF did not outperform matched adaptive backward Euler. |
 | [T4 3-D adaptive/monolithic study](../benchmark-results/transient-acceleration/step-08a-adaptive-bdf-gpu-readiness.md) | Accuracy, energy-group batching, persistent Krylov memory, state-update microbenchmarks, and repeated timing comparisons. | Quick case: 13,200 active cells and 145,200 flux unknowns. Larger production and reference-convergence checks remain pending. |
 | [Energy-sweep acceleration study](../benchmark-results/transient-acceleration/step-10a-energy-sweep-anderson.md) | CPU and T4 configurations were evaluated separately; the T4 fixed-polynomial configuration gave a 1.101× median gain over the plain configuration. | Three interleaved T4 samples. Tolerance-based energy Anderson was rejected on T4 despite its CPU benefit. |
@@ -406,9 +425,11 @@ python -m pytest tests -o addopts= -ra # all cases, including slow
 ```
 
 The default marker selection is defined in [pyproject.toml](../pyproject.toml).
-`FEMFFUSION_DIR` must point to reference inputs with an `examples/` directory
-for the file-reader tests. Some mesh tests use a separate fixed external path;
-inspect the skip reasons with `-ra`. The FEMFFUSION noise comparison embeds
+The FEMFFUSION file-reader tests and the VVER-440 Gmsh-mesh tests read
+reference inputs from a FEMFFUSION checkout: `$FEMFFUSION_DIR` if set, else a
+`FEMFFUSION` directory next to this repository, else `~/FEMFFUSION`
+([tests/_femffusion.py](../tests/_femffusion.py)). Each test skips, naming the
+missing file, when its input is absent; inspect skip reasons with `-ra`. The FEMFFUSION noise comparison embeds
 its reference and does not require a live FEMFFUSION solver.
 
 Install the CUDA extra and use actual GPU hardware for CUDA-only kernel tests.
