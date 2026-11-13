@@ -1,0 +1,63 @@
+
+=== A. Rebuilt sph_gauge.py: leaky colorset, unequal regions, method='hybr' ===
+SP3 (Robin vacuum) k_ref = 1.0992249; flux-volume homogenized +885.0 pcm
+D_SCALING       sum k   volume k   spread   sum err   vol err  scipy success  rate err (sum/vol)
+inverse     1.1228525  1.1193008     355p    +2363p    +2008p  False/False  1.0e-12/1.5e-12
+direct      1.1159805  1.1157147      27p    +1676p    +1649p  True/False  2.1e-14/4.2e-11
+
+=== B. Gauge check on REFLECTIVE generation geometries ===
+
+[fine mesh] reflective colorset: k_ref = 1.2145101, homogenized -30.9 pcm
+  D       normalization    conv    k err  rate err   g0 x1.3  all x1.3  mu (fast,thermal) per region
+  D/mu    joint sum        False  +19.8p   1.5e-03  +854.49p  +854.49p  (0.8193,2397268392034059017261200337299794209711074112962560.0000) (0.5309,227520116049710386375868768430984107654949896192.0000) (1.1377,38238627881916612175565155288547978616409948160.0000)
+  D/mu    joint volume     False   +0.0p   1.1e-10  +829.23p  +957.19p  (0.8843,0.8438) (0.6030,0.5889) (1.3145,1.2186)
+  D/mu    per-group FV     False   +0.0p   1.9e-10  +830.34p  +949.02p  (0.8787,0.8789) (0.5953,0.6197) (1.2955,1.2833)
+  mu*D    joint sum        True    -0.0p   1.3e-11    +0.00p    -0.00p  (0.6710,3.7400) (0.6601,3.7581) (1.6540,8.9438)
+  mu*D    joint volume     False   -0.0p   1.0e-11    +0.00p    -0.00p  (1.1670,0.2512) (1.1481,0.2524) (2.8767,0.6008)
+  mu*D    per-group FV     True    -0.0p   2.1e-12    -0.00p    +0.00p  (0.7042,0.7087) (0.6928,0.7121) (1.7359,1.6947)
+
+[coarse mesh] reflective colorset: k_ref = 1.2145101, homogenized +105.5 pcm
+  D       normalization    conv    k err  rate err   g0 x1.3  all x1.3  mu (fast,thermal) per region
+  D/mu    joint sum        False  +16.1p   1.2e-03  +921.15p  +932.71p  (0.8303,2.9710) (0.5645,6.8590) (1.1988,13.8493)
+  D/mu    joint volume     False   +0.0p   1.7e-12  +830.68p  +902.45p  (0.8329,1.1985) (0.5455,1.2643) (1.1555,2.5851)
+  D/mu    per-group FV     True    +0.0p   1.5e-11  +858.66p  +978.99p  (0.8720,0.8774) (0.6070,0.6284) (1.2987,1.2795)
+  mu*D    joint sum        False   -0.0p   1.3e-11    +0.00p    -0.00p  (1.3057,0.2760) (1.3651,0.2844) (3.2319,0.6397)
+  mu*D    joint volume     False   -0.0p   8.2e-12    -0.00p    +0.00p  (1.4068,0.2153) (1.4708,0.2218) (3.4824,0.4990)
+  mu*D    per-group FV     True    -0.0p   2.7e-10    +0.00p    -0.00p  (0.6984,0.7132) (0.7302,0.7347) (1.7287,1.6529)
+
+=== C. VACUUM generation geometry: standard and fixed-k formulations ===
+
+[fine mesh] k_ref = 1.0992249, homogenized +885.0 pcm
+  D       formulation            conv     k err  rate err   g0 x1.3  mu (fast,thermal) per region
+  D/mu    joint sum (default)    False +2362.8p   1.0e-12 +2236.26p  (1.0862,0.8513) (0.9067,0.6591) (1.2300,0.8610)
+  D/mu    per-group FV           False +1832.2p   8.1e-04 +2390.59p  (1.0038,1.0162) (0.7789,0.8101) (1.0892,1.0659)
+  D/mu    fixed k, no norm.      True     +0.0p   1.1e-11 +2680.93p  (0.8583,0.8847) (0.5904,0.6255) (0.8708,0.8741)
+  mu*D    joint sum (default)    True  +1675.6p   2.1e-14  +275.93p  (1.2196,0.5446) (1.0397,0.4537) (1.5153,0.6198)
+  mu*D    per-group FV           False +1518.2p   6.4e-04  +237.86p  (0.9446,0.9558) (0.7799,0.8057) (1.1432,1.1196)
+  mu*D    fixed k, no norm.      False  +873.2p   1.5e-03   +22.45p  (0.0733,0.0109) (0.0530,0.0088) (0.0792,0.0136)
+
+[coarse mesh] k_ref = 1.0992249, homogenized +1155.8 pcm
+  D       formulation            conv     k err  rate err   g0 x1.3  mu (fast,thermal) per region
+  D/mu    joint sum (default)    True  +2325.5p   2.8e-16 +2319.90p  (1.0740,0.8008) (0.9745,0.6060) (1.2413,0.7937)
+  D/mu    per-group FV           True  +1801.9p   1.2e-03 +2487.51p  (0.9888,0.9899) (0.8101,0.8481) (1.0843,1.0669)
+  D/mu    fixed k, no norm.      True     -0.0p   2.2e-15 +2689.70p  (0.8555,0.8046) (0.6132,0.5771) (0.8783,0.7943)
+  mu*D    joint sum (default)    False +2398.6p   1.6e-14  +438.69p  (2.3792,0.2508) (2.4859,0.2357) (3.3276,0.2946)
+  mu*D    per-group FV           True  +1579.5p   1.1e-03  +244.50p  (0.9211,0.9126) (0.8170,0.8470) (1.1453,1.1391)
+  mu*D    fixed k, no norm.      False  +913.2p   1.7e-03    +9.72p  (0.0310,0.0027) (0.0239,0.0025) (0.0341,0.0040)
+
+=== D. Workflow (b): generate on reflective colorset, apply to vacuum colorset, coarse mesh ===
+vacuum reference k = 1.0992249; region power [0.376 0.124 0.5  ]
+  no SPH (reflective-lattice XS)         k err +2799.4p  max power err 20.07%
+  D/mu   joint sum                       conv=False k err +5085.5p  max power err 50.03%
+  D/mu   joint volume                    conv=False k err +4706.6p  max power err 47.43%
+  D/mu   per-group FV                    conv=True  k err +5328.3p  max power err 53.53%
+         spread of transferred k over normalizations: 621.7 pcm
+  mu*D   joint sum                       conv=False k err +5165.9p  max power err 64.24%
+  mu*D   joint volume                    conv=False k err +5239.4p  max power err 64.17%
+  mu*D   per-group FV                    conv=True  k err +4624.8p  max power err 64.28%
+         spread of transferred k over normalizations: 614.6 pcm
+
+=== E. Generation time on the reflective colorset (two-group speeds 1e7, 3e5 cm/s) ===
+  fine heterogeneous diffusion: Lambda = 2.0774e-05 s
+  mu*D  coarse SPH (conv=True): with v 2.5066e-05 (+20.66%) | with v/mu 2.0817e-05 (+0.21%)
+  D/mu  coarse SPH (conv=True): with v 2.1601e-05 (+3.98%) | with v/mu 2.0848e-05 (+0.35%)

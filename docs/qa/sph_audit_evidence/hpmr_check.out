@@ -1,0 +1,30 @@
+HP-MR 2D refine=4 angle=0.0: cells=11250, R=6 regions (one per material), G=2
+k_ref(TriSP3) = 1.0106653 (0 s)   k_diff = 1.0100447 (-62.1 pcm)
+region volumes: [38543. 18594.   620.  7437.  7205.   232.]
+reference region flux (R,G):
+ [[-2.2248e-18  7.2974e-21]
+ [ 1.0161e+02  2.6863e+01]
+ [ 7.5717e+01  1.2974e+02]
+ [ 2.6770e+00  1.8041e+01]
+ [ 6.5832e+00  2.8929e+01]
+ [ 2.2310e+01  1.7863e+00]]
+
+--- D_SCALING = 'inverse': conv=True its=40 (5 s)  k_sph = 1.0106883 (+2.3 pcm vs SP3)
+    self-consistency: absorption 3.3e-09, production 1.3e-09 (max rel err of normalized region rates)
+    gauge: group-0 x1.3 -> dk = +941.7 pcm; all x1.3 -> dk = +1079.8 pcm
+    mu[void          ] = [1. 1.]
+    mu[fuel          ] = [1.0287 0.8992]
+    mu[central       ] = [0.9955 1.0124]
+    mu[be_reflector  ] = [0.9991 1.0052]
+    mu[drum_be       ] = [0.9756 0.9951]
+    mu[drum_absorber ] = [0.9379 1.5268]
+
+--- D_SCALING = 'direct': conv=True its=44 (5 s)  k_sph = 1.0106993 (+3.4 pcm vs SP3)
+    self-consistency: absorption 1.3e-09, production 5.2e-10 (max rel err of normalized region rates)
+    gauge: group-0 x1.3 -> dk = +0.1 pcm; all x1.3 -> dk = +3.7 pcm
+    mu[void          ] = [1. 1.]
+    mu[fuel          ] = [1.0922 0.8988]
+    mu[central       ] = [1.0326 0.9587]
+    mu[be_reflector  ] = [1.0208 0.9665]
+    mu[drum_be       ] = [1.0326 0.9632]
+    mu[drum_absorber ] = [0.9883 0.7422]
