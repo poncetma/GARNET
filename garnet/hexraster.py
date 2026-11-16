@@ -88,6 +88,41 @@ class TriRaster:
         return self.cell_vertices(a, b, t).mean(axis=0)
 
 
+def cell_sites(raster: TriRaster, pitch: float):
+    """Hex site (R, C) of every cell of a raster, as two (nrows, ncols, 2) int
+    arrays.
+
+    The site is the one whose hexagon contains the cell centroid, found by the
+    same cube-coordinate rounding :func:`rasterize_hex_sites` uses, so it is
+    the site that cell was painted from. Cells of the void border map to the
+    sites beyond the core; mask them with ``material_map > 0``. This is what
+    lets two rasters of the same core at different ``refine`` share one
+    numbering of assemblies (e.g. SPH zones on a reference and a node mesh).
+    """
+    from .pin_power import tri_cell_centroids
+
+    return point_sites(tri_cell_centroids(raster), pitch)
+
+
+def point_sites(xy, pitch: float):
+    """Hex site (R, C) containing each point, as two int arrays of the points'
+    leading shape (``xy`` has shape (..., 2)). Vectorized :func:`hex_round`;
+    for the centroids of any mesh of the core, e.g. a locally refined one."""
+    cen = np.asarray(xy, dtype=float)
+    rf = cen[..., 1] / (pitch * _SQRT3 / 2.0)
+    x = cen[..., 0] / pitch - rf / 2.0          # axial C
+    z = rf                                      # axial R
+    y = -x - z
+    rx, ry, rz = np.rint(x), np.rint(y), np.rint(z)   # half to even, as round()
+    dx, dy, dz = np.abs(rx - x), np.abs(ry - y), np.abs(rz - z)
+    fix_x = (dx > dy) & (dx > dz)
+    fix_y = ~fix_x & (dy > dz)
+    rx = np.where(fix_x, -ry - rz, rx)
+    ry = np.where(fix_y, -rx - rz, ry)
+    rz = np.where(~fix_x & ~fix_y, -rx - ry, rz)
+    return rz.astype(np.int64), rx.astype(np.int64)
+
+
 def rasterize_hex_sites(site_material: dict, pitch: float, refine: int,
                         paint=None) -> TriRaster:
     """Rasterize {(R, C): material_id} onto the triangular lattice.

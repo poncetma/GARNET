@@ -77,3 +77,68 @@ def test_local_refine_gives_negative_drum_worth():
     k_in, k_out = k(0.0), k(180.0)
     assert k_out > k_in                             # arcs toward core remove reactivity
     assert (1 / k_in - 1 / k_out) * 1e5 > 500       # worth, positive by insertion
+
+
+# --- volume-mixed arc, deeper refinement, and SPH zones on the refined mesh ---
+
+def test_polar_refined_mesh_carries_the_exact_absorber_area():
+    import math
+    from garnet.benchmarks.hpmr import (DRUM_ABSORBER_INNER, DRUM_ARC_HALF_DEG,
+                                        DRUM_RADIUS, hpmr_locally_refined_problem)
+    sector = math.radians(DRUM_ARC_HALF_DEG) * (DRUM_RADIUS ** 2 - DRUM_ABSORBER_INNER ** 2)
+    for refine, levels, angle in ((3, 1, 0.0), (4, 2, 37.0)):
+        p = hpmr_locally_refined_problem(refine=refine, drum_angle_deg=angle,
+                                         levels=levels, absorber="polar")
+        area = float((p.mix_weight * p.mesh.area).sum())
+        assert area == pytest.approx(12 * sector, rel=1e-12)
+        assert not np.any(p.cell_material == 5)            # no painted absorber
+
+
+def test_polar_refined_homogeneous_medium_is_kinf():
+    # Conservation again, now through the per-cell blended materials: a mix of
+    # a material with itself must leave k_inf unchanged on the 4:1 mesh.
+    from garnet.benchmarks.hpmr import hpmr_locally_refined_problem
+    fuel = _placeholder_materials()[1]
+    homog = [fuel] * 6
+    p = hpmr_locally_refined_problem(refine=3, drum_angle_deg=60.0, levels=2,
+                                     absorber="polar", materials=homog)
+    mats, cells = p.solver_materials()
+    assert len(mats) > 6                                    # blends were built
+    res = UnstructuredDiffusionSolver(p.mesh, mats, cells, alpha_boundary=0.0).solve(tol_k=1e-9)
+    assert res.k_eff == pytest.approx(k_infinite(fuel), abs=1e-7)
+
+
+def test_blended_material_matches_the_raster_blend_rules():
+    from garnet.blend import MaterialBlend, blend_material
+    be, b4c = _placeholder_materials()[4], _placeholder_materials()[5]
+    w = 0.37
+    m = blend_material(be, b4c, w)
+    blend = MaterialBlend(np, (1,), np.array([0]), 2, mix_material=np.array([1]),
+                          mix_weight=np.array([w]))
+    for g in range(2):
+        for attr in ("sigma_a", "sigma_t", "nu_sigma_f"):
+            table = np.array([getattr(be, attr)[g], getattr(b4c, attr)[g]])
+            assert getattr(m, attr)[g] == pytest.approx(float(blend.linear(table)[0]), rel=1e-14)
+        table = np.array([be.diffusion[g], b4c.diffusion[g]])
+        assert m.diffusion[g] == pytest.approx(float(blend.harmonic(table)[0]), rel=1e-14)
+
+
+def test_mesh_zones_and_footprints_agree_with_the_raster():
+    from garnet.benchmarks.hpmr import (build_hpmr2d, hpmr_assembly_zones,
+                                        hpmr_locally_refined_problem, hpmr_mesh_zones)
+    from garnet.benchmarks.hpmr_core_pins import R_FUEL, hpmr_pin_layout
+    from garnet.pin_power import mesh_pin_footprints
+    p = hpmr_locally_refined_problem(refine=3, drum_angle_deg=20.0, levels=1)
+    z = hpmr_mesh_zones(p)
+    r = build_hpmr2d(refine=3, drum_angle_deg=20.0, absorber="polar")
+    zr = hpmr_assembly_zones(r)
+    assert z.names == zr.names
+    vol = np.bincount(z.region_map, weights=p.mesh.area, minlength=len(z.names))
+    vol_r = np.bincount(zr.region_map.ravel(), minlength=len(zr.names)) * r.grid.cell_volume
+    np.testing.assert_allclose(vol[1:], vol_r[1:], rtol=1e-12)    # void is not meshed
+    merged = hpmr_mesh_zones(p, merge_drum=True)
+    assert len(merged.names) == len(z.names) - 1 and "drum" in merged.names
+    pins = hpmr_pin_layout()
+    W = mesh_pin_footprints(p.mesh, pins.xy[pins.fuel], R_FUEL)
+    np.testing.assert_allclose(np.asarray(W.sum(axis=1)).ravel(), np.pi * R_FUEL ** 2,
+                               rtol=1e-12)

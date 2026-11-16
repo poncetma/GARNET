@@ -1,6 +1,6 @@
 """SPH diffusion-coefficient convention and normalization check (rebuilt ``sph_gauge.py``).
 
-    python tools/assess_sph_gauge.py [--part A B C D] [--marshak]
+    python tools/assess_sph_gauge.py [--part A B C D E F G] [--marshak]
 
 The October 2026 audit (item O5, docs/numerical_implementation_notes.md) quoted
 an audit script ``sph_gauge.py`` that was not kept. Part A rebuilds it from the
@@ -8,8 +8,11 @@ notes: the leaky three-region PWR/poison colorset of tests/verification/
 test_sph.py with UNEQUAL regions (x in [0, 30), [30, 45), [45, 90) cm), the SP3
 reference with the per-moment Robin vacuum that was the default before the
 audit (k_ref = 1.0992249, flux-volume homogenization +885 pcm), and
-``sph_correct(method="hybr")`` with ``norm_weight=None`` versus the per-region
-volumes, under each ``D_SCALING``.
+the pre-audit ``sph_correct(method="hybr")`` with ``norm_weight=None`` versus the
+per-region volumes, under each ``D_SCALING``. That solver (one normalization
+constant for all regions and groups) was removed from garnet.sph on branch
+SPH-dev; ``sph_joint`` below is a line-for-line copy of it, so part A still
+reproduces the historical table.
 
 Parts B-D re-evaluate it (SPH audit 2026-11-13, docs/qa/sph_audit_2026-11-13.md):
 
@@ -28,6 +31,16 @@ D  The production workflow: per-region factors generated on the REFLECTIVE
    and region powers depend on the D convention and the normalization.
 E  Generation time of the SPH-corrected coarse model with v and with v/mu,
    against the fine heterogeneous diffusion model.
+
+Parts F-G use the library solver garnet.sph_correct as changed on branch
+SPH-dev (D~ = mu D, per-group flux-volume or fixed-k formulation):
+
+F  Existence of the fixed-k solution against the coarse node size, on a
+   water | fuel | stripe | fuel | water slab with vacuum x ends, all regions
+   corrected or fuel only.
+G  HP-MR 2-D (refine 4, raster absorber, TriSP3 reference, one region per
+   material) at drums inserted and withdrawn: flux-volume, fixed-k all
+   regions, fixed-k without the vacuum-facing Be reflector, fixed-k fuel only.
 
 All coarse solves are Cartesian finite-volume diffusion. Reaction-rate errors are
 the largest relative deviation of the region absorption / production rates,
@@ -129,16 +142,34 @@ def region_power(materials, Phi, V):
 
 # --- SPH solves ------------------------------------------------------------------
 
-def sph_joint(hm, rflux, solve, d_scaling, weight):
-    """garnet.sph_correct(method="hybr"): one normalization constant for all
-    regions and groups (weight None = plain sum, else the given (R, G) weights)."""
-    S.D_SCALING = d_scaling
-    try:
-        out = sph_correct(hm, None, rflux, solve, tol=1e-10, method="hybr",
-                          norm_weight=weight)
-    finally:
-        S.D_SCALING = "inverse"
-    return out.factors, out.converged
+def sph_joint(hm, rflux, solve, d_scaling, weight, tol=1e-10):
+    """Pre-audit garnet.sph_correct(method="hybr", norm_weight=weight): one
+    normalization constant for all regions and groups (weight None = plain
+    sum, else the given (R, G) weights). Copied from garnet/sph.py at commit
+    f70a090 (_sph_residual and the hybr branch of sph_correct)."""
+    R, G = rflux.shape
+    ref = np.asarray(rflux, dtype=float).reshape(-1)
+    live = ref > ref.max() * 1e-12
+    nw = np.ones(ref.size) if weight is None else np.asarray(weight, float).reshape(-1)
+    ln_ref_n = np.zeros(ref.size)
+    ln_ref_n[live] = np.log(ref[live] / (nw[live] * ref[live]).sum())
+
+    def resid(x_live):
+        x_live = np.clip(np.asarray(x_live, dtype=float), -8.0, 8.0)
+        x = np.zeros(ref.size)
+        x[live] = x_live
+        Phi, _ = solve(corrected(hm, np.exp(x).reshape(R, G), d_scaling))
+        live_phi = np.asarray(Phi, dtype=float).reshape(-1)[live]
+        if not np.all(live_phi > 0.0) or not np.isfinite(live_phi).all():
+            return 10.0 * x_live
+        denom = live_phi.sum() if weight is None else (nw[live] * live_phi).sum()
+        return (ln_ref_n[live] - np.log(live_phi / denom)) - x_live
+
+    sol = root(resid, np.zeros(int(live.sum())), method="hybr",
+               options=dict(xtol=max(tol * 1e-4, 1e-14)))
+    x = np.zeros(ref.size)
+    x[live] = sol.x
+    return np.exp(x).reshape(R, G), bool(sol.success)
 
 
 def sph_per_group(hm, rflux, rvol, solve, d_scaling):
@@ -344,6 +375,101 @@ def part_e(marshak):
               f" | with v/mu {l_m:.4e} ({100 * (l_m / lam_ref - 1):+.2f}%)")
 
 
+WATER = Material(name="water", diffusion=[1.13, 0.16], sigma_a=[0.0004, 0.0197],
+                 nu_sigma_f=[0, 0], sigma_s=[[0, 0.0494], [0, 0]])
+
+
+def part_f(marshak):
+    """Fixed-k existence against the coarse node size. Regions: water 0-15 cm,
+    fuel 15-45, fuel with the poison stripe 45-75, fuel 75-105, water 105-120."""
+    print("\n=== F. Fixed-k existence vs coarse node size (water-reflected slab, "
+          "vacuum x) ===")
+    nx, ny, h = 48, 12, 2.5
+    mats = [PWR_TWO_GROUP, POISON, WATER]
+    grid = Grid(shape=(nx, ny, 1), size=(nx * h, ny * h, 1.0))
+    mmap = np.zeros((nx, ny, 1), dtype=np.int64)
+    mmap[:6] = 2
+    mmap[-6:] = 2
+    mmap[18:30, 4:8] = 1
+    cuts = [15.0, 45.0, 75.0, 105.0]
+
+    def region_map(n_x, n_y, size):
+        x = np.digitize((np.arange(n_x) + 0.5) * size, cuts)
+        return np.broadcast_to(x[:, None, None], (n_x, n_y, 1)).astype(np.int64).copy()
+    region = region_map(nx, ny, h)
+    ref = SP3EigenSolver(grid, mats, material_map=mmap, bc=VACUUM_X, device="cpu",
+                         marshak_vacuum=marshak).solve(**TIGHT)
+    hm, rflux, rvol = flux_weighted_homogenize(ref.flux_numpy, mats, mmap, region,
+                                               cell_volume=h * h)
+    fuel = np.array([False, True, True, True, False])
+    print(f"SP3 k_ref = {ref.k_eff:.7f}; water thermal diffusion length "
+          f"{np.sqrt(WATER.diffusion[1] / WATER.sigma_a[1]):.2f} cm")
+    print(f"  {'node':>6} {'homog':>8}  {'corrected':9s} {'fixed-k':>8} {'residual':>9} "
+          f"{'k err':>9}  {'flux-volume k err':>17}")
+    for size in (2.5, 3.75, 5.0, 7.5):
+        cnx, cny = int(round(nx * h / size)), int(round(ny * h / size))
+        cgrid = Grid(shape=(cnx, cny, 1), size=(nx * h, ny * h, 1.0))
+        creg = region_map(cnx, cny, size)
+
+        def solve(m, cgrid=cgrid, creg=creg, size=size):
+            r = DiffusionEigenSolver(cgrid, m, material_map=creg, bc=VACUUM_X,
+                                     device="cpu").solve(**TIGHT)
+            return region_average(r.flux_numpy, creg, cell_volume=size * size), r.k_eff
+        kh = solve(hm)[1]
+        for label, mask in (("all", None), ("fuel only", fuel)):
+            out = sph_correct(hm, None, rflux, solve, normalization="none",
+                              k_ref=ref.k_eff, sph_regions=mask, tol=1e-9)
+            fv = sph_correct(hm, None, rflux, solve, region_volume=rvol,
+                             sph_regions=mask, tol=1e-9)
+            print(f"  {size:5.2f}c {1e5 * (kh - ref.k_eff):+7.1f}p  {label:9s} "
+                  f"{str(out.converged):>8} {out.residual:9.1e} "
+                  f"{1e5 * (out.k_eff - ref.k_eff):+8.1f}p  "
+                  f"{1e5 * (fv.k_eff - ref.k_eff):+8.1f}p (conv={fv.converged})")
+
+
+def part_g(marshak):
+    """HP-MR 2-D formulations (slow: two full-core TriSP3 solves)."""
+    from garnet import TriDiffusionEigenSolver, TriSP3EigenSolver
+    from garnet.benchmarks.hpmr import (BE_REFLECTOR, CENTRAL, DRUM_ABSORBER,
+                                        DRUM_BE, FUEL, build_hpmr2d)
+    print("\n=== G. HP-MR 2-D, refine 4, raster absorber, TriSP3 reference, one "
+          "region per material ===")
+    tight = dict(tol_k=1e-9, tol_source=1e-8)
+    for angle in (0.0, 180.0):
+        p = build_hpmr2d(refine=4, drum_angle_deg=angle, absorber="raster")
+        common = dict(active=p.active, mask_bc=p.mask_bc)
+        region = p.material_map
+        ref = TriSP3EigenSolver(p.grid, p.materials, region, **common).solve(**tight)
+        dif = TriDiffusionEigenSolver(p.grid, p.materials, region, **common).solve(**tight)
+        hm, rflux, rvol = flux_weighted_homogenize(ref.flux_numpy, p.materials, region,
+                                                   region, cell_volume=p.grid.cell_volume)
+
+        def solve(m):
+            r = TriDiffusionEigenSolver(p.grid, m, region, **common).solve(**tight)
+            return region_average(r.flux_numpy, region), r.k_eff
+        n = len(hm)
+        interior = np.isin(np.arange(n), (FUEL, CENTRAL, DRUM_BE, DRUM_ABSORBER))
+        print(f"\ndrum angle {angle:.0f} deg: TriSP3 k = {ref.k_eff:.7f}, diffusion "
+              f"{1e5 * (dif.k_eff - ref.k_eff):+.1f} pcm")
+        print(f"  {'formulation':28s} {'conv':5s} {'nfev':>4} {'k err':>8} {'all x1.3':>9}"
+              f"  mu (fast, thermal): fuel | Be reflector | drum absorber")
+        for label, kw in (("flux-volume, all", dict(region_volume=rvol, max_iter=300)),
+                          ("fixed k, all", dict(normalization="none", k_ref=ref.k_eff)),
+                          ("fixed k, no Be reflector", dict(normalization="none",
+                                                            k_ref=ref.k_eff,
+                                                            sph_regions=interior)),
+                          ("fixed k, fuel only", dict(normalization="none", k_ref=ref.k_eff,
+                                                      sph_regions=np.arange(n) == FUEL))):
+            out = sph_correct(hm, region, rflux, solve, tol=1e-7, **kw)
+            k13 = solve([S._scale_material(hm[i], 1.3 * out.factors[i]) for i in range(n)])[1]
+            mu = out.factors
+            print(f"  {label:28s} {str(out.converged):5s} {out.iterations:4d} "
+                  f"{1e5 * (out.k_eff - ref.k_eff):+7.2f}p {1e5 * (k13 - out.k_eff):+8.2f}p  "
+                  f"({mu[FUEL, 0]:.3f},{mu[FUEL, 1]:.3f}) | ({mu[BE_REFLECTOR, 0]:.3f},"
+                  f"{mu[BE_REFLECTOR, 1]:.3f}) | ({mu[DRUM_ABSORBER, 0]:.3f},"
+                  f"{mu[DRUM_ABSORBER, 1]:.3f})")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--part", nargs="*", default=["A", "B", "C", "D", "E"])
@@ -353,7 +479,7 @@ def main():
     args = ap.parse_args()
     for p in args.part:
         {"A": part_a, "B": part_b, "C": part_c, "D": part_d,
-         "E": part_e}[p.upper()](args.marshak)
+         "E": part_e, "F": part_f, "G": part_g}[p.upper()](args.marshak)
 
 
 if __name__ == "__main__":

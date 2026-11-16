@@ -265,9 +265,45 @@ drum absorber are accounted for in those diagnostics.
 ## 4. Apply SPH-corrected cross sections
 
 SPH-factor generation is an explicit reference/coarse calculation because the
-reference solution and region collapse are problem-specific. Once a
-`SphResult` exists, corrected constants enter the user API without rebuilding
-the mesh:
+reference solution and region collapse are problem-specific. The coarse mesh
+may be a node mesh with its own region map and cell volumes:
+
+```python
+from garnet import (flux_weighted_homogenize, region_average, sph_correct,
+                    sph_kinetics)
+
+# reference: any fine-mesh eigen-solution with a physical scalar flux
+hmats, rflux, rvol = flux_weighted_homogenize(
+    ref.flux_numpy, materials, material_map, region_map, cell_volume=dV)
+
+def coarse_solve(region_materials):
+    r = DiffusionEigenSolver(coarse_grid, region_materials,
+                             material_map=coarse_region_map, bc=bc).solve()
+    return (region_average(r.flux_numpy, coarse_region_map,
+                           cell_volume=coarse_dV), r.k_eff)
+
+# vacuum-bounded reference (full core): fixed k, no normalization, fuel only
+sph_result = sph_correct(hmats, coarse_region_map, rflux, coarse_solve,
+                         normalization="none", k_ref=ref.k_eff,
+                         sph_regions=[m.is_fissile for m in hmats])
+# reflective assembly or colorset: per-group flux-volume normalization
+# sph_result = sph_correct(hmats, coarse_region_map, rflux, coarse_solve,
+#                          region_volume=rvol)
+assert sph_result.converged, sph_result.residual
+transient_kinetics = sph_kinetics(kinetics, sph_result.factors)   # v / mu
+```
+
+Every cross section and the diffusion coefficient are multiplied by the
+factor. Use the fixed-`k` formulation when the reference has a vacuum boundary
+and the flux-volume normalization when it is fully reflected. A fixed-`k`
+problem need not have a solution: `converged` is then false and `residual`
+holds the least-squares floor. The coarse mesh has to resolve the reflector's
+thermal diffusion length. Transients with the corrected materials need the
+`v / mu` speeds from `sph_kinetics`. See
+[numerical implementation notes](numerical_implementation_notes.md#sph-nonlinear-solves).
+
+Once a `SphResult` exists, corrected constants enter the user API without
+rebuilding the mesh:
 
 ```python
 sph_core = core.with_materials(

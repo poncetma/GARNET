@@ -170,3 +170,129 @@ def peaking(power, pin_kind=None):
         vals = p[p > 0].reshape(1, -1) if p.ndim == 2 else p
     m = vals[vals > 0].mean()
     return float(vals.max() / m), float(vals.max()), float(m)
+
+
+# --- full-core, per-group form functions (Kumar et al. 2026) -----------------
+#
+# The reconstruction above multiplies a single-assembly, group-collapsed form
+# function by the coarse power density at the pin centre. Griffin's assembly-
+# level workflow (S. Kumar et al., "Transient multiphysics simulations with pin
+# power reconstruction in the Griffin reactor physics code", Ann. Nucl. Energy
+# 230 (2026) 112111, Eqs. 4-5) instead builds the form function per pin and per
+# group from a full-core reference and the SPH-corrected coarse solution of the
+# same state:
+#
+#     f_{p,g} = R^ref_{p,g} / (kappa~Sigma_f,{z(p),g} Phi_{p,g})
+#     P_p     = sum_g f_{p,g} kappa~Sigma_f,{z(p),g} Phi_{p,g}
+#
+# where Phi_{p,g} is the coarse flux integrated over the pin's footprint and
+# z(p) the pin's equivalence zone. Because the denominator comes from the coarse
+# solve itself, f also absorbs the coarse model's intra-zone shape error, and
+# the generation state is reproduced exactly.
+
+def tri_cell_vertices(raster):
+    """(nr, nc, 2, 3, 2) Cartesian vertices of every cell, in the raster's own
+    frame (the vectorized ``TriRaster.cell_vertices``)."""
+    mmap = np.asarray(raster.material_map)
+    nr, nc = mmap.shape[0], mmap.shape[1]
+    h = raster.side
+    av = np.array([h * np.sqrt(3.0) / 2.0, h * 0.5])
+    bv = np.array([0.0, h])
+    i0, j0 = raster.origin
+    aa, bb = np.meshgrid(np.arange(nr), np.arange(nc), indexing="ij")
+    O = ((i0 + aa - 1)[..., None] * bv + (j0 + bb - 1)[..., None] * av)
+    V = np.empty((nr, nc, 2, 3, 2))
+    V[:, :, 0] = O[:, :, None, :] + np.array([np.zeros(2), av, bv])
+    V[:, :, 1] = O[:, :, None, :] + np.array([av, bv, av + bv])
+    return V
+
+
+def pin_footprints(raster, pin_xy, radius):
+    """Exact area of each pin's disk in each cell, as a sparse (n_pins, n_cells)
+    CSR matrix (cells in ``material_map.reshape(-1)`` order).
+
+    pin_xy : (n_pins, 2) absolute pin centres in the raster frame.
+    radius : scalar or (n_pins,) disk radius (e.g. the fuel-compact radius).
+
+    Each row sums to pi r^2 for a disk inside the meshed region. The areas
+    come from the closed-form polygon/circle intersection
+    (:func:`garnet.model.annular_sector_fraction`), so a pin smaller than a
+    cell still gets its exact share of every cell it touches.
+    """
+    V = tri_cell_vertices(raster).reshape(-1, 3, 2)
+    return cell_footprints(V, pin_xy, radius)
+
+
+def mesh_pin_footprints(mesh, pin_xy, radius):
+    """:func:`pin_footprints` on a triangular unstructured mesh
+    (:class:`garnet.mesh.Mesh`), cells in mesh order."""
+    coords = np.asarray(mesh.coords, dtype=float)[:, :2]
+    V = coords[np.asarray(mesh.cells, dtype=np.int64)]
+    if V.shape[1] != 3:
+        raise ValueError("mesh_pin_footprints needs a triangle mesh")
+    return cell_footprints(V, pin_xy, radius)
+
+
+def cell_footprints(vertices, pin_xy, radius):
+    """Pin-disk areas in triangles given by their vertices, (n_cells, 3, 2)."""
+    from scipy.sparse import csr_matrix
+    from scipy.spatial import cKDTree
+
+    from .model import annular_sector_fraction
+
+    V = np.asarray(vertices, dtype=float)
+    cen = V.mean(axis=1)
+    e = V - cen[:, None, :]
+    reach = np.sqrt((e ** 2).sum(axis=2)).max(axis=1)        # centroid-to-vertex
+    area = 0.5 * np.abs((V[:, 1, 0] - V[:, 0, 0]) * (V[:, 2, 1] - V[:, 0, 1])
+                        - (V[:, 2, 0] - V[:, 0, 0]) * (V[:, 1, 1] - V[:, 0, 1]))
+    pin_xy = np.asarray(pin_xy, dtype=float).reshape(-1, 2)
+    radius = np.broadcast_to(np.asarray(radius, dtype=float), (len(pin_xy),))
+    tree = cKDTree(cen)
+    rmax = float(reach.max())
+    rows, cols, vals = [], [], []
+    for p, (xy, r) in enumerate(zip(pin_xy, radius)):
+        for c in tree.query_ball_point(xy, r + rmax):
+            d = np.hypot(*(cen[c] - xy))
+            if d - reach[c] >= r:
+                continue
+            frac = (1.0 if d + reach[c] <= r else
+                    annular_sector_fraction(V[c], xy, 0.0, r, 0.0, np.pi))
+            if frac > 0.0:
+                rows.append(p)
+                cols.append(c)
+                vals.append(frac * area[c])
+    return csr_matrix((vals, (rows, cols)), shape=(len(pin_xy), len(cen)))
+
+
+def footprint_flux(footprints, flux):
+    """Flux integrated over each pin footprint, (n_pins, G): sum_c A_pc phi_gc."""
+    f = np.asarray(asnumpy(flux), dtype=float)
+    G = f.shape[0]
+    return np.asarray(footprints @ f.reshape(G, -1).T)
+
+
+def group_form_functions(reference_pin_rate, zone_of_pin, kappa_fission, pin_flux):
+    """Per-pin, per-group form functions, Kumar et al. 2026 Eq. (4).
+
+    reference_pin_rate : (n_pins, G) reference kappa*Sigma_f*phi integrated over
+                         each pin, from the full-core reference of the state.
+    zone_of_pin        : (n_pins,) equivalence zone of each pin.
+    kappa_fission      : (Z, G) kappa*Sigma_f of the zone materials the coarse
+                         solve used (SPH-corrected).
+    pin_flux           : (n_pins, G) coarse flux integrated over each pin
+                         footprint (:func:`footprint_flux`), same state.
+
+    Returns f with shape (n_pins, G); 0 where the coarse rate vanishes.
+    """
+    rate = np.asarray(reference_pin_rate, dtype=float)
+    denom = np.asarray(kappa_fission, dtype=float)[np.asarray(zone_of_pin)] \
+        * np.asarray(pin_flux, dtype=float)
+    return np.divide(rate, denom, out=np.zeros_like(rate), where=denom > 0.0)
+
+
+def reconstruct_group_form_functions(form, zone_of_pin, kappa_fission, pin_flux):
+    """Pin powers from per-group form functions, Kumar et al. 2026 Eq. (5):
+    P_p = sum_g f_{p,g} kappa~Sigma_f,{z(p),g} Phi_{p,g}, shape (n_pins,)."""
+    k = np.asarray(kappa_fission, dtype=float)[np.asarray(zone_of_pin)]
+    return (np.asarray(form) * k * np.asarray(pin_flux)).sum(axis=1)

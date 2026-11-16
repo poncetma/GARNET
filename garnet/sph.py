@@ -8,13 +8,24 @@ eigenvalue) drift. SPH restores the equivalence by multiplying each region-group
 cross section by a factor mu chosen so the coarse flux matches the reference
 region flux again.
 
-This module builds the pipeline in pieces:
+The pipeline:
 
 * :func:`flux_weighted_homogenize` -- collapse a fine reference solution into one
   Material per coarse region, flux-and-volume weighted (this step preserves the
   reference reaction rates by construction).
-* the SPH factor solve (added incrementally) -- iterate mu until the coarse
-  diffusion region fluxes match the reference.
+* :func:`region_average` -- the coarse solve's region fluxes, averaged with the
+  coarse mesh's own region map and cell volumes. The coarse mesh may be a node
+  mesh much coarser than the reference mesh.
+* :func:`sph_correct` -- solve for mu so that mu * Phi = phi_ref, with either
+  the per-group flux-volume normalization (reflective generation geometries) or
+  the fixed-k, no-normalization formulation (vacuum-bounded geometries, the
+  Griffin assembly-level workflow), optionally restricted to the fuel.
+* :func:`sph_kinetics` -- per-material speeds v / mu for transients with the
+  corrected materials.
+
+Conventions (docs/qa/sph_audit_2026-11-13.md): every cross section AND the
+diffusion coefficient are multiplied by mu; chi is not corrected; 1/v becomes
+mu/v.
 
 The transport reference is any garnet eigensolver's scalar-flux Result -- any of
 the simplified-transport families GARNET offers above diffusion: SP3/TriSP3, the
@@ -28,15 +39,20 @@ same problem rather than a re-extraction of one field. See
 examples/hpmr_sph_reference_families.py for an SP3-vs-SDP1-vs-SDP2 comparison on
 the HP-MR drum arc.
 
-Equivalence and leakage-normalization reference: Labouré et al., "Hybrid
-super homogenization and discontinuity factor method for continuous finite
-element diffusion", Ann. Nucl. Energy 128 (2019), 443-454,
-doi:10.1016/j.anucene.2019.01.003. The finite-volume diffusion-scaling choices
-and their departures from the paper's CFEM treatment are documented below.
+References: G. Marleau, A. Hebert, R. Roy, "A User Guide for DRAGON Version5",
+IGE-335, Polytechnique Montreal, Sec. 3.11 (Eqs. 3.42-3.46); A. Hebert, "A
+Reformulation of the Transport-Transport SPH Equivalence Technique", 7ICMSNSE,
+Ottawa (2015); Labouré et al., "Hybrid super homogenization and discontinuity
+factor method for continuous finite element diffusion", Ann. Nucl. Energy 128
+(2019) 443-454, doi:10.1016/j.anucene.2019.01.003; Kumar et al., "Transient
+multiphysics simulations with pin power reconstruction in the Griffin reactor
+physics code", Ann. Nucl. Energy 230 (2026) 112111,
+doi:10.1016/j.anucene.2025.112111.
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -224,29 +240,6 @@ def flux_weighted_homogenize(flux, materials, material_map, region_map,
     return mats_out, region_flux, region_volume
 
 
-def production_weight(materials, region_volume):
-    """Normalization weight for :func:`sph_correct`: nu*Sigma_f * V per region-group.
-
-    Labour\u00e9 et al. (Ann. Nucl. Energy 2019) identify SPH's normalization factor
-    as the defect that breaks leakage equivalence whenever a vacuum boundary is
-    present: dividing each flux by its own *sum* matches shape while discarding
-    the absolute level leakage depends on. Normalizing instead against total
-    fission production is a physical integral, consistent with the reaction
-    rates SPH preserves.
-
-    Measured on HP-MR (drums withdrawn, S_N reference, JFNK):
-
-        sum-normalized          dk = 746 pcm, absorption err 0.27%, leakage 37.1%
-        production-normalized   dk = 185 pcm, absorption err 0.00%, leakage 14.8%
-
-    Use it for any geometry with a vacuum boundary. For a fully reflected
-    assembly the plain sum normalization is fine (and is still the default).
-    """
-    return np.array([np.asarray(m.nu_sigma_f, dtype=float)
-                     * float(region_volume[i])
-                     for i, m in enumerate(materials)])
-
-
 def region_average(flux, region_map, mix_material=None, mix_weight=None,
                    mix_region_map=None, cell_volume=1.0):
     """Volume-average scalar flux per coarse region, (R, G).
@@ -280,8 +273,8 @@ def region_average(flux, region_map, mix_material=None, mix_weight=None,
 def _scale_material_get(mat, mu, nu):
     """SPH factor mu on the reaction cross sections, GET factor nu on D alone.
 
-    Plain SPH ties leakage to reaction rates: it scales every cross section by
-    mu and D by 1/mu, so one factor per region-group must serve both. That is
+    Plain SPH ties leakage to reaction rates: it scales every cross section and
+    D by mu, so one factor per region-group must serve both. That is
     exactly why it preserves absorption but not leakage against an S_N reference
     (measured: absorption 0.27%, leakage 37% at HP-MR drums withdrawn). Letting D
     carry its own factor nu adds the missing degree of freedom in the SPH idiom
@@ -407,43 +400,42 @@ def sph_get_correct(homogenized_materials, region_map, reference_region_flux,
 
 
 # How the diffusion coefficient is corrected alongside the cross sections.
-#   "inverse"  D -> D / mu   -- transport-consistent (Sigma_t x mu => D = 1/3Sigma_tr)
-#   "direct"   D -> D * mu   -- Laboure et al. 2019 Eq. 7 / Ortensi et al. 2018c,
-#                               an empirical LEAKAGE correction "to better match
-#                               the reference currents"
-# These differ in SIGN of the leakage correction on every region with mu != 1.
-# The paper is explicit about "direct", but measured on garnet's finite-volume
-# leaky-colorset test "inverse" is markedly better (SPH closes 4x of the
-# homogenization error vs 2x), so this is exposed as a choice and measured per
-# problem rather than assumed. The paper's method is CFEM; garnet's is FV.
-# OPEN ISSUE: with "inverse" a common rescaling of mu is not a gauge, so k
-# depends on the flux normalisation (355 pcm on a leaky 3-region colorset, vs
-# 27 pcm with "direct"); see docs/numerical_implementation_notes.md.
-D_SCALING = "inverse"
+#   "direct"   D~ = mu D   -- the exact transform phi = mu Phi of the diffusion
+#                            equation: IGE-335 Eq. (3.43), Hebert 2015,
+#                            Laboure et al. 2019 Eq. (7), Kumar et al. 2026 Eq. (2).
+#   "inverse"  D~ = D / mu -- NON-STANDARD, kept only to reproduce results made
+#                            before the 2026-11-13 SPH audit. It breaks the
+#                            per-group scaling symmetry of the corrected operator
+#                            (k then depends on the normalization: +830 to +980 pcm
+#                            for a x1.3 rescaling of one group's factors on a
+#                            reflective colorset), and on vacuum-bounded problems
+#                            it acts as a hidden diffusion-length knob.
+# See docs/qa/sph_audit_2026-11-13.md, findings F1 and F11.
+D_SCALING = "direct"
 
 
 def _scale_material(mat, mu, d_scaling=None):
-    """SPH-corrected material: every cross section x mu; D per ``d_scaling``.
+    """SPH-corrected material: every cross section and D multiplied by mu.
 
-    Sigma_m,g = mu_m,g Sigma_ref_m,g            (Laboure et al. 2019, Eq. 4)
+    With the macroscopic flux Phi = phi / mu, constant in each region, every
+    term of the diffusion equation that multiplies phi_g scales by mu_g:
 
-    for Sigma_a, nu*Sigma_f, kappa*Sigma_f, Sigma_t and the scattering rows
-    (source group g). The diffusion coefficient follows ``d_scaling``, which
-    defaults to the module setting :data:`D_SCALING` (currently "inverse"):
+        Sigma~_g = mu_g Sigma_g      (Sigma_a, nu*Sigma_f, kappa*Sigma_f, Sigma_t,
+                                      and the scattering row of source group g)
+        D~_g     = mu_g D_g          (IGE-335 Eq. 3.43; Laboure et al. 2019 Eq. 7)
 
-    * ``"inverse"`` (default): D_m,g = D_ref_m,g / mu_m,g. Transport
-      consistent -- if Sigma_t scales by mu, D = 1/(3 Sigma_tr) scales by
-      1/mu -- and measured better on garnet's FV leaky-colorset test.
-    * ``"direct"``: D_m,g = mu_m,g D_ref_m,g (Laboure et al. 2019, Eq. 7;
-      Ortensi et al.). This is what the exact transform phi = mu phi~ of the
-      diffusion equation gives, an empirical leakage correction "to better
-      match the reference currents".
+    chi is not corrected. A common rescaling of one group's factors is then an
+    exact symmetry of the corrected operator on a reflective problem, which is
+    what makes the per-group normalization of :func:`sph_correct` a pure gauge.
 
-    The two differ in the SIGN of the leakage correction on every region with
-    mu != 1. With "inverse" a common rescaling of all mu is no longer a
-    harmless gauge, so the converged k depends on the flux-normalisation
-    convention of :func:`sph_correct`; see the SPH note in
-    docs/numerical_implementation_notes.md (open known issue).
+    ``Sigma_t * mu`` is the even-parity total cross section. It is what a
+    diffusion coarse solver needs; an SPN odd-parity equation would need
+    ``Sigma_t / mu`` (IGE-335 Eq. 3.46), so corrected materials are for
+    diffusion coarse solvers only (audit finding F6).
+
+    ``d_scaling="inverse"`` (D~ = D / mu) is accepted only to reproduce
+    pre-audit results; it is not an SPH correction in the sense of any
+    reference and makes the converged eigenvalue depend on the normalization.
     """
     mu = np.atleast_1d(np.asarray(mu, dtype=float))
     d_scaling = D_SCALING if d_scaling is None else d_scaling
@@ -460,13 +452,27 @@ def _scale_material(mat, mu, d_scaling=None):
         kappa_fission=(None if mat.kappa_fission is None else
                        np.asarray(mat.kappa_fission) * mu))
 
+
+def apply_sph_factors(materials, factors):
+    """SPH-corrected copies of ``materials``: material i gets the factors
+    ``factors[i]`` (one per group) on every cross section and on D, as in
+    :func:`sph_correct`. This is how tabulated factors are applied to
+    tabulated cross sections of another state (e.g. interpolated in drum
+    angle); ``SphResult.corrected_materials`` is the same operation at the
+    generation state."""
+    mu = np.asarray(factors, dtype=float)
+    if mu.ndim != 2 or mu.shape[0] != len(materials):
+        raise ValueError(f"factors must be ({len(materials)}, G), got {mu.shape}")
+    return [_scale_material(m, mu[i]) for i, m in enumerate(materials)]
+
+
 @dataclass
 class SphResult:
     corrected_materials: list        # R Materials with SPH-corrected cross sections
     factors: np.ndarray              # (R, G) SPH factors mu
     k_eff: float                     # eigenvalue of the corrected coarse solve
-    iterations: int
-    converged: bool
+    iterations: int                  # coarse solves (residual evaluations)
+    converged: bool                  # residual <= tol (sph_correct); see each solver
     # Set only by sph_df_correct (GET): per-region discontinuity factors, per
     # vacuum-boundary-region boundary coefficients, and the least-squares cost
     # at the solution -- the diagnostic that says whether a nonzero residual is
@@ -474,283 +480,394 @@ class SphResult:
     df: np.ndarray = None
     bcf: np.ndarray = None
     cost: float = float("nan")
+    # Set by sph_correct. residual is the largest |log| mismatch of the SPH
+    # conditions at the returned factors (and |log(k / k_ref)| for
+    # normalization="none"): a measured quantity, not a solver flag. For
+    # normalization="none" flux_scale is the constant s with mu * s * Phi =
+    # phi_ref, i.e. the factor that turns the coarse eigenvector into the
+    # reference-equivalent flux level.
+    residual: float = float("nan")
+    normalization: str = ""
+    flux_scale: float = float("nan")
 
 
-# Strength of the linear pull back to mu = 1 from an infeasible trial point.
-# Only its sign and scale matter: the Newton step it induces is -x regardless.
+# Strength of the linear pull back to the start from an infeasible trial point.
+# Only its sign and scale matter: the Newton step it induces is -(z - z0).
 _INFEASIBLE_PULL = 10.0
+# Bound on |log mu| inside the residual; exp(+-8) spans ~3e-4 .. 3e3.
+_MAX_ABS_LOG_FACTOR = 8.0
 
 
-def _sph_residual(x_live, live, log_reference_flux, shape, homogenized_materials, solve,
-                  state):
-    """SPH residual in log space, restricted to the live entries.
+def _sph_live_set(reference_region_flux, sph_regions):
+    """Flat mask of the region-group entries whose factor is solved for.
 
-    F(x) = ln(phi_ref / sum) - ln(Phi(exp x) / sum) - x, i.e. the amount by
-    which log(mu) still has to move. Its root is the SPH condition
-    mu * Phi = phi_ref. Frozen entries are excluded rather than zeroed so the
-    Jacobian has no null directions for the Newton solve.
+    Entries outside ``sph_regions`` and entries without reference flux (void,
+    a decoupled region) keep mu = 1 and are excluded from the residual and the
+    normalization. A non-void entry with a negative reference flux (an SP3
+    phi0 = Phi1 - 2 phi2 artifact, typically in a reflector) is frozen too, but
+    not silently.
     """
-    R = len(homogenized_materials)
-    max_abs_log_factor = 8.0
-    x_live = np.clip(np.asarray(x_live, dtype=float),
-                     -max_abs_log_factor, max_abs_log_factor)
-    x = np.zeros(live.size)
-    x[live] = x_live
-    mu = np.exp(x).reshape(shape)
-    region_flux, k = solve([_scale_material(homogenized_materials[i], mu[i])
-                            for i in range(R)])
-    state["k"] = k
-    state["nfev"] += 1
-    phi = np.asarray(region_flux, dtype=float).reshape(-1)
-    live_phi = phi[live]
-    if not np.all(live_phi > 0.0) or not np.isfinite(live_phi).all():
-        # A trial mu drove the coarse solve to a non-positive (or non-finite)
-        # region flux, where log() is undefined.
-        #
-        # A linear pull toward log(mu)=0 has a nonzero Jacobian, so Newton
-        # can step back into the feasible region. A constant penalty would
-        # leave the linearized problem without a recovery direction.
-        return _INFEASIBLE_PULL * np.asarray(x_live, dtype=float)
-    if state.get("absolute"):
-        denom = 1.0                       # no per-iteration normalization
+    ref = np.asarray(reference_region_flux, dtype=float)
+    R, G = ref.shape
+    if sph_regions is None:
+        mask = np.ones((R, G), dtype=bool)
     else:
-        normalization_weights = state.get("nw")
-        denom = live_phi.sum() if normalization_weights is None else (normalization_weights * live_phi).sum()
-    log_normalized_flux = np.log(live_phi / denom)
-    r = (log_reference_flux[live] - log_normalized_flux) - x_live
-    residual_scale = state.get("scale")
-    return r if residual_scale is None else r * residual_scale
+        m = np.asarray(sph_regions, dtype=bool)
+        if m.shape == (R,):
+            mask = np.repeat(m[:, None], G, axis=1)
+        elif m.shape == (R, G):
+            mask = m.copy()
+        else:
+            raise ValueError(f"sph_regions must have shape ({R},) or ({R}, {G}), "
+                             f"got {m.shape}")
+    floor = np.abs(ref).max() * 1e-12
+    negative = mask & (ref < -floor)
+    if negative.any():
+        bad = sorted({int(i) for i in np.argwhere(negative)[:, 0]})
+        warnings.warn(f"SPH regions {bad} have a negative reference flux in some "
+                      "group; those factors are frozen at mu = 1. Exclude the "
+                      "regions with sph_regions (e.g. correct the fuel only) or use "
+                      "a reference without negative scalar flux.", RuntimeWarning,
+                      stacklevel=3)
+    return (mask & (ref > floor)).reshape(-1)
 
 
-def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
-                max_iter=200, tol=1e-8, relax=1.0, depth=5,
-                method="anderson", norm_weight=None, mu0=None,
-                residual_scale=None, region_volume=None,
-                verbose=False) -> SphResult:
+class _SphProblem:
+    """Bookkeeping shared by the SPH solution methods.
+
+    Every residual evaluation is one coarse solve. The best evaluated point
+    (smallest max-norm residual) is kept with its eigenvalue, so a method that
+    stops early or wanders still returns the best factors it actually solved,
+    paired with their own k.
+    """
+
+    def __init__(self, homogenized_materials, ref, live, solve, verbose):
+        self.hm = list(homogenized_materials)
+        self.ref = ref
+        self.shape = ref.shape
+        self.live = live
+        self.solve = solve
+        self.verbose = verbose
+        self.nfev = 0
+        self.best = {"res": np.inf, "x": np.zeros(int(live.sum())), "k": float("nan"),
+                     "s": float("nan")}
+
+    def factors(self, x_live):
+        x = np.zeros(self.live.size)
+        x[self.live] = x_live
+        return np.exp(x).reshape(self.shape)
+
+    def materials(self, mu):
+        return [_scale_material(self.hm[i], mu[i]) for i in range(len(self.hm))]
+
+    def evaluate(self, x_live):
+        """Coarse solve at mu = exp(x); returns (live region flux, k) or None
+        if the trial point made the coarse flux non-positive or non-finite."""
+        self.nfev += 1
+        flux, k = self.solve(self.materials(self.factors(x_live)))
+        phi = np.asarray(flux, dtype=float).reshape(-1)[self.live]
+        if not (np.isfinite(k) and np.all(np.isfinite(phi)) and np.all(phi > 0.0)):
+            return None
+        return phi, float(k)
+
+    def record(self, x_live, k, rows, s=float("nan")):
+        res = float(np.abs(rows).max()) if rows.size else 0.0
+        if self.verbose:
+            print(f"    [sph] eval {self.nfev:4d}  max|r| = {res:.3e}  k = {k:.8f}",
+                  flush=True)
+        if res < self.best["res"]:
+            self.best = {"res": res, "x": np.array(x_live, copy=True), "k": k, "s": s}
+
+
+def _group_log_normalizer(live, R, G, region_volume):
+    """log(values / N_g) on the live entries, N_g = sum_i V_i values_ig over the
+    live entries of group g: the per-group flux-volume normalization."""
+    group = np.tile(np.arange(G), R)
+    weight = np.repeat(np.asarray(region_volume, dtype=float), G)
+    sets = [live & (group == g) for g in range(G)]
+
+    def log_normalized(values_live):
+        values = np.zeros(live.size)
+        values[live] = values_live
+        out = np.zeros(live.size)
+        for sel in sets:
+            if sel.any():
+                out[sel] = np.log(values[sel] / (weight[sel] * values[sel]).sum())
+        return out[live]
+    return log_normalized
+
+
+def sph_correct(homogenized_materials, region_map, reference_region_flux, solve, *,
+                region_volume=None, normalization="flux-volume", k_ref=None,
+                sph_regions=None, method=None, tol=1e-8, max_iter=200,
+                relax=1.0, depth=5, mu0=None, verbose=False) -> SphResult:
     """Solve for the SPH factors that make a coarse solve reproduce the reference.
 
-    The superhomogenization factor mu_{i,g} multiplies every cross section of
-    region i, group g (and divides its diffusion coefficient) so that the
-    corrected coarse reaction rate reproduces the reference: the defining
-    condition is ``mu_{i,g} * Phi_{i,g} == phi_ref_{i,g}`` (not Phi == phi_ref),
-    which preserves the region reaction rates and hence the eigenvalue on the
-    generation geometry. The fixed point ``mu <- phi_ref / Phi(mu)`` is iterated
-    to convergence in log(mu) space; fluxes are normalized to a common total each
-    step so only the shape matters.
+    The factor mu_{i,g} multiplies every cross section and the diffusion
+    coefficient of region i, group g (:func:`_scale_material`). The defining
+    condition is ``mu_{i,g} Phi_{i,g} = phi_ref_{i,g}``: the corrected coarse
+    reaction rates Sigma~ Phi V equal the reference rates Sigma phi_ref V.
+    A coarse eigenvector is defined only up to a constant, so the condition
+    needs one more statement about the flux level. Two are offered:
 
-    For a reflective single assembly the plain fixed point converges. On a leaky
-    colorset or whole core the fixed point oscillates (a region whose flux dips
-    gets its absorption scaled up, dipping it further), so the iteration is
-    Anderson-accelerated over a short history of log-factor residuals; set
-    ``depth=1`` to recover the plain (optionally relaxed) fixed point.
+    normalization="flux-volume" (default; reflective generation geometries)
+        One constant per group: the macroscopic flux is scaled so that
+        ``sum_i V_i Phi_{i,g} = sum_i V_i phi_ref_{i,g}`` over the corrected
+        entries of group g, then ``mu = phi_ref / Phi``. This is the standard
+        normalization (IGE-335 Sec. 3.11, keyword STD; IGE-344 Eq. 7.7). On a
+        reflective problem the factors are fixed only up to one constant per
+        group, and under D~ = mu D that constant is an exact gauge: k does not
+        depend on it.
+        With a vacuum boundary the normalization is no longer a gauge and k
+        is not reproduced exactly (Laboure et al. 2019, Sec. 3.1); use "none".
+        Requires ``region_volume``.
+
+    normalization="none" (vacuum-bounded generation geometries; Griffin)
+        No normalization; the eigenvalue is fixed at the reference instead
+        (Laboure et al. 2019, Sec. 3.2; Kumar et al. 2026). Unknowns are
+        log mu on the corrected entries and log s, the level of the coarse
+        eigenvector; conditions are ``mu s Phi = phi_ref`` entry by entry and
+        ``k(mu) = k_ref``. The system is square, needs ``k_ref``, and is
+        singular on a purely reflective problem (use "flux-volume" there).
+
+        A solution need not exist. With D~ = mu D a region-uniform mu leaves
+        the flux shape inside a region unchanged; at a vacuum face it only
+        moves the effective Marshak coefficient between alpha/mu -> 0
+        (reflective) and infinity (zero flux). If a corrected region at the
+        vacuum boundary mixes materials whose flux shape the coarse model
+        cannot represent, the required leakage may lie outside that range.
+        The same happens when coarse nodes are too large to represent a
+        reflector's thermal flux (measured: 7.5 cm finite-volume nodes against
+        a 2.85 cm water diffusion length). The solver then returns its
+        least-squares floor with ``converged=False`` (measured: k still 760 to
+        1060 pcm off on the unaligned three-region colorset of
+        tests/verification/test_sph.py). Griffin avoids this by correcting the
+        fuel only and meshing reflector and drums explicitly: pass
+        ``sph_regions``, and leave uncorrected at least the regions that carry
+        the vacuum boundary (on HP-MR, correcting the outer reflector moves
+        every fast factor to ~0.26 to absorb a 10 pcm mismatch).
 
     homogenized_materials : R Materials (e.g. from
         :func:`flux_weighted_homogenize`), indexed by region.
-    region_map            : (*shape) region index; the coarse material map.
-    reference_region_flux : (R, G) reference region fluxes (the second return of
+    region_map            : coarse region map (kept for API symmetry; unused).
+    reference_region_flux : (R, G) reference region fluxes (second return of
         :func:`flux_weighted_homogenize`).
     solve                 : callable(materials) -> (region_flux (R, G), k_eff),
-        running the coarse diffusion solve with the given per-region materials
-        (the caller wires up grid, geometry and boundary conditions).
-    relax                 : damping beta in (0, 1] on the log(mu) update; 1.0 is
-        undamped. depth : Anderson history length (1 disables acceleration).
-    residual_scale        : row scaling for the Newton residual.
+        running the coarse diffusion eigen-solve with the given per-region
+        materials. The caller wires up grid, geometry and boundary conditions;
+        the coarse mesh may differ from the reference mesh, provided
+        ``region_flux`` is averaged with the coarse mesh's own region map and
+        cell volumes (:func:`region_average`).
+    region_volume         : (R,) region volumes (third return of
+        :func:`flux_weighted_homogenize`). Required for "flux-volume".
+    k_ref                 : reference eigenvalue. Required for "none".
+    sph_regions           : optional (R,) or (R, G) boolean mask of the
+        entries to correct; the rest keep mu = 1 and are excluded from the
+        conditions and the normalization. Griffin corrects the fuel only.
+    method                : "anderson" (default for "flux-volume"): the fixed
+        point log mu <- log(phi_ref / Phi_normalized), Anderson-accelerated over
+        ``depth`` iterates (depth=1 with ``relax`` gives the damped Picard
+        iteration). "hybr" (default for "none") and "lm": dense-Jacobian root
+        finders (MINPACK), for small systems. "jfnk": Jacobian-free
+        Newton-Krylov, for many unknowns. For "none", "hybr" falls back to a
+        Levenberg-Marquardt least-squares solve followed by a second "hybr"
+        from its endpoint when the first attempt does not reach ``tol``.
 
-        *** "auto" IS BROKEN -- DO NOT USE. *** It weights each region-group by
-        its share of total production, which scales DOWN precisely the
-        low-production entries (reflector, drum absorber) that carry the leakage
-        physics. Newton then meets the tolerance without solving those rows:
-        measured on HP-MR it reports conv=True with mu == 1 in every region,
-        i.e. no correction at all, and k falls back to uncorrected diffusion
-        (inserted 770 pcm, withdrawn 745 pcm vs the S_N reference). That is
-        FALSE convergence and is worse than the stall it was meant to cure,
-        because it looks like success. Any row scaling here must not shrink the
-        rows that need solving; scale by sensitivity, not by magnitude.
-    mu0                   : optional initial factors (R, G), default all ones.
-        Warm-starting a production-normalized solve from the converged
-        sum-normalized factors is far more robust than starting from 1.
-    method                : "anderson" (default) accelerates the fixed point;
-        "jfnk" instead solves the residual F(x) = 0 directly with a
-        Jacobian-free Newton-Krylov method (scipy's Newton-Krylov root find).
+        The plain fixed point is unstable whenever the coarse flux in a
+        strongly absorbing region falls below the reference: the condition
+        demands mu > 1, which raises that region's absorption, depresses Phi
+        further and demands a larger mu again (measured on the HP-MR drum arc:
+        mu past 10^3). Newton sees that coupling through the Jacobian; this is
+        the PJFNK-SPH approach of Ortensi et al. used in Griffin.
+    tol                   : tolerance on the residual, max |log| mismatch of
+        the conditions (a relative error). It must be above the accuracy of
+        the coarse solve. ``converged`` is ``residual <= tol``, measured at the
+        returned factors whatever the method reported.
+    mu0                   : optional (R, G) initial factors.
 
-        The fixed point is not merely slow but *unstable* whenever the coarse
-        flux in a strongly absorbing region falls below the reference: the SPH
-        condition is mu*Phi = phi_ref, so a deficit demands mu > 1, which scales
-        that region's absorption up, depresses Phi further, and demands a larger
-        mu again. That is a monotone runaway, not an oscillation, so damping and
-        Anderson cannot fix it -- on the HP-MR drum arc against an S_N reference
-        mu climbed past 10^3. Newton sees the coupling through the Jacobian and
-        converges these cases; this is the PJFNK-SPH approach of Ortensi et al.
-        (Ann. Nucl. Energy, INL/Griffin), reported to converge configurations
-        with reflectors and vacuum boundaries that the Picard iteration cannot.
+    Returns an :class:`SphResult` whose ``corrected_materials`` and ``k_eff``
+    belong to the same coarse solve.
     """
-    if isinstance(norm_weight, str) and norm_weight == "auto":
-        # Automatic selection. The two normalizations are complementary and
-        # neither wins everywhere -- measured on HP-MR against an S_N reference:
-        #
-        #     drums inserted   sum 14 pcm (885 nfev)  | production 615 pcm (2017, failed)
-        #     drums withdrawn  sum 746 pcm (762, failed) | production 185 pcm (53 nfev)
-        #
-        # so the choice changes the *conditioning* of the nonlinear problem, not
-        # just the answer. Usefully, the case that converges is also far cheaper,
-        # so trying production first and falling back to sum costs little when it
-        # is the wrong choice and saves a great deal when it is right. Selecting
-        # on the solve's own convergence avoids having to predict from drum angle
-        # or leakage fraction, neither of which separates the two cleanly.
+    if normalization not in ("flux-volume", "none"):
+        raise ValueError("normalization must be 'flux-volume' or 'none', got "
+                         f"{normalization!r}")
+    ref = np.asarray(reference_region_flux, dtype=float)
+    R, G = ref.shape
+    if len(homogenized_materials) != R:
+        raise ValueError(f"{len(homogenized_materials)} materials for {R} regions")
+    live = _sph_live_set(ref, sph_regions)
+    prob = _SphProblem(homogenized_materials, ref, live, solve, verbose)
+    ln_ref = np.log(ref.reshape(-1)[live])
+    x0 = np.zeros(int(live.sum()))
+    if mu0 is not None:
+        m0 = np.asarray(mu0, dtype=float).reshape(-1)[live]
+        if np.any(m0 <= 0.0) or not np.all(np.isfinite(m0)):
+            raise ValueError("mu0 must be finite and positive on the corrected entries")
+        x0 = np.log(m0)
+
+    def finish(x_live, k, residual, s=float("nan")):
+        mu = prob.factors(x_live)
+        return SphResult(corrected_materials=prob.materials(mu), factors=mu,
+                         k_eff=k, iterations=prob.nfev,
+                         converged=bool(residual <= tol), residual=residual,
+                         normalization=normalization, flux_scale=s)
+
+    if not live.any():
+        flux_k = prob.evaluate(x0)
+        k = flux_k[1] if flux_k is not None else float("nan")
+        return finish(x0, k, 0.0)
+
+    if normalization == "flux-volume":
         if region_volume is None:
             raise ValueError(
-                "norm_weight='auto' needs region_volume (the third return of "
-                "flux_weighted_homogenize): the production weight is "
-                "nu*Sigma_f * V, and HP-MR region volumes span ~170x, so unit "
-                "volumes are a materially different -- and singular -- weighting")
-        nwp = production_weight(homogenized_materials, region_volume)
-        first = sph_correct(homogenized_materials, region_map,
-                            reference_region_flux, solve, max_iter=max_iter,
-                            tol=tol, relax=relax, depth=depth, method=method,
-                            norm_weight=nwp, mu0=mu0,
-                            region_volume=region_volume, verbose=verbose)
-        if first.converged:
-            return first
-        return sph_correct(homogenized_materials, region_map,
-                           reference_region_flux, solve, max_iter=max_iter,
-                           tol=tol, relax=relax, depth=depth, method=method,
-                           norm_weight=None, mu0=mu0,
-                           region_volume=region_volume, verbose=verbose)
+                "normalization='flux-volume' needs region_volume (the third return "
+                "of flux_weighted_homogenize): the normalization is one flux-VOLUME "
+                "integral per group")
+        volume = np.asarray(region_volume, dtype=float).reshape(-1)
+        if volume.shape != (R,) or np.any(volume <= 0.0):
+            raise ValueError(f"region_volume must be ({R},) and positive")
+        log_normalized = _group_log_normalizer(live, R, G, volume)
+        ln_ref_n = log_normalized(ref.reshape(-1)[live])
+        method = "anderson" if method is None else method
 
-    R = len(homogenized_materials)
-    ref = np.asarray(reference_region_flux, dtype=float)
-    shape = ref.shape
-    # Freeze regions/groups with no reference flux (void, decoupled reflector):
-    # they carry no reaction rate, so their factor stays mu = 1 and is excluded
-    # from the residual and the flux normalization.
-    live = (ref > ref.max() * 1e-12).reshape(-1)
-    ref_flat = ref.reshape(-1)
-    # Normalization. Labouré et al. (Ann. Nucl. Energy 2019) identify the SPH
-    # normalization factor as the defect that breaks leakage equivalence when a
-    # vacuum boundary is present: scaling each flux by its own *sum* matches
-    # shape while discarding the absolute level the leakage depends on. Passing
-    # norm_weight (e.g. nu*Sigma_f * V per region-group) normalizes by a
-    # physical integral -- total production -- instead, which is consistent with
-    # the reaction rates SPH preserves.
-    absolute = isinstance(norm_weight, str) and norm_weight == "none"
-    nw = (np.ones(ref.size) if norm_weight is None or absolute
-          else np.asarray(norm_weight, dtype=float).reshape(-1))
-    ln_ref_n = np.zeros(ref.size)
-    if absolute:
-        # Laboure et al. remedy (i): REMOVE the normalization. Normalization
-        # factors are needed for uniqueness only on purely reflecting problems
-        # (Hebert 1981); with a vacuum boundary they are unnecessary AND
-        # introduce homogenization inconsistency -- and, because they leave the
-        # solution non-unique, two solvers can converge to points that differ
-        # (observed: hybr and jfnk 27 pcm apart, both reporting success).
-        # The reference is instead rescaled ONCE by a constant (their Eq. 8) so
-        # the two fluxes are comparable; that is a conditioning device, not a
-        # per-iteration normalization.
-        phi0, _ = solve(list(homogenized_materials))
-        phi0 = np.asarray(phi0, dtype=float).reshape(-1)
-        const = phi0[live].sum() / ref_flat[live].sum()
-        ln_ref_n[live] = np.log(ref_flat[live] * const)
-    else:
-        ln_ref_n[live] = np.log(ref_flat[live] / (nw[live] * ref_flat[live]).sum())
-    x = np.zeros(ref.size)                            # x = log(mu), start mu = 1
-    if mu0 is not None:
-        # Warm start. Production normalization fixes the leakage inconsistency
-        # but makes the Newton solve harder from mu = 1: the weight is dominated
-        # by the fuel regions, so low-production entries are badly scaled and the
-        # line search collapses to steps of ~1e-3 (observed: |F| creeping 1% per
-        # iteration toward maxiter). Starting from the converged sum-normalized
-        # factors skips that stalled region.
-        m0 = np.asarray(mu0, dtype=float).reshape(-1)
-        ok0 = m0 > 0
-        x[ok0] = np.log(m0[ok0])
+        def residual(x_live):
+            x_live = np.clip(np.asarray(x_live, dtype=float),
+                             -_MAX_ABS_LOG_FACTOR, _MAX_ABS_LOG_FACTOR)
+            out = prob.evaluate(x_live)
+            if out is None:
+                return _INFEASIBLE_PULL * (x_live - x0)
+            phi, k = out
+            r = ln_ref_n - log_normalized(phi) - x_live
+            prob.record(x_live, k, r)
+            return r
 
-    if method in ("hybr", "lm"):
-        # Dense Newton with a trust region is useful for small SPH systems:
-        # it resolves poorly scaled rows with a full numerical Jacobian.
-        from scipy.optimize import root
-        state = {"k": float("nan"), "nfev": 0, "scale": None,
-                 "absolute": absolute,
-                 "nw": None if (norm_weight is None or absolute) else nw[live]}
-        sol = root(_sph_residual, x[live], method=method,
-                   args=(live, ln_ref_n, shape, homogenized_materials, solve,
-                         state),
-                   # MINPACK's xtol is a tolerance on the SOLUTION step, not
-                   # the residual, and its default (1.5e-8) is looser than the
-                   # residual tolerance we actually want. Passing tol straight
-                   # through stopped early: 41 pcm where JFNK reached 14 pcm on
-                   # the same problem. Tighten it well below tol.
-                   options=dict(xtol=max(tol * 1e-4, 1e-14)))
-        x = np.zeros(ref.size)
-        x[live] = sol.x
-        mu = np.exp(x).reshape(shape)
-        corrected = [_scale_material(homogenized_materials[i], mu[i])
-                     for i in range(R)]
-        _, k = solve(corrected)
-        return SphResult(corrected_materials=corrected, factors=mu, k_eff=k,
-                         iterations=state["nfev"], converged=bool(sol.success))
+        if method == "anderson":
+            X, F = [], []
+            x = x0
+            for _ in range(max_iter):
+                x = np.clip(x, -_MAX_ABS_LOG_FACTOR, _MAX_ABS_LOG_FACTOR)
+                out = prob.evaluate(x)
+                if out is None:
+                    break                   # no way to continue a fixed point
+                phi, k = out
+                f = ln_ref_n - log_normalized(phi) - x
+                prob.record(x, k, f)
+                if np.abs(f).max() <= tol:
+                    break
+                X.append(x)
+                F.append(f)
+                if len(F) > depth:
+                    X.pop(0)
+                    F.pop(0)
+                x = _anderson_step(X, F, relax)
+        elif method in ("hybr", "lm"):
+            from scipy.optimize import root
+            # MINPACK's xtol is a tolerance on the step, not the residual; keep it
+            # well below tol so it does not stop early (measured: 41 pcm where
+            # JFNK reached 14 pcm when tol was passed straight through).
+            root(residual, x0, method=method,
+                 options=dict(xtol=max(tol * 1e-4, 1e-14)))
+        elif method == "jfnk":
+            from scipy.optimize import root
+            root(residual, x0, method="krylov",
+                 options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose)))
+        else:
+            raise ValueError("method must be 'anderson', 'hybr', 'lm' or 'jfnk', "
+                             f"got {method!r}")
+        b = prob.best
+        return finish(b["x"], b["k"], b["res"])
 
+    # normalization == "none": fixed k, unknowns (log mu on live entries, log s)
+    if k_ref is None or not np.isfinite(k_ref) or k_ref <= 0.0:
+        raise ValueError("normalization='none' needs the reference eigenvalue k_ref")
+    method = "hybr" if method is None else method
+    if method not in ("hybr", "lm", "jfnk"):
+        raise ValueError("method for normalization='none' must be 'hybr', 'lm' or "
+                         f"'jfnk', got {method!r}")
+    start = prob.evaluate(x0)
+    if start is None:
+        raise RuntimeError("the coarse solve at the initial factors has a "
+                           "non-positive region flux")
+    phi0, k0 = start
+    z0 = np.append(x0, np.log(np.exp(ln_ref).sum() / (np.exp(x0) * phi0).sum()))
+    prob.record(x0, k0, np.append(x0 + z0[-1] + np.log(phi0) - ln_ref,
+                                  np.log(k0 / k_ref)), s=float(np.exp(z0[-1])))
+
+    def residual_k(z):
+        z = np.asarray(z, dtype=float)
+        x_live = np.clip(z[:-1], -_MAX_ABS_LOG_FACTOR, _MAX_ABS_LOG_FACTOR)
+        # Where no solution exists the factors run to zero and the level s to
+        # infinity; bound log s so exp() stays finite.
+        ln_s = float(np.clip(z[-1], -700.0, 700.0))
+        out = prob.evaluate(x_live)
+        if out is None:
+            return _INFEASIBLE_PULL * (z - z0)
+        phi, k = out
+        r = np.append(x_live + ln_s + np.log(phi) - ln_ref, np.log(k / k_ref))
+        prob.record(x_live, k, r, s=float(np.exp(ln_s)))
+        return r
+
+    def best_z():
+        b = prob.best
+        return np.append(b["x"], np.log(b["s"])) if np.isfinite(b["s"]) else z0
+
+    from scipy.optimize import least_squares, root
+    xtol = max(tol * 1e-4, 1e-14)
     if method == "jfnk":
-        from scipy.optimize import root
-        rs = residual_scale
-        if isinstance(rs, str) and rs == "auto":
-            share = (nw * ref_flat)[live]
-            share = np.sqrt(np.maximum(share, 0.0) / max(share.sum(), 1e-300))
-            rs = share / max(share.mean(), 1e-300)
-        elif rs is not None:
-            rs = np.asarray(rs, dtype=float).reshape(-1)[live]
-        state = {"k": float("nan"), "nfev": 0, "scale": rs,
-                 "absolute": absolute,
-                 "nw": None if (norm_weight is None or absolute) else nw[live]}
-        sol = root(_sph_residual, x[live], method="krylov",
-                   args=(live, ln_ref_n, shape, homogenized_materials, solve,
-                         state),
-                   options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose)))
-        x = np.zeros(ref.size)
-        x[live] = sol.x
-        mu = np.exp(x).reshape(shape)
-        corrected = [_scale_material(homogenized_materials[i], mu[i])
-                     for i in range(R)]
-        # Re-solve so k_eff belongs to the returned materials.
-        _, k = solve(corrected)
-        return SphResult(corrected_materials=corrected, factors=mu, k_eff=k,
-                         iterations=state["nfev"], converged=bool(sol.success))
-    if method != "anderson":
-        raise ValueError(f"method must be 'anderson', 'jfnk', 'hybr' or 'lm', "
-                         f"got {method!r}")
+        root(residual_k, z0, method="krylov",
+             options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose)))
+    else:
+        if method == "hybr":
+            root(residual_k, z0, method="hybr", options=dict(xtol=xtol))
+        if prob.best["res"] > tol:
+            # Least squares from the best point so far: robust where Powell's
+            # hybrid wanders into infeasible factors, and it returns the floor
+            # when no exact solution exists. LM alone can stall short of an
+            # existing root (measured: 9e-6 after its evaluation budget, where
+            # a hybr restart from its endpoint reached 6e-15), hence the polish.
+            n = z0.size
+            least_squares(residual_k, best_z(), method="lm", xtol=xtol,
+                          ftol=xtol, gtol=xtol, max_nfev=max(50, 10 * (n + 1)))
+            if prob.best["res"] > tol:
+                root(residual_k, best_z(), method="hybr", options=dict(xtol=xtol))
+    b = prob.best
+    return finish(b["x"], b["k"], b["res"], s=b["s"])
 
-    X, F = [], []
-    k = float("nan")
-    converged = False
-    x_solved = x
-    for it in range(1, max_iter + 1):
-        x_solved = x                                  # the iterate k belongs to
-        mu = np.exp(x).reshape(shape)
-        region_flux, k = solve([_scale_material(homogenized_materials[i], mu[i])
-                                for i in range(R)])
-        phi = np.asarray(region_flux, dtype=float).reshape(-1)
-        ln_phi_n = np.zeros(ref.size)
-        ln_phi_n[live] = np.log(phi[live] if absolute
-                                else phi[live] / (nw[live] * phi[live]).sum())
-        f = (ln_ref_n - ln_phi_n) - x                 # residual of x = g(x)
-        f[~live] = 0.0                                # frozen regions never move
-        err = np.abs(np.expm1(f)).max()               # |mu_new/mu - 1|
-        if err < tol:
-            converged = True
-            break
-        X.append(x)
-        F.append(f)
-        if len(F) > depth:
-            X.pop(0)
-            F.pop(0)
-        x = _anderson_step(X, F, relax)
-    # Return the last iterate that was actually solved: after max_iter the
-    # pending Anderson update has no coarse solve, so pairing its materials
-    # with the previous k_eff would give an inconsistent result.
-    mu = np.exp(x_solved).reshape(shape)
-    corrected = [_scale_material(homogenized_materials[i], mu[i]) for i in range(R)]
-    return SphResult(corrected_materials=corrected, factors=mu, k_eff=k,
-                     iterations=it, converged=converged)
 
+def sph_kinetics(kinetics, factors):
+    """Kinetics data for a transient with SPH-corrected materials.
+
+    Under Phi = phi / mu every term of the time-dependent diffusion equation
+    that multiplies phi_g scales by mu_g, including the time derivative: the
+    corrected model needs ``1 / v~_g = mu_g / v_g``, i.e. per-material speeds
+    ``v_g / mu_{i,g}``. Delayed-neutron data need no change (beta multiplies
+    the corrected nu*Sigma_f, which already carries mu).
+
+    Without this the SPH model's generation time is biased (measured on a
+    reflective colorset: +20.7 % with v, +0.2 % with v/mu; audit finding F7).
+    Griffin uses the uncorrected 1/v (Takasugi et al. 2023, Eq. 8).
+
+    kinetics : :class:`~garnet.materials.Kinetics` with (G,) or (R, G) speeds.
+    factors  : (R, G) SPH factors, one row per entry of the coarse model's
+               materials list (``SphResult.factors``).
+
+    Returns a new Kinetics with (R, G) velocities. Per-material velocities are
+    supported by :class:`~garnet.transient.TransientSolver` (diffusion).
+    """
+    from .materials import Kinetics
+
+    mu = np.asarray(factors, dtype=float)
+    if mu.ndim != 2 or np.any(mu <= 0.0) or not np.all(np.isfinite(mu)):
+        raise ValueError("factors must be a finite, positive (R, G) array")
+    v = np.asarray(kinetics.velocities, dtype=float)
+    if v.ndim == 1:
+        if v.shape[0] != mu.shape[1]:
+            raise ValueError(f"{v.shape[0]} velocities for {mu.shape[1]} groups")
+        v = np.broadcast_to(v, mu.shape)
+    elif v.shape != mu.shape:
+        raise ValueError(f"velocities {v.shape} do not match factors {mu.shape}")
+    return Kinetics(velocities=v / mu, beta=kinetics.beta, decay=kinetics.decay,
+                    chi_delayed=kinetics.chi_delayed)
 
 
 def sph_correct_monolithic(homogenized_materials, region_map,
@@ -995,9 +1112,9 @@ def sph_df_correct(homogenized_materials, region_map, reference_region_flux,
         bad = np.concatenate([np.atleast_1d(v) for v in bad]).astype(bool)
         # Gauge fix (see docstring). Taken over the FLUX rows only, not all rows.
         # Letting the current rows help set it lets them shift every mu by a
-        # common factor, and mu is not a gauge: D_SCALING = "inverse" makes
-        # D ~ 1/mu, so a global mu shift changes leakage NON-proportionally and
-        # therefore changes k. Reading it off the flux rows pins mu at the level
+        # common factor, and with a vacuum boundary mu is not a gauge (and under
+        # the pre-audit D_SCALING = "inverse", D ~ 1/mu, it never was), so a
+        # global mu shift changes leakage and therefore k. Reading it off the flux rows pins mu at the level
         # SPH itself would choose and leaves DF/BCf to carry the currents.
         # (All-row gauge measured: every variant converged but k sat 2900-4100
         # pcm low, systematically, with cost as small as 2e-7.)

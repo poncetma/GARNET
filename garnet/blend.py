@@ -154,3 +154,53 @@ class MaterialBlend:
                 f"expected a per-material table (1-D) or a per-cell field with "
                 f"shape {self.shape}, got shape {arr.shape}")
         return self.harmonic(arr) if harmonic else self.linear(arr)
+
+
+def blend_material(base, partner, weight, name=None):
+    """One Material equal to a volume blend of two, by the rules of
+    :class:`MaterialBlend`: reaction cross sections (absorption, production,
+    kappa*Sigma_f, total, scattering) linear in the partner fraction ``weight``,
+    the diffusion coefficient harmonic, the emission spectrum weighted by each
+    component's total nu*Sigma_f. For solvers that take one material per cell
+    (:class:`garnet.mesh.UnstructuredDiffusionSolver`), so a volume-mixed cell
+    reproduces the mixed cell of the raster solvers exactly."""
+    from .materials import Material
+
+    w = float(weight)
+    if not 0.0 <= w <= 1.0:
+        raise ValueError(f"weight must lie in [0, 1], got {weight}")
+
+    def lin(a, b):
+        return (1.0 - w) * np.asarray(a, dtype=float) + w * np.asarray(b, dtype=float)
+
+    pb = (1.0 - w) * float(np.sum(base.nu_sigma_f))
+    po = w * float(np.sum(partner.nu_sigma_f))
+    chi = ((pb * np.asarray(base.chi) + po * np.asarray(partner.chi)) / (pb + po)
+           if pb + po > 0.0 else np.asarray(base.chi))
+    kb, ko = base.kappa_fission, partner.kappa_fission
+    kappa = (None if kb is None and ko is None else
+             lin(np.zeros_like(base.sigma_a) if kb is None else kb,
+                 np.zeros_like(base.sigma_a) if ko is None else ko))
+    diffusion = 1.0 / ((1.0 - w) / np.asarray(base.diffusion, dtype=float)
+                       + w / np.asarray(partner.diffusion, dtype=float))
+    return Material(name=name or f"{base.name}+{w:.4f}*{partner.name}",
+                    diffusion=diffusion, sigma_a=lin(base.sigma_a, partner.sigma_a),
+                    nu_sigma_f=lin(base.nu_sigma_f, partner.nu_sigma_f),
+                    sigma_s=lin(base.sigma_s, partner.sigma_s), chi=chi,
+                    total=lin(base.sigma_t, partner.sigma_t), kappa_fission=kappa)
+
+
+def per_cell_blended_materials(materials, cell_material, mix_material, mix_weight):
+    """Materials and per-cell indices with every volume-mixed cell given its own
+    blended material (:func:`blend_material`), for one-material-per-cell
+    solvers. Unmixed cells keep their index; the returned list is ``materials``
+    followed by one blend per mixed cell."""
+    cell_material = np.asarray(cell_material).reshape(-1)
+    mm = np.asarray(mix_material).reshape(-1)
+    w = np.asarray(mix_weight, dtype=float).reshape(-1)
+    out = list(materials)
+    cells = np.array(cell_material, copy=True)
+    for c in np.flatnonzero((mm >= 0) & (w > 0.0)):
+        cells[c] = len(out)
+        out.append(blend_material(materials[cell_material[c]], materials[mm[c]], w[c]))
+    return out, cells

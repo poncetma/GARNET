@@ -75,12 +75,21 @@ class ThermalFeedback:
                  D = 1/(3 Sigma_tr), which is what ``volume_homogenize``
                  produces. Turn off for libraries carrying an independent
                  ``total``.
+    sph_factors : (M, G) SPH factors mu when the materials are SPH-corrected
+                 (``SphResult.factors``), else None. The corrected material
+                 has D~ = mu D and Sigma~ = mu Sigma, so the transform of
+                 1/D += 3 dSigma_a is 1/D~ += 3 dSigma~_a / mu^2. Without the
+                 factors the Doppler update of D is off by the relative factor
+                 mu^2 - 1, to first order in dSigma_a (about -42 % of the D
+                 change at mu = 0.76). Every multiplicative change, including
+                 the expansion law, transforms exactly and needs nothing.
     """
 
     t_ref: np.ndarray
     doppler: np.ndarray
     expansion: np.ndarray | None = None
     doppler_updates_diffusion: bool = True
+    sph_factors: np.ndarray | None = None
 
     def __post_init__(self):
         self.t_ref = np.atleast_1d(np.asarray(self.t_ref, dtype=float))
@@ -95,6 +104,13 @@ class ThermalFeedback:
             self.expansion = np.atleast_1d(np.asarray(self.expansion, dtype=float))
             if len(self.expansion) != len(self.t_ref):
                 raise ValueError("expansion must have one value per material")
+        if self.sph_factors is not None:
+            self.sph_factors = np.asarray(self.sph_factors, dtype=float)
+            if (self.sph_factors.ndim != 2 or len(self.sph_factors) != len(self.t_ref)
+                    or not np.all(np.isfinite(self.sph_factors))
+                    or np.any(self.sph_factors <= 0.0)):
+                raise ValueError("sph_factors must be a finite, positive (M, G) "
+                                 "array with one row per material")
 
     @property
     def n_materials(self) -> int:
@@ -165,6 +181,19 @@ class ThermalFeedback:
             column = doppler[:, 0 if coefficient_groups == 1 else g]
             return [column[i] * s for i, s in zip(indices, sqrt_change)]
 
+        # Weight of each component's absorption change in its 1/D update:
+        # 1 for plain materials, 1/mu^2 for SPH-corrected ones (D~ = mu D).
+        if self.sph_factors is not None and self.doppler_updates_diffusion:
+            if self.sph_factors.shape[1] != G:
+                raise ValueError(f"sph_factors has {self.sph_factors.shape[1]} "
+                                 f"groups, the solver {G}")
+            inverse_mu2 = xp.asarray(1.0 / self.sph_factors ** 2, dtype=dtype)
+
+            def diffusion_weights(g):
+                return [inverse_mu2[i, g] for i in indices]
+        else:
+            diffusion_weights = None
+
         if self.expansion is not None:
             beta = xp.asarray(self.expansion, dtype=dtype)
             density_factors = [1.0 - beta[i] * (temperature_field - t_ref[i])
@@ -197,6 +226,13 @@ class ThermalFeedback:
                 differ |= kb != ko
             if density_factors is not None:
                 differ |= density_factors[0] != density_factors[1]
+            if diffusion_weights is not None:
+                # different SPH factors under a nonzero Doppler change: the
+                # 1/D update needs each component's own absorption change
+                for g in range(G):
+                    kb, ko = doppler_multipliers(g)
+                    wb, wo = diffusion_weights(g)
+                    differ |= (wb != wo) & ((kb != 0.0) | (ko != 0.0))
             weighted = bool(xp.any(shared & differ))
         if weighted:
             materials = getattr(fields, "materials", None) or materials
@@ -258,9 +294,19 @@ class ThermalFeedback:
                 # form loses a bit or two there, which would make a switched-off
                 # feedback measurably different from no feedback at all). The
                 # harmonic blend is linear in 1/D, so adding the BLENDED dSa is
-                # the same as blending each material's 1/D + 3 dSa_i.
+                # the same as blending each material's 1/D + 3 dSa_i. With SPH
+                # factors each component's change is weighted by 1/mu_i^2.
+                d_inverse_d = d_sa
+                if diffusion_weights is not None:
+                    w_g = diffusion_weights(g)
+                    d_inverse_d = d_sa * single_law(w_g)
+                    if weighted:
+                        per_material = sum(
+                            f * m * a * w for f, m, a, w in
+                            zip(fractions, doppler_g, absorption, w_g))
+                        d_inverse_d = xp.where(shared, per_material, d_inverse_d)
                 fields.diffusion[g] = fields.diffusion[g] / (
-                    1.0 + 3.0 * d_sa * fields.diffusion[g])
+                    1.0 + 3.0 * d_inverse_d * fields.diffusion[g])
 
             if density_factors is None:
                 continue
@@ -273,7 +319,10 @@ class ThermalFeedback:
 
                 inverse_d = [1.0 / v for v in per_component(tables["diffusion"][:, g])]
                 if self.doppler_updates_diffusion:
-                    inverse_d = [v + 3.0 * d for v, d in zip(inverse_d, d_absorption)]
+                    w_g = (diffusion_weights(g) if diffusion_weights is not None
+                           else [1.0] * len(d_absorption))
+                    inverse_d = [v + 3.0 * d * w for v, d, w in
+                                 zip(inverse_d, d_absorption, w_g)]
                 factor = {
                     "sigma_a": blended_multiplier(after_doppler("sigma_a"), density_factors),
                     "removal": blended_multiplier(after_doppler("removal"), density_factors),

@@ -348,3 +348,44 @@ def test_hpmr_expansion_coefficient_reproduces_the_requested_pcm_per_K():
     alpha = measure_pcm_per_K(factory, p.grid.shape, fb, t_cal=800.0, dT=20.0,
                               tol_k=1e-11, tol_source=1e-10)
     assert alpha == pytest.approx(-1.5, rel=0.02)
+
+
+# -- SPH-corrected materials ---------------------------------------------------
+
+def test_doppler_on_sph_corrected_materials_is_the_transform_of_the_plain_update():
+    """With D~ = mu D and Sigma~ = mu Sigma the corrected fields after feedback
+    must be mu times the plain fields after feedback, cell by cell. The Doppler
+    update of D needs the factors for that (1/D~ += 3 dSigma~_a / mu^2);
+    without them D is off to first order in dSigma_a."""
+    from garnet.sph import _scale_material
+
+    grid, mmap = _problem(n=8)
+    xp = get_backend("cpu")
+    mu = np.array([[0.9, 1.2], [1.1, 0.76]])
+    corrected = [_scale_material(m, mu[i]) for i, m in enumerate(_materials())]
+    fb = _feedback(doppler=2e-3)
+    fb_sph = ThermalFeedback(t_ref=fb.t_ref, doppler=fb.doppler, sph_factors=mu)
+    hot = Fields(xp, grid, _materials(), mmap, np.float64,
+                 xs_update=uniform(fb, grid.shape, 1400.0))
+    hot_sph = Fields(xp, grid, corrected, mmap, np.float64,
+                     xs_update=uniform(fb_sph, grid.shape, 1400.0))
+    hot_unaware = Fields(xp, grid, corrected, mmap, np.float64,
+                         xs_update=uniform(fb, grid.shape, 1400.0))
+    for g in range(2):
+        cell_mu = mu[:, g][mmap]
+        for name in ("sigma_a", "removal", "sigma_t", "nu_sigma_f", "diffusion"):
+            np.testing.assert_allclose(getattr(hot_sph, name)[g],
+                                       cell_mu * getattr(hot, name)[g], rtol=1e-13)
+    fuel = mmap == 1
+    plain_change = 1.0 - hot.diffusion[1][fuel] / (_materials()[1].diffusion[1])
+    unaware = 1.0 - hot_unaware.diffusion[1][fuel] / corrected[1].diffusion[1]
+    np.testing.assert_allclose(unaware / plain_change, 0.76 ** 2, rtol=1e-3)
+
+
+def test_sph_factors_must_match_the_materials():
+    with pytest.raises(ValueError, match="sph_factors"):
+        ThermalFeedback(t_ref=[T_REF, T_REF], doppler=[0.0, 1e-3],
+                        sph_factors=np.ones((3, 2)))
+    with pytest.raises(ValueError, match="sph_factors"):
+        ThermalFeedback(t_ref=[T_REF, T_REF], doppler=[0.0, 1e-3],
+                        sph_factors=[[1.0, 0.0], [1.0, 1.0]])

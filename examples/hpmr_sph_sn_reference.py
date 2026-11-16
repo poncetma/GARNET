@@ -34,7 +34,8 @@ from garnet import asnumpy
 from garnet import (TriDiffusionEigenSolver, TriSDP1EigenSolver,
                    TriSDP2EigenSolver, TriSP3EigenSolver,
                    flux_weighted_homogenize, region_average, sph_correct)
-from garnet.benchmarks.hpmr import build_hpmr2d, DRUM_ABSORBER
+from garnet.benchmarks.hpmr import (CENTRAL, DRUM_ABSORBER, DRUM_BE, FUEL,
+                                    build_hpmr2d)
 from garnet.tri_sn import TriSNTransportSolver
 
 refine = int(sys.argv[1]) if len(sys.argv) > 1 else 4
@@ -42,6 +43,9 @@ n_polar = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 n_azi = int(sys.argv[3]) if len(sys.argv) > 3 else 8
 
 TIGHT = dict(tol_k=1e-9, tol_source=1e-8)
+# SPH is solved with k fixed at each reference (vacuum boundary) and the
+# vacuum-facing Be reflector left uncorrected; see garnet.sph.sph_correct.
+INTERIOR = (FUEL, CENTRAL, DRUM_BE, DRUM_ABSORBER)
 TIGHT_SN = dict(tol_k=1e-8, tol_source=1e-7)
 # Drum-arc rotation. Verified by eigenvalue, not by assumption: 0 deg gives the
 # LOWER k, i.e. the arc faces the core and the drum is inserted.
@@ -101,8 +105,9 @@ def solve_state(angle):
             raise SystemExit(f"{name} reference not converged at {angle} deg")
         hmats, rflux, _ = flux_weighted_homogenize(
             flux, p.materials, region, region, cell_volume=dV, **mixkw)
-        sph = sph_correct(hmats, region, rflux, coarse_solve, tol=1e-7,
-                          depth=6, max_iter=300)
+        sph = sph_correct(hmats, region, rflux, coarse_solve, normalization="none",
+                          k_ref=k_ref, tol=1e-7,
+                          sph_regions=np.isin(np.arange(len(hmats)), INTERIOR))
         out[name] = dict(k_ref=k_ref, k_sph=sph.k_eff, mu=sph.factors,
                          its=sph.iterations, t_ref=t_ref, ok=sph.converged)
     return dif.k_eff, out
@@ -126,7 +131,7 @@ for angle, tag in ((INSERTED, "INSERTED (0 deg, arc toward core)"),
               f"{1e5 * (d['k_ref'] - dif_k):>+8.0f}p "
               f"{1e5 * (d['k_sph'] - dif_k):>+8.0f}p "
               f"{1e5 * abs(d['k_sph'] - d['k_ref']):>9.1f}p "
-              f"{(str(d['its']) if d['ok'] else 'DIV'):>4} "
+              f"{(str(d['its']) if d['ok'] else 'FAIL'):>4} "
               f"{d['t_ref']:>6.1f}s   {mu:>14}")
     print()
 

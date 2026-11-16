@@ -121,6 +121,8 @@ def test_sph_factor_scales_cross_sections(lib_path):
     np.testing.assert_allclose(scaled.nu_sigma_f, mu * base.nu_sigma_f)
     np.testing.assert_allclose(scaled.sigma_t, mu * base.sigma_t)
     np.testing.assert_allclose(scaled.sigma_s, mu[:, None] * base.sigma_s)
+    # D~ = mu D, not 1/(3 mu Sigma_t) = D / mu (SPH audit 2026-11-13, F1)
+    np.testing.assert_allclose(scaled.diffusion, mu * base.diffusion)
     # A uniform SPH factor scales every reaction equally and cancels in the
     # eigenvalue ratio, leaving k_inf invariant -- the property that makes SPH
     # a pure spectral reshaping, not a criticality knob.

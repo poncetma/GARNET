@@ -3,7 +3,11 @@
 The SPH pipeline (:mod:`garnet.sph`) folds a transport reference's angular
 treatment of the near-black B4C control-drum arc into the coarse diffusion
 constants, so plain TriDiffusion reproduces the transport eigenvalue -- and
-hence the drum worth -- that it otherwise misses by ~100 pcm at insertion. The
+hence the drum worth -- that it otherwise misses by ~60 pcm at insertion. The
+factors are solved with k fixed at each reference (the core has a vacuum
+boundary) and the vacuum-facing Be reflector uncorrected, so the corrected k
+equals the reference by construction; what the families can disagree on is
+the factors themselves, in particular the drum absorber's. The
 reference is any garnet eigensolver's *physical* scalar flux phi0; the three
 matched-DoF simplified-transport families extract that flux differently:
 
@@ -36,12 +40,16 @@ import numpy as np
 from garnet import (TriDiffusionEigenSolver, TriSDP1EigenSolver,
                    TriSDP2EigenSolver, TriSP3EigenSolver,
                    flux_weighted_homogenize, region_average, sph_correct)
-from garnet.benchmarks.hpmr import build_hpmr2d, DRUM_ABSORBER
+from garnet.benchmarks.hpmr import (CENTRAL, DRUM_ABSORBER, DRUM_BE, FUEL,
+                                    build_hpmr2d)
 
 refine = int(sys.argv[1]) if len(sys.argv) > 1 else 4
 device = sys.argv[2] if len(sys.argv) > 2 else "cpu"
 
 TIGHT = dict(tol_k=1e-9, tol_source=1e-8)
+# SPH is solved with k fixed at each reference (vacuum boundary) and the
+# vacuum-facing Be reflector left uncorrected; see garnet.sph.sph_correct.
+INTERIOR = (FUEL, CENTRAL, DRUM_BE, DRUM_ABSORBER)
 FAMILIES = {"SP3": TriSP3EigenSolver, "SDP1": TriSDP1EigenSolver,
             "SDP2": TriSDP2EigenSolver}
 # Drum-arc rotation. These were swapped until verified against the eigenvalue:
@@ -76,7 +84,9 @@ def solve_state(angle):
             raise SystemExit(f"{name} reference not converged at {angle} deg")
         hmats, rflux, _ = flux_weighted_homogenize(
             ref.flux_numpy, p.materials, region, region, cell_volume=dV)
-        sph = sph_correct(hmats, region, rflux, coarse_solve, tol=1e-7, depth=6)
+        sph = sph_correct(hmats, region, rflux, coarse_solve, normalization="none",
+                          k_ref=ref.k_eff, tol=1e-7,
+                          sph_regions=np.isin(np.arange(len(hmats)), INTERIOR))
         if not sph.converged:
             raise SystemExit(f"{name} SPH did not converge at {angle} deg")
         out[name] = (ref.k_eff, sph.k_eff, sph.factors)
@@ -106,8 +116,8 @@ for name, (ref_k, sph_k, mu) in fam.items():
     print(f"  {name:>6} {ref_k:>12.6f} {sph_k:>10.6f} {d_ref:>+8.0f}p "
           f"{d_sph:>+8.0f}p {gap:>9.1f}p   {mus:>16}")
 print("  (ref-dif = transport worth of the angular self-shielding; SPH-dif = "
-      "how much\n   of it the corrected diffusion recovers; |SPH-ref| should be "
-      "a few pcm)")
+      "how much\n   of it the corrected diffusion recovers; |SPH-ref| is ~0 "
+      "because k is fixed at the reference)")
 
 # --- 2. control-drum worth (withdrawn -> inserted), three ways ----------------
 dif_w, fam_w = states[WITHDRAWN]

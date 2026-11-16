@@ -221,13 +221,14 @@ def volume_homogenize(materials, fractions, chi_from=None, name="homogenized",
     chi_from    : id whose fission spectrum to use (default: the first fissile
                   material) -- only fissile regions emit, so chi is taken from
                   the fuel rather than volume-mixed.
-    sph_factors : optional per-group SPH multipliers applied to the homogenized
-                  total/absorption/production (a rigorous SPH correction from a
-                  transport reference); default None = plain volume homogenization.
+    sph_factors : optional per-group SPH factors mu applied to the homogenized
+                  material (from a transport reference); default None = plain
+                  volume homogenization. Every cross section and D are
+                  multiplied by mu, as in :func:`garnet.sph._scale_material`.
 
     Total, Sigma_a, nuSigma_f, kappaSigma_f and the scattering matrix are
     volume-averaged (exact reaction-rate conservation under a flat flux);
-    D = 1/(3 <Total>).
+    D = 1/(3 <Total>) from the uncorrected total, times mu with SPH.
     """
     ids = list(fractions)
     G = materials[ids[0]].n_groups
@@ -252,8 +253,13 @@ def volume_homogenize(materials, fractions, chi_from=None, name="homogenized",
         chi_from = next((i for i in ids if materials[i].is_fissile), ids[0])
     chi = materials[chi_from].chi
 
+    diffusion = 1.0 / (3.0 * total)
     if sph_factors is not None:
+        # D~ = mu D (IGE-335 Eq. 3.43). Taking D from the corrected total,
+        # 1/(3 mu Sigma_t), would be D / mu: the non-standard convention the
+        # 2026-11-13 SPH audit found to break the per-group gauge (finding F1).
         mu = np.asarray(sph_factors, dtype=float)
+        diffusion = diffusion * mu
         total = total * mu
         sigma_a = sigma_a * mu
         nu_sigma_f = nu_sigma_f * mu
@@ -262,7 +268,7 @@ def volume_homogenize(materials, fractions, chi_from=None, name="homogenized",
             kappa_fission = kappa_fission * mu
 
     fissile = bool(np.any(nu_sigma_f > 0))
-    return Material(name=name, diffusion=1.0 / (3.0 * total), sigma_a=sigma_a,
+    return Material(name=name, diffusion=diffusion, sigma_a=sigma_a,
                     nu_sigma_f=nu_sigma_f, sigma_s=sigma_s,
                     chi=chi if fissile else None, total=total,
                     kappa_fission=kappa_fission)

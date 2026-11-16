@@ -509,6 +509,20 @@ per-cell `cell_volume` array to `flux_weighted_homogenize` and to
 `region_average`, the coarse-solve region average. On r-z grids that array is
 `grid.cell_volumes`. The default of 1 is correct only on a uniform grid.
 
+`sph_correct` takes `normalization="flux-volume"` (default; needs
+`region_volume`, the third return of `flux_weighted_homogenize`) for reflective
+generation geometries, or `normalization="none"` with `k_ref` for
+vacuum-bounded ones. `sph_regions` restricts the correction to a subset of
+regions, such as the fuel. `SphResult.converged` is `residual <= tol`,
+measured at the returned factors. For transients, pass the kinetics through
+`sph_kinetics(kinetics, sph_result.factors)`, which returns per-material
+speeds `v / mu`; the user guide has a complete generation example.
+`apply_sph_factors(materials, factors)` applies tabulated factors to
+tabulated zone materials of another state. Per-group pin form functions
+(Kumar et al. 2026) are in `garnet.pin_power`: `pin_footprints`,
+`footprint_flux`, `group_form_functions` and
+`reconstruct_group_form_functions`.
+
 ### Thermal coupling
 
 Thermal data and analytic feedback can be keyed by material names instead of

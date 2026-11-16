@@ -218,3 +218,25 @@ def test_tabulated_material_as_the_blend_partner_is_refused():
     f = Fields(np, GRID, MATS, MMAP, np.float64,
                xs_update=_tabulated().hook(np.full(GRID.shape, 1200.0)))
     assert _cell(f.sigma_a[0], 0) == pytest.approx(1.03 * FUEL.sigma_a[0], rel=1e-12)
+
+
+def test_sph_corrected_mixed_cell_weights_each_doppler_change_by_its_factor():
+    # Corrected materials: Sigma~_i = mu_i Sigma_i, D~_i = mu_i D_i. In the
+    # 50/50 cell 1/D~ = sum_i w_i (1/D~_i + 3 dSigma~_i / mu_i^2), with the
+    # fuel's Doppler change only.
+    from garnet.sph import _scale_material
+
+    mu = np.array([[1.1, 0.9], [0.8, 0.6]])
+    mats = [_scale_material(m, mu[i]) for i, m in enumerate(MATS)]
+    fb = ThermalFeedback(t_ref=[900.0, 900.0], doppler=[0.01, 0.0], sph_factors=mu)
+    hook = fb.hook(np.full(GRID.shape, 1600.0), materials=mats)
+    hot = Fields(np, GRID, mats, MMAP, np.float64, mix_material=MIX,
+                 mix_weight=W, xs_update=hook)
+    for g in range(2):
+        d_fuel = 0.01 * mats[0].sigma_a[g] * 10.0                 # dSigma~ of the fuel
+        inv_d = (0.5 * (1.0 / mats[0].diffusion[g] + 3.0 * d_fuel / mu[0, g] ** 2)
+                 + 0.5 / mats[1].diffusion[g])
+        assert _cell(hot.diffusion[g]) == pytest.approx(1.0 / inv_d, rel=1e-12)
+        # the pure fuel cell is the plain transform
+        plain = 1.0 / (1.0 / MATS[0].diffusion[g] + 3.0 * 0.01 * MATS[0].sigma_a[g] * 10.0)
+        assert _cell(hot.diffusion[g], 0) == pytest.approx(mu[0, g] * plain, rel=1e-12)

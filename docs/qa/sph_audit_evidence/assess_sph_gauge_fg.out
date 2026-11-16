@@ -1,0 +1,28 @@
+
+=== F. Fixed-k existence vs coarse node size (water-reflected slab, vacuum x) ===
+SP3 k_ref = 1.1303859; water thermal diffusion length 2.85 cm
+    node    homog  corrected  fixed-k  residual     k err  flux-volume k err
+   2.50c  -199.6p  all           True   5.7e-13     +0.0p     +86.3p (conv=True)
+   2.50c  -199.6p  fuel only     True   1.3e-13     +0.0p     -93.5p (conv=True)
+   3.75c  -239.7p  all           True   4.0e-15     -0.0p     +60.3p (conv=True)
+   3.75c  -239.7p  fuel only     True   4.2e-15     -0.0p    -100.4p (conv=True)
+   5.00c  -205.8p  all           True   2.6e-13     -0.0p     +29.0p (conv=True)
+   5.00c  -205.8p  fuel only     True   4.2e-15     +0.0p     -79.1p (conv=True)
+   7.50c   +88.7p  all          False   1.8e-02   -175.0p    -185.9p (conv=False)
+   7.50c   +88.7p  fuel only    False   1.8e-03   -164.4p     +47.7p (conv=True)
+
+=== G. HP-MR 2-D, refine 4, raster absorber, TriSP3 reference, one region per material ===
+
+drum angle 0 deg: TriSP3 k = 1.0106653, diffusion -62.1 pcm
+  formulation                  conv  nfev    k err  all x1.3  mu (fast, thermal): fuel | Be reflector | drum absorber
+  flux-volume, all             True    14   +9.92p    +3.96p  (1.004,0.972) | (0.934,1.035) | (0.906,0.801)
+  fixed k, all                 True    36   +0.00p    +3.60p  (0.263,0.873) | (0.247,0.943) | (0.238,0.722)
+  fixed k, no Be reflector     True    23   +0.00p    +3.81p  (1.064,0.919) | (1.000,1.000) | (0.964,0.760)
+  fixed k, fuel only           True    24   +0.00p    +3.66p  (1.059,1.019) | (1.000,1.000) | (1.000,1.000)
+
+drum angle 180 deg: TriSP3 k = 1.0297527, diffusion +61.9 pcm
+  formulation                  conv  nfev    k err  all x1.3  mu (fast, thermal): fuel | Be reflector | drum absorber
+  flux-volume, all             True    14  +26.63p    +8.25p  (1.005,0.966) | (0.933,1.030) | (1.156,0.743)
+  fixed k, all                 True    31   +0.00p    +6.93p  (0.327,0.777) | (0.307,0.849) | (0.597,0.647)
+  fixed k, no Be reflector     True    25   -0.00p    +7.97p  (1.064,0.899) | (1.000,1.000) | (1.206,0.718)
+  fixed k, fuel only           True    33   -0.00p    +7.67p  (1.064,0.927) | (1.000,1.000) | (1.000,1.000)

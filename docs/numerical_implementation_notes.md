@@ -31,65 +31,86 @@ outer sweeps from 1,347 to 1,080. The benefit depends on both mechanisms.
 ## SPH nonlinear solves
 
 A non-positive trial region flux makes the logarithmic SPH residual undefined.
-The recovery residual is proportional to `log(mu)`, pulling factors toward
-`mu=1`. Its nonzero Jacobian gives Newton a recovery direction. The previous
-constant penalty had a zero Jacobian: an HP-MR run stalled at a residual
-magnitude of 106.826 while its line-search step changed without improving it.
+The recovery residual is proportional to the distance from the starting
+factors, so its Jacobian gives Newton a direction back. A constant penalty has
+a zero Jacobian: an HP-MR run with one stalled at a residual of 106.826 while
+its line-search step changed without improving it.
 
-The small HP-MR SPH problem had roughly twelve active region/group unknowns.
-With production normalization, a Jacobian-free solve required 2,017 residual
-evaluations without converging. A dense numerical Jacobian cost thirteen
-coarse solves per construction and let the trust-region method resolve the
-poor row scaling. This motivates offering dense and Krylov methods separately;
-the appropriate choice depends on problem size and conditioning.
+`sph_correct` keeps the best point it evaluated, with that point's own
+eigenvalue, and sets `converged` from the measured residual at the returned
+factors, never from a SciPy flag. A solver flag can be false at a residual of
+1e-11 or true at a step-size stop. `SphResult.residual` holds the value.
 
-### Open issue: diffusion-coefficient scaling and flux normalisation
+The fixed-`k` formulation, `normalization="none"`, solves with MINPACK `hybr`
+first. If that misses the tolerance it runs a Levenberg–Marquardt least-squares
+solve from the best point, then `hybr` again from the least-squares endpoint.
+Least squares alone stalled at a residual of 9e-6 on a case where the restart
+reached 6e-15, and `hybr` alone can wander into infeasible factors. When no
+solution exists, the least-squares floor is what the result reports. For many
+unknowns, `method="jfnk"` avoids the dense Jacobian of one coarse solve per
+unknown.
 
-`garnet.sph.D_SCALING` selects how an SPH factor `mu` corrects the diffusion
-coefficient; the default, `"inverse"`, is kept unchanged in the code for now:
+### Diffusion-coefficient convention and normalization (resolved 2026-11-13)
 
-| `D_SCALING` | Correction | Origin |
+Until the SPH audit of 13 November 2026
+([report](qa/sph_audit_2026-11-13.md)) the default correction was
+`D -> D / mu`, with one normalization constant shared by all regions and
+groups. Both were defects, and both are fixed on branch `SPH-dev`:
+
+| Item | Before | Now |
 |---|---|---|
-| `"inverse"` (default) | `D -> D / mu` | Transport consistency: `Sigma_t x mu` gives `D = 1/(3 Sigma_tr) x 1/mu` |
-| `"direct"` | `D -> mu D` | Laboure et al. 2019, Eq. 7; Ortensi et al. |
+| Diffusion coefficient | `D / mu` | `mu D`, the exact transform of `phi = mu Phi` (IGE-335 Eq. 3.43; Labouré et al. 2019 Eq. 7; Kumar et al. 2026 Eq. 2) |
+| Normalization | one constant, unit or production weights | one flux–volume constant per group, `normalization="flux-volume"` |
+| Vacuum-bounded generation geometry | normalized, `k` not reproduced | `normalization="none"`: `k` fixed at the reference, no normalization (Labouré et al. 2019 §3.2; Griffin) |
+| Restriction to the fuel | none | `sph_regions` mask; other regions keep `mu = 1` |
+| Transients | `1/v` | `sph_kinetics`: per-material `v/mu` |
 
-The exact transform of the diffusion equation is `"direct"`. Substituting
-`phi = mu phi~` into `-div(D grad phi) + Sigma phi = S`, with `mu` constant in
-each region, gives `D~ = mu D` and `Sigma~ = mu Sigma` there. Under that
-transform, multiplying every `mu` by one constant rescales the whole operator
-and leaves `k` unchanged. The SPH flux normalisation fixes that constant, so
-with `"direct"` the convention is nearly harmless.
+`D / mu` breaks the per-group scaling symmetry of the corrected operator.
+On a reflective colorset, multiplying one group's converged factors by 1.3
+moves `k` by 830 to 980 pcm with `D / mu`, and by 0.00 pcm with `mu D`. A
+normalization then picks one of many operators that all reproduce the
+reference, with different eigenvalues. The table that this note used to carry
+as an open issue is the symptom:
 
-With `"inverse"`, a common rescaling of `mu` multiplies the removal terms by
-`c` and the leakage terms by `1/c`. That changes `k`, so the converged SPH
-eigenvalue depends on the normalisation convention, not only on the reference.
-The leaky three-region colorset below shows the effect. It is a 90 x 30 cm
-PWR/poison slab, vacuum in x, with regions of unequal volume. The reference is
-SP3, the coarse solve is diffusion, and the dense `hybr` method solves SPH.
-The reference `k` is 1.0992249; uncorrected flux-volume homogenisation is
-885 pcm high.
-
-| `D_SCALING` | Sum-normalised `k` | Volume-weighted `k` | Normalisation spread | Sum-normalised error vs reference |
+| `D_SCALING` | Sum-normalized `k` | Volume-weighted `k` | Spread | Sum-normalized error |
 |---|---|---|---|---|
-| `"inverse"` | 1.1228525 | 1.1193008 | 355 pcm | +2363 pcm |
+| `"inverse"` (old default) | 1.1228525 | 1.1193008 | 355 pcm | +2363 pcm |
 | `"direct"` | 1.1159805 | 1.1157147 | 27 pcm | +1676 pcm |
 
-Every run reports `converged=True` and satisfies `mu Phi = phi_ref` to
-round-off. In this case SPH made the eigenvalue worse, from an 885 pcm error to
-2363 pcm with the default settings. A `converged` flag shows only that the SPH
-conditions were met. It does not show that the eigenvalue improved. The
-observation appears to conflict with the measurement behind the `"inverse"`
-default, recorded in the `D_SCALING` comment in `garnet/sph.py`, where
-`"inverse"` closed four times the homogenisation error on another
-leaky-colorset test. The default is therefore problem dependent and unresolved.
+The leaky three-region colorset is vacuum-bounded, so no normalized
+formulation reproduces its `k`; the remaining 27 pcm is the vacuum boundary.
+`tools/assess_sph_gauge.py` reproduces the table to every printed digit with
+a copy of the old solver (part A) and runs the gauge, vacuum, transfer and
+generation-time checks (parts B–E).
 
-The recommended next step is to evaluate `"direct"` with per-group
-flux-volume normalisation (`norm_weight` set to the region volumes) on the
-verification colorsets and on HP-MR before changing the default. Until then,
-compare SPH-corrected eigenvalues with the reference on the generation
-geometry. The reproduction script is the audit script `sph_gauge.py`, which
-calls `sph_correct(..., method="hybr")`. It compares `norm_weight=None` with
-`norm_weight` set to the per-region volumes, once under each `D_SCALING`.
+`d_scaling="inverse"` is still accepted by `_scale_material` to reproduce old
+results. On vacuum-bounded problems it can fit the reference where `mu D`
+cannot, because dividing `D` changes the diffusion length inside a region,
+which acts as a hidden leakage factor. That is why it looked better on the
+leaky-colorset test that kept it as the default in July 2026.
+
+### When the fixed-`k` formulation has no solution
+
+With `mu D` a region-uniform factor leaves the flux shape inside the region
+unchanged. At a vacuum face it only moves the effective Marshak coefficient
+between `alpha/mu -> 0` (reflective) and infinity (zero flux). Interfaces see
+a flux discontinuity of ratio `mu_L/mu_R`. If the coarse model cannot produce
+the reference region fluxes and `k` with these levers, no solution exists, and
+`sph_correct` returns its least-squares floor with `converged=False`. Two
+measured cases:
+
+| Case | Fixed-`k` result |
+|---|---|
+| A corrected region at the vacuum face mixes poison stripe and fuel (three-region colorset, regions cut at 30 and 45 cm) | no solution; floor 7e-3 to 1e-2 and `k` off by 760 to 1060 pcm, depending on the method |
+| Same colorset with regions aligned to the stripe | exact, residual 2e-15 |
+| Water–fuel–water slab, fuel-only SPH, 2.5, 3.75 and 5 cm finite-volume nodes | exact |
+| Same slab, 7.5 cm nodes | no solution, with or without the reflector corrected |
+
+The 7.5 cm nodes are 2.6 thermal diffusion lengths of the water reflector
+(2.85 cm). At that size even the uncorrected homogenized error changes sign:
+−200 pcm on the fine mesh, +89 pcm on the 7.5 cm nodes. The coarse mesh must resolve the reflector, which is
+also why Griffin meshes reflector and drums explicitly and corrects the fuel
+only (Kumar et al. 2026 §3.5.1).
 
 ## Triangular equivalence currents
 
