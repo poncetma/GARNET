@@ -308,7 +308,8 @@ def build_hpmr_assembly2d(refine=8, materials=None, lattice_map=None,
 def pin_materials_builtin():
     """The six pin materials, VENDORED in the repo -- no download, no XS file.
 
-    Real 11-group ENDF/B-8 transport-corrected constants, extracted once from
+    Real 11-group ENDF/B-8 constants (TRUE total, so D = 1/(3 Sigma_t) carries
+    no transport correction; P0-P5 scattering moments), extracted once from
     the VTB Griffin library (``fullcore_xml_G11_endfb8_ss_tr.xml``, grid index
     "3 3" ~ 800 K) and stored as ``data/hpmr_pin_xs_g11.npz`` -- 10 KB, versus
     a 1.5 MB library that lives outside the repo. This is what makes the
@@ -330,7 +331,9 @@ def pin_materials_builtin():
                             sigma_s=d[f"{name}.ss"],
                             chi=chi if chi.sum() > 0 else None,
                             kappa_fission=(d[f"{name}.kf"]
-                                           if d[f"{name}.kf"].sum() > 0 else None)))
+                                           if d[f"{name}.kf"].sum() > 0 else None),
+                            sigma_s_moments=(d[f"{name}.ssL"]
+                                             if f"{name}.ssL" in d.files else None)))
     return out
 
 

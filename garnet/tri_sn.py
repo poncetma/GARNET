@@ -176,6 +176,20 @@ class TriSNTransportSolver:
                     unlike the earlier edge-average scheme -- reaches second-order
                     convergence, resolving the HP-MR drum worth at far coarser mesh
                     than step. Costs ~3x the unknowns of step.
+    scattering_order : 0 (default) for isotropic scattering, whose total
+                    cross section must then be transport-corrected data
+                    (:func:`garnet.materials.transport_corrected`) if the
+                    physical scattering is anisotropic. L > 0 scatters
+                    anisotropically with the Legendre moments P1..PL of
+                    ``Material.sigma_s_moments`` and the TRUE total cross
+                    section, as Griffin's ``NA = L``. 2-D only; both engines.
+                    The flux is carried as real spherical-harmonic moments
+                    (in 2-D only those even in the z cosine survive:
+                    (L+1)(L+2)/2 of them, scalar flux included), the
+                    within-group iteration updates all of them, DSA
+                    accelerates the scalar flux with D = 1/(3(Sigma_t -
+                    Sigma_s1,gg)), and CMFD rescales the higher moments with
+                    the scalar flux.
     """
 
     ACCELERATIONS = ("dsa", "dsa-gmres", "gmres", "si")
@@ -189,7 +203,7 @@ class TriSNTransportSolver:
                  lu_cache: str = "all",
                  dsa_rtol: float = 1e-4, dsa_maxiter: int = 100,
                  cmfd_solver: str = "lu", sigma_t_shift=None,
-                 graphs: bool = True):
+                 graphs: bool = True, scattering_order: int = 0):
         if len(grid.shape) not in (3, 4) or grid.shape[2] != 2:
             raise ValueError("tri-S_N grid shape must be (nr, nc, 2) or "
                              "(nr, nc, 2, nz) for extruded prisms")
@@ -270,7 +284,21 @@ class TriSNTransportSolver:
                    mix_material=mix_material, mix_weight=mix_weight)
         self.st = np.stack(f.sigma_t)                        # (G, nr, nc, 2)
         removal = np.stack(f.removal)
-        self.ss_self = np.maximum(self.st - removal, 0.0)
+        # Within-group scattering = total - removal. Data with an explicit
+        # total define the balance, and transport-corrected data (out-scatter
+        # correction of a hydrogenous moderator) can put it below zero; it is
+        # kept, since clipping would create neutrons wherever it bites (HP-MR
+        # YH, groups 7-8: +1470 pcm at refine 16). Total = 1/(3D) is only an
+        # estimate, and a negative value there is clipped as before.
+        self_scatter = self.st - removal
+        explicit = np.array([m.total is not None for m in mats])
+        keep = explicit[mmap]
+        if mix_material is not None:
+            mixm = np.asarray(mix_material).reshape(grid.shape)
+            mixw = np.asarray(mix_weight, float).reshape(grid.shape)
+            keep = keep & (explicit[np.clip(mixm, 0, len(mats) - 1)] | (mixw <= 0.0))
+        self.ss_self = np.where(keep[None] & self.active[None], self_scatter,
+                                np.maximum(self_scatter, 0.0))
         # Transient collision shift: backward Euler adds theta_g = 1/(v_g dt) to
         # the total cross section. Applied *after* ss_self (within-group
         # scattering is untouched) and *before* _prefactor, so the prefactored
@@ -302,6 +330,8 @@ class TriSNTransportSolver:
             self.mu, self.eta, self.w = quadrature_2d(n_polar, n_azi)
             self.xi = None
         self.M = self.mu.size
+        self._setup_anisotropy(int(scattering_order), mats, mmap, mix_material,
+                               mix_weight)
         self._cell = np.arange(self.N).reshape(grid.shape)
         self._act_flat = self.active.reshape(-1)
         self._dsa_fac = [None] * self.G                      # lazy DSA LU per group
@@ -323,6 +353,256 @@ class TriSNTransportSolver:
             self._solvers = [[None] * self.M for _ in range(self.G)]
             self._lu_resident = None
             self._prefactor([])
+
+    # ---- anisotropic scattering ---------------------------------------------
+    def _setup_anisotropy(self, order, mats, mmap, mix_material, mix_weight):
+        """Per-cell Legendre scattering moments P1..PL and the real
+        spherical-harmonic basis on the quadrature (see ``scattering_order``)."""
+        if order < 0:
+            raise ValueError("scattering_order must be >= 0")
+        self.scattering_order = order
+        self._aniso = order > 0
+        if not self._aniso:
+            return
+        if self.is3d:
+            raise NotImplementedError("anisotropic scattering is implemented for "
+                                      "2-D triangular meshes only")
+        if self.acceleration not in ("dsa", "si"):
+            raise ValueError("anisotropic scattering supports acceleration 'dsa' "
+                             f"or 'si', got {self.acceleration!r}")
+        from scipy.special import factorial, lpmv
+
+        G, N, L = self.G, self.N, order
+        # basis: real harmonics R_lk, Schmidt semi-normalized (addition theorem
+        # P_l(O.O') = sum_k R_lk(O) R_lk(O')), polar axis z, kept when even in
+        # the z cosine (l + k even), l = 1..L. The scalar flux is moment 0.
+        xi = np.sqrt(np.maximum(0.0, 1.0 - self.mu ** 2 - self.eta ** 2))
+        az = np.arctan2(self.eta, self.mu)
+        rows, ls = [], []
+        for l in range(1, L + 1):
+            for k in range(0, l + 1):
+                if (l + k) % 2:
+                    continue
+                plk = lpmv(k, l, xi)
+                if k == 0:
+                    rows.append(plk)
+                    ls.append(l)
+                else:
+                    c = np.sqrt(2.0 * factorial(l - k) / factorial(l + k))
+                    rows.append(c * plk * np.cos(k * az))
+                    rows.append(c * plk * np.sin(k * az))
+                    ls += [l, l]
+        R = np.array(rows)                                # (J, M)
+        self._mom_l = np.array(ls)
+        gram = (R * self.w) @ R.T
+        want = np.diag(1.0 / (2.0 * self._mom_l + 1.0))
+        if np.abs(gram - want).max() > 1e-8:
+            raise ValueError(f"the ({len(self.w)}-direction) quadrature does not "
+                             f"integrate the P{L} harmonics exactly (error "
+                             f"{np.abs(gram - want).max():.1e}); use more polar or "
+                             "azimuthal directions")
+        self._R = R
+        self._Rw = R * self.w                             # moments  = Rw @ psi
+        self._Rc = (R * (2.0 * self._mom_l[:, None] + 1.0)).T   # source = Rc @ S
+        xp = self.xp
+        self._Rw_dev = xp.asarray(self._Rw)
+        self._Rc_dev = xp.asarray(self._Rc)
+        # per-cell moments l = 1..L for every (from, to) pair that scatters
+        mm = np.asarray(mmap).reshape(-1)
+        table = np.zeros((len(mats), L, G, G))
+        for i, m in enumerate(mats):
+            if m.sigma_s_moments is not None:
+                n = min(L, m.scattering_order)
+                table[i, :n] = m.sigma_s_moments[1:n + 1]
+        mixed = None
+        if mix_material is not None and mix_weight is not None:
+            mx = np.asarray(mix_material).reshape(-1)
+            mw = np.asarray(mix_weight, dtype=float).reshape(-1)
+            mixed = (mx >= 0) & (mw > 0.0)
+            mx, mw = np.where(mixed, mx, 0), np.where(mixed, mw, 0.0)
+        self._scat_l = [[[None] * G for _ in range(G)] for _ in range(L)]
+        for l in range(L):
+            for gf in range(G):
+                for gt in range(G):
+                    col = table[:, l, gf, gt]
+                    if not np.any(col):
+                        continue
+                    cellv = col[mm]
+                    if mixed is not None:
+                        cellv = np.where(mixed, (1.0 - mw) * cellv + mw * col[mx], cellv)
+                    self._scat_l[l][gf][gt] = np.where(self._act_flat_init(), cellv, 0.0)
+        # DSA with anisotropic within-group scattering: D = 1/(3(St - Ss1,gg))
+        self._dsa_sigma = [np.maximum(self.st[g].reshape(-1)
+                                      - (self._scat_l[0][g][g]
+                                         if self._scat_l[0][g][g] is not None else 0.0),
+                                      1e-12) for g in range(G)]
+        self._last_moments = None
+
+    def _act_flat_init(self):
+        return np.asarray(self.active).reshape(-1)
+
+    def _expand(self, S):
+        """Per-direction scattering source (M, N) from moment sources S (J, N):
+        q_m = sum_j (2 l_j + 1) R_j(O_m) S_j."""
+        xp = np if isinstance(S, np.ndarray) else self.xp
+        Rc = self._Rc if xp is np else self._Rc_dev
+        return Rc @ S
+
+    def _sweep_aniso_dev(self, g, src_dev, ang_dev):
+        """Levels-engine sweep with an angular source: isotropic part
+        ``src_dev`` (N,) plus ``ang_dev`` (M, N) or None. Returns (phi (N,),
+        moments (J, N)) as backend arrays; phi is a reused buffer."""
+        self._sweep_count += 1
+        xp, bufs, M = self.xp, self._bufs, self.M
+        if self.scheme == "step":
+            R = bufs["rhs_ang"].reshape(M, self.N)
+            R[...] = src_dev[None, :]
+            if ang_dev is not None:
+                R += ang_dev
+            R *= self._measure
+            R *= self._act_flat_dev[None, :]
+            self._levels_exec(g, False)
+            psi = bufs["psi"].reshape(M, self.N)
+            return bufs["phiM"].ravel(), self._Rw_dev @ psi
+        ac, K = self._ac_dev, self._scb["K"]
+        R = bufs["rhs_ang"].reshape(M, K)
+        R[...] = xp.take(src_dev, ac)[None, :]
+        if ang_dev is not None:
+            R += xp.take(ang_dev, ac, axis=1)
+        R *= (self._measure / 3.0)
+        self._levels_exec(g, False)
+        pf = bufs["phiN"]
+        pf.fill(0.0)
+        pf[ac] = bufs["phk"].ravel()
+        mom = xp.zeros((len(self._mom_l), self.N))
+        mom[:, ac] = (self._Rw_dev / 3.0) @ bufs["mk"]
+        return pf, mom
+
+    def _sweep_aniso_lu(self, g, src, ang):
+        """LU-engine sweep with an angular source (host arrays). Returns
+        (phi (N,), moments (J, N))."""
+        self._sweep_count += 1
+        J = len(self._mom_l)
+        phi = np.zeros(self.N)
+        mom = np.zeros((J, self.N))
+        if self.scheme == "step":
+            for m in range(self.M):
+                q = src if ang is None else src + ang[m]
+                psi = self._lu(g, m)(np.where(self._act_flat, q * self.area, 0.0))
+                phi += self.w[m] * psi
+                mom += self._Rw[:, m][:, None] * psi[None, :]
+            return phi, mom
+        d = self._scb
+        ac = d["ac"]
+        for m in range(self.M):
+            q = src if ang is None else src + ang[m]
+            psi = self._lu(g, m)(np.repeat(q[ac] * (self.area / 3.0), 3))
+            cell_psi = psi.reshape(-1, 3).mean(1)
+            phi[ac] += self.w[m] * cell_psi
+            mom[:, ac] += self._Rw[:, m][:, None] * cell_psi[None, :]
+        return phi, mom
+
+    def _sweep_currents_aniso(self, g, src, ang):
+        """CMFD's current-accumulating sweep with an angular source (host in,
+        host out): (phi, J6, moments)."""
+        if self.engine == "levels":
+            xp = self.xp
+            phi, mom = self._sweep_aniso_dev(g, xp.asarray(src), xp.asarray(ang))
+            phi = asnumpy(phi).copy()
+            return phi, self._currents_from_psi(g, self._bufs["psi"]), asnumpy(mom)
+        self._sweep_count += 1
+        nr, nc, J = self.nr, self.nc, len(self._mom_l)
+        phi = np.zeros(self.N)
+        mom = np.zeros((J, self.N))
+        if self.scheme == "step":
+            J6 = np.zeros((6, nr, nc))
+            for m in range(self.M):
+                psi = self._lu(g, m)(np.where(self._act_flat, (src + ang[m]) * self.area,
+                                              0.0))
+                phi += self.w[m] * psi
+                mom += self._Rw[:, m][:, None] * psi[None, :]
+                psi3 = psi.reshape(nr, nc, 2)
+                for kk, (t, tn, nic, njc, nbr_act, src_act, (nxv, nyv)) in \
+                        enumerate(self._nbr_maps):
+                    On = self.mu[m] * nxv + self.eta[m] * nyv
+                    face = (psi3[:, :, t] if On > 0
+                            else np.where(nbr_act, psi3[nic, njc, tn], 0.0))
+                    J6[kk] += (self.w[m] * On) * np.where(src_act, face, 0.0)
+            return phi, J6, mom
+        d = self._scb
+        ac, K = d["ac"], d["K"]
+        Jh = np.zeros((K, 3, 2))
+        for m in range(self.M):
+            psi = self._lu(g, m)(np.repeat((src + ang[m])[ac] * (self.area / 3.0), 3)
+                                 ).reshape(K, 3)
+            cell_psi = psi.mean(1)
+            phi[ac] += self.w[m] * cell_psi
+            mom[:, ac] += self._Rw[:, m][:, None] * cell_psi[None, :]
+            oe = self.mu[m] * d["ext_n"][..., 0] + self.eta[m] * d["ext_n"][..., 1]
+            nbr = d["ext_nbr"]
+            nbr_psi = np.where(nbr >= 0, psi.ravel()[np.clip(nbr, 0, None)], 0.0)
+            face = np.where(oe > 0, psi[:, :, None], nbr_psi)
+            Jh += self.w[m] * oe * (self.h / 2.0) * face
+        return phi, self._fold_half_currents(Jh), mom
+
+    def _moment_source(self, g, mom, exclude_self):
+        """Anisotropic scattering source into group g, (J, N) host:
+        S_j = sum_g' Sigma_s,l_j(g' -> g) moment_j(g')."""
+        J = len(self._mom_l)
+        S = np.zeros((J, self.N))
+        for gf in range(self.G):
+            if exclude_self and gf == g:
+                continue
+            for j, l in enumerate(self._mom_l):
+                c = self._scat_l[l - 1][gf][g]
+                if c is not None:
+                    S[j] += c * mom[gf][j]
+        return S
+
+    def _solve_group_aniso(self, g, q_iso, S_ext, phi0, mom0, tol):
+        """Within-group source iteration with anisotropic scattering, all
+        moments updated each sweep, DSA on the scalar flux. Host in/out."""
+        levels = self.engine == "levels"
+        xp = self.xp if levels else np
+        ss0 = xp.asarray(self.ss_self[g].reshape(-1))
+        selfl = [(j, xp.asarray(self._scat_l[l - 1][g][g]))
+                 for j, l in enumerate(self._mom_l) if self._scat_l[l - 1][g][g] is not None]
+        q = xp.asarray(q_iso)
+        Sx = xp.asarray(S_ext)
+        phi = xp.asarray(np.asarray(phi0, float))
+        mom = xp.asarray(np.asarray(mom0, float))
+        tol = min(tol, 1e-4)
+        accelerate = self.acceleration == "dsa"
+        fac = self._dsa_factor(g) if accelerate else None
+        prev = None
+        bad = 0
+        for _ in range(self.max_inner):
+            S = Sx.copy()
+            for j, c in selfl:
+                S[j] += c * mom[j]
+            ang = self._expand(S)
+            src = q + ss0 * phi
+            if levels:
+                half, mom_new = self._sweep_aniso_dev(g, src, ang)
+                half = half.copy()
+            else:
+                half, mom_new = self._sweep_aniso_lu(g, src, ang)
+            new = half + fac(ss0 * (half - phi)) if accelerate else half
+            dd = float(xp.max(xp.abs(new - phi)))
+            dm = float(xp.max(xp.abs(mom_new - mom))) if mom.size else 0.0
+            scale = max(float(xp.max(xp.abs(new))), 1e-300)
+            phi, mom = new, mom_new
+            if max(dd, dm) <= tol * scale:
+                break
+            if accelerate:
+                if prev is not None and dd > prev:
+                    bad += 1
+                    if bad >= 3:
+                        accelerate = False
+                else:
+                    bad = 0
+                prev = dd
+        return asnumpy(phi), asnumpy(mom)
 
     def _build_nbr_maps(self):
         """Per _EDGES entry: the neighbour lookup (clipped indices + activity
@@ -807,6 +1087,8 @@ class TriSNTransportSolver:
                       for n in (b - a for a, b in spans)])
             self._ac_dev = xp.asarray(ac)
             self._bufs["phiN"] = xp.zeros(N)          # full-N device phi scatter
+            if self._aniso:                            # per-(ordinate, cell) source
+                self._bufs["rhs_ang"] = xp.zeros(M * K)
         else:
             pidx = direction_indices * N + cell_indices
             off = (np.arange(M) * N)[:, None, None]
@@ -827,6 +1109,8 @@ class TriSNTransportSolver:
                 wvec=xp.asarray(self.w),
                 work=[_StepWork(xp.zeros((n, 3)), xp.zeros(n), xp.zeros(n))
                       for n in (b - a for a, b in spans)])
+            if self._aniso:                            # per-(ordinate, cell) source
+                self._bufs["rhs_ang"] = xp.zeros(M * N)
 
     def _lv_tables(self, g):
         """Group-dependent sweep tables, pre-gathered per level: the step
@@ -904,7 +1188,11 @@ class TriSNTransportSolver:
                 xp.multiply(work.gathered_inflow, level.inflow_weights,
                             out=work.gathered_inflow)
                 xp.sum(work.gathered_inflow, axis=1, out=work.incoming_sum)
-                xp.take(rhs, level.cell_indices, out=work.cell_source)
+                if self._aniso:
+                    xp.take(bufs["rhs_ang"], level.angular_indices,
+                            out=work.cell_source)
+                else:
+                    xp.take(rhs, level.cell_indices, out=work.cell_source)
                 xp.add(work.incoming_sum, work.cell_source, out=work.incoming_sum)
                 xp.divide(work.incoming_sum, denominator, out=work.incoming_sum)
                 xp.put(psi, level.angular_indices, work.incoming_sum)
@@ -925,7 +1213,11 @@ class TriSNTransportSolver:
             xp.multiply(work.gathered_inflow, level.inflow_weights,
                         out=work.gathered_inflow)
             xp.sum(work.gathered_inflow, axis=2, out=work.corner_rhs)
-            xp.take(base, level.cell_indices, out=work.cell_source)
+            if self._aniso:
+                xp.take(bufs["rhs_ang"], level.angular_cell_indices,
+                        out=work.cell_source)
+            else:
+                xp.take(base, level.cell_indices, out=work.cell_source)
             xp.add(work.corner_rhs, work.cell_source[:, None], out=work.corner_rhs)
             if iface:
                 xp.take(IF, level.angular_cell_indices, axis=0,
@@ -1048,6 +1340,9 @@ class TriSNTransportSolver:
         GPU. ``phi_N`` is a reused buffer -- copy it if it must outlive the next
         sweep. Mirrors ``_sweep_levels`` exactly, only the source assembly and
         flux read-out move onto the device."""
+        if self._aniso:                     # the sweep reads the angular source
+            phi, _ = self._sweep_aniso_dev(g, src_dev, None)
+            return phi, self._bufs["psi"]
         self._sweep_count += 1
         xp, bufs = self.xp, self._bufs
         if self.scheme == "step":
@@ -1107,6 +1402,11 @@ class TriSNTransportSolver:
         as in the LU engine's ``_iface_rhs`` -- interface faces are boundary
         faces (no dependency edges), so the level schedule is unchanged."""
         bufs = self._bufs
+        if self._aniso:                     # the sweep reads the angular source
+            if iface_in is not None:
+                raise ValueError("anisotropic scattering does not support iface_in")
+            phi, _ = self._sweep_aniso_dev(g, self.xp.asarray(src_flat), None)
+            return asnumpy(phi).copy(), bufs["psi"]
         if self.scheme == "step":
             if iface_in is not None:
                 raise ValueError("iface_in is SCB-only")
@@ -1207,6 +1507,53 @@ class TriSNTransportSolver:
                     Jin[k] += (self.w[m] * -On) * np.where(src_act, face, 0.0)
         return Jout, Jin
 
+    def region_partial_currents(self, result, region_map):
+        """Reference partial currents on equivalence-region surfaces, per group.
+
+        One extra sweep per group with the converged source of ``result`` (the
+        SNResult of this solver's :meth:`solve`, with the anisotropic moments
+        it kept) gives an angular flux consistent with the solution; its
+        half-range integrals are summed onto the surfaces of ``region_map``
+        (:meth:`partial_currents_from_psi`, :meth:`aggregate_partial_currents`).
+
+        Returns (interfaces, boundaries): {(region_from, region_to): (G, 2)}
+        and {region: (G, 2)} arrays of [J_out, J_in] in neutrons per unit
+        height and unit source normalization of ``result.flux``. Levels engine
+        only (the LU engine keeps no angular-flux buffer).
+        """
+        if self.engine != "levels":
+            raise NotImplementedError("region_partial_currents needs engine='levels'")
+        xp, G = self.xp, self.G
+        phi = [np.asarray(asnumpy(result.flux[g]), float).reshape(-1) for g in range(G)]
+        fs = sum(self.nsf[g].reshape(-1) * phi[g] for g in range(G)) / float(result.k_eff)
+        interfaces, boundaries = {}, {}
+        # Both schemes return current densities per unit edge length, so the
+        # edge length h converts them to currents (checked against the global
+        # balance: boundary tally = production/k - absorption in every group,
+        # isotropic and P2, step and SCB).
+        edge_length = None
+        for g in range(G):
+            q = self.chi[g].reshape(-1) * fs + self.ss_self[g].reshape(-1) * phi[g]
+            for gf in range(G):
+                if gf != g and self.scatter[gf][g] is not None:
+                    q = q + self.scatter[gf][g].reshape(-1) * phi[gf]
+            if self._aniso:
+                if self._last_moments is None:
+                    raise ValueError("no anisotropic moments: solve() first")
+                ang = self._expand(self._moment_source(g, self._last_moments,
+                                                       exclude_self=False))
+                self._sweep_aniso_dev(g, xp.asarray(q), xp.asarray(ang))
+            else:
+                self._sweep_dev(g, xp.asarray(q))
+            self._sync()
+            Jout, Jin = self.partial_currents_from_psi(g, self._bufs["psi"])
+            itf, bnd = self.aggregate_partial_currents(region_map, Jout, Jin,
+                                                       edge_length=edge_length)
+            for store, src in ((interfaces, itf), (boundaries, bnd)):
+                for key, (o, n) in src.items():
+                    store.setdefault(key, np.zeros((G, 2)))[g] = (o, n)
+        return interfaces, boundaries
+
     def aggregate_partial_currents(self, region_map, Jout, Jin, edge_length=None):
         """Aggregate per-edge partial currents onto equivalence-region surfaces.
 
@@ -1224,10 +1571,10 @@ class TriSNTransportSolver:
         skipped: they carry no discontinuity.
 
         ``edge_length`` scales a current density to a current; pass None to use
-        the triangle edge length h (the step scheme accumulates a density, the
-        SCB fold already carries h/2 per half-edge -- see the check in
-        tests/scratch, which compares the summed surface currents against each
-        region's net leakage from the balance).
+        the triangle edge length h, which is right for both schemes: the SCB
+        fold also returns densities (its h/2 per half-edge is divided out by
+        _fold_half_currents). Checked by :meth:`region_partial_currents` against
+        the global balance.
         """
         reg = np.asarray(region_map).reshape(self.nr, self.nc, 2)
         Jout = np.asarray(Jout)
@@ -1327,6 +1674,9 @@ class TriSNTransportSolver:
     T_CMFD_STEP = False               # transient CMFD on tri is Phase 3b
 
     def _t_require_lu(self):
+        if self._aniso:
+            raise NotImplementedError("transients with anisotropic scattering are "
+                                      "not implemented; use transport-corrected data")
         if self.engine != "lu":
             raise NotImplementedError(
                 "transient tri-S_N needs engine='lu' (the level-scheduled sweep "
@@ -1769,7 +2119,8 @@ class TriSNTransportSolver:
         nr, nc, N, h = self.nr, self.nc, self.N, self.h
         st = np.maximum(self.st[g].reshape(-1), 1e-12)
         ss = self.ss_self[g].reshape(-1)
-        Dv = 1.0 / (3.0 * st)
+        # anisotropic within-group scattering: the P1 diffusion coefficient
+        Dv = 1.0 / (3.0 * (self._dsa_sigma[g] if self._aniso else st))
         kf = 4.0 / (h * h)
         alpha = face_alpha("vacuum")
         cell, act = self._cell, self.active
@@ -2324,6 +2675,9 @@ class TriSNTransportSolver:
                  else self.scatter[gf][g].reshape(-1) for g in range(G)]
                 for gf in range(G)]
         fiss = sum(nsf[g] * phi[g] for g in range(G))
+        aniso = self._aniso
+        if aniso:                               # higher flux moments per group
+            mom = [np.zeros((len(self._mom_l), N)) for _ in range(G)]
         n_act = float(self._act_flat.sum())
         total = fiss.sum()
         k = 1.0
@@ -2337,6 +2691,7 @@ class TriSNTransportSolver:
             tol = min(1e-3, max(0.05 * prev_rel, 0.01 * tol_k, 1e-10))
             fiss_in = fiss
             phi_new = [None] * G
+            mom_new = [None] * G
             tg = time.perf_counter()
             for g in range(G):
                 q = chi[g] * fs
@@ -2344,7 +2699,13 @@ class TriSNTransportSolver:
                     if gf != g and scat[gf][g] is not None:
                         src = phi_new[gf] if gf < g else phi[gf]
                         q = q + scat[gf][g] * src
-                phi_new[g] = self._solve_group(g, q, phi[g], tol)
+                if aniso:
+                    latest = [mom_new[gf] if gf < g else mom[gf] for gf in range(G)]
+                    S_ext = self._moment_source(g, latest, exclude_self=True)
+                    phi_new[g], mom_new[g] = self._solve_group_aniso(
+                        g, q, S_ext, phi[g], mom[g], tol)
+                else:
+                    phi_new[g] = self._solve_group(g, q, phi[g], tol)
             self._sync()
             self.t_groups += time.perf_counter() - tg
             cmfd_ok = False
@@ -2359,7 +2720,13 @@ class TriSNTransportSolver:
                     for gf in range(G):
                         if gf != g and scat[gf][g] is not None:
                             q = q + scat[gf][g] * phi_new[gf]
-                    if self.is3d:
+                    if aniso:
+                        ang = self._expand(self._moment_source(g, mom_new,
+                                                               exclude_self=False))
+                        ps, J6, _ = self._sweep_currents_aniso(
+                            g, ss[g] * phi_new[g] + q, ang)
+                        facs[g] = self._cmfd_factor(g, ps, J6)
+                    elif self.is3d:
                         cur_fn = (self._sweep_currents_scb_3d if self.scheme == "scb"
                                   else self._sweep_currents_3d)
                         ps, cur = cur_fn(g, ss[g] * phi_new[g] + q)
@@ -2375,6 +2742,14 @@ class TriSNTransportSolver:
                 self.t_power += time.perf_counter() - tp
                 self.t_cmfd += time.perf_counter() - tc
                 if cmfd_ok:
+                    if aniso:
+                        # CMFD corrects the scalar flux; the higher moments
+                        # follow it cell by cell
+                        for g in range(G):
+                            ph, pc = asnumpy(phi_h[g]), asnumpy(phi_c[g])
+                            ratio = np.divide(pc, ph, out=np.ones_like(ph),
+                                              where=np.abs(ph) > 1e-300)
+                            mom_new[g] = mom_new[g] * ratio[None, :]
                     phi_new = phi_c
             fiss_new = sum(nsf[g] * phi_new[g] for g in range(G))
             total_new = fiss_new.sum()
@@ -2383,6 +2758,9 @@ class TriSNTransportSolver:
             rel = max(np.max(np.abs(phi_new[g] - phi[g])) /
                       max(np.max(np.abs(phi_new[g])), 1e-30) for g in range(G))
             phi, k = phi_new, k_new
+            if aniso:
+                mom = mom_new
+                self._last_moments = mom
             k_hist.append(k)
             if verbose:
                 print(f"  outer {outer:3d}  k = {k:.7f}  dk = {dk:.2e}  rel = {rel:.2e}")

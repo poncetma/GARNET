@@ -52,6 +52,7 @@ doi:10.1016/j.anucene.2025.112111.
 
 from __future__ import annotations
 
+import time
 import warnings
 from dataclasses import dataclass
 
@@ -450,7 +451,10 @@ def _scale_material(mat, mu, d_scaling=None):
         chi=np.asarray(mat.chi), total=np.asarray(mat.sigma_t) * mu,
         # Preserve the energy-release reaction rate for coupled power edits.
         kappa_fission=(None if mat.kappa_fission is None else
-                       np.asarray(mat.kappa_fission) * mu))
+                       np.asarray(mat.kappa_fission) * mu),
+        # higher scattering moments scale with their source group like P0
+        sigma_s_moments=(None if mat.sigma_s_moments is None else
+                         np.asarray(mat.sigma_s_moments) * mu[None, :, None]))
 
 
 def apply_sph_factors(materials, factors):
@@ -496,6 +500,13 @@ class SphResult:
 _INFEASIBLE_PULL = 10.0
 # Bound on |log mu| inside the residual; exp(+-8) spans ~3e-4 .. 3e3.
 _MAX_ABS_LOG_FACTOR = 8.0
+# Largest fixed-k system solved with a dense Jacobian by default.
+_DENSE_MAX_UNKNOWNS = 64
+# Relative finite-difference step of the Jacobian-free Newton products. Each
+# residual is a converged eigen-solve, so it carries the solver's noise; a
+# step well above that noise (scipy's default is ~1.5e-8) keeps the products
+# meaningful. Solve the coarse problem at least ~1e3 times tighter than this.
+_JFNK_RDIFF = 1e-6
 
 
 def _sph_live_set(reference_region_flux, sph_regions):
@@ -549,6 +560,7 @@ class _SphProblem:
         self.solve = solve
         self.verbose = verbose
         self.nfev = 0
+        self.t0 = time.perf_counter()
         self.best = {"res": np.inf, "x": np.zeros(int(live.sum())), "k": float("nan"),
                      "s": float("nan")}
 
@@ -573,8 +585,8 @@ class _SphProblem:
     def record(self, x_live, k, rows, s=float("nan")):
         res = float(np.abs(rows).max()) if rows.size else 0.0
         if self.verbose:
-            print(f"    [sph] eval {self.nfev:4d}  max|r| = {res:.3e}  k = {k:.8f}",
-                  flush=True)
+            print(f"    [sph] eval {self.nfev:4d}  max|r| = {res:.3e}  k = {k:.8f}"
+                  f"  t = {time.perf_counter() - self.t0:.1f} s", flush=True)
         if res < self.best["res"]:
             self.best = {"res": res, "x": np.array(x_live, copy=True), "k": k, "s": s}
 
@@ -667,9 +679,14 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
     method                : "anderson" (default for "flux-volume"): the fixed
         point log mu <- log(phi_ref / Phi_normalized), Anderson-accelerated over
         ``depth`` iterates (depth=1 with ``relax`` gives the damped Picard
-        iteration). "hybr" (default for "none") and "lm": dense-Jacobian root
-        finders (MINPACK), for small systems. "jfnk": Jacobian-free
-        Newton-Krylov, for many unknowns. For "none", "hybr" falls back to a
+        iteration). "hybr" and "lm": dense-Jacobian root finders (MINPACK),
+        one coarse solve per unknown and Jacobian, for small systems.
+        "jfnk": Jacobian-free Newton-Krylov, for many unknowns. For "none",
+        "anderson" is an Anderson-accelerated fixed point of the classic SPH
+        update plus a common shift that drives k to k_ref, one coarse solve
+        per iteration, falling back to "jfnk" if it does not converge. The
+        default for "none" is "hybr" up to 64 unknowns and "anderson" above
+        (e.g. 30 assembly zones x 11 groups). For "none", "hybr" falls back to a
         Levenberg-Marquardt least-squares solve followed by a second "hybr"
         from its endpoint when the first attempt does not reach ``tol``.
 
@@ -770,7 +787,8 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
         elif method == "jfnk":
             from scipy.optimize import root
             root(residual, x0, method="krylov",
-                 options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose)))
+                 options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose),
+                              jac_options=dict(rdiff=_JFNK_RDIFF)))
         else:
             raise ValueError("method must be 'anderson', 'hybr', 'lm' or 'jfnk', "
                              f"got {method!r}")
@@ -780,10 +798,13 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
     # normalization == "none": fixed k, unknowns (log mu on live entries, log s)
     if k_ref is None or not np.isfinite(k_ref) or k_ref <= 0.0:
         raise ValueError("normalization='none' needs the reference eigenvalue k_ref")
-    method = "hybr" if method is None else method
-    if method not in ("hybr", "lm", "jfnk"):
-        raise ValueError("method for normalization='none' must be 'hybr', 'lm' or "
-                         f"'jfnk', got {method!r}")
+    # Dense Jacobians cost one coarse solve per unknown: fine for a few dozen
+    # (one zone per material), prohibitive for 30 assemblies x 11 groups.
+    if method is None:
+        method = "hybr" if int(live.sum()) + 1 <= _DENSE_MAX_UNKNOWNS else "anderson"
+    if method not in ("anderson", "hybr", "lm", "jfnk"):
+        raise ValueError("method for normalization='none' must be 'anderson', "
+                         f"'hybr', 'lm' or 'jfnk', got {method!r}")
     start = prob.evaluate(x0)
     if start is None:
         raise RuntimeError("the coarse solve at the initial factors has a "
@@ -813,9 +834,19 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
 
     from scipy.optimize import least_squares, root
     xtol = max(tol * 1e-4, 1e-14)
+    if method == "anderson":
+        _fixed_k_anderson(prob, x0, phi0, k0, ln_ref, k_ref, tol, max_iter, depth,
+                          relax)
+        if prob.best["res"] > tol:
+            # Diverged or stalled (e.g. a strong absorber among the corrected
+            # zones, where the Picard map is unstable): Newton from the best
+            # point, which sees the coupling through its Jacobian.
+            method = "jfnk"
+            z0 = best_z()
     if method == "jfnk":
         root(residual_k, z0, method="krylov",
-             options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose)))
+             options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose),
+                          jac_options=dict(rdiff=_JFNK_RDIFF)))
     else:
         if method == "hybr":
             root(residual_k, z0, method="hybr", options=dict(xtol=xtol))
@@ -832,6 +863,72 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
                 root(residual_k, best_z(), method="hybr", options=dict(xtol=xtol))
     b = prob.best
     return finish(b["x"], b["k"], b["res"], s=b["s"])
+
+
+def _fixed_k_anderson(prob, x0, phi0, k0, ln_ref, k_ref, tol, max_iter, depth,
+                      relax):
+    """Anderson-accelerated fixed point for the fixed-k SPH problem.
+
+    Each iteration is one coarse eigen-solve. The map combines
+
+    * the classic SPH update of the shape, log mu <- log(phi_ref / (s Phi)),
+      with the level s of the coarse eigenvector set by least squares
+      (the mean log mismatch is zero), and
+    * a common shift of every corrected log mu that drives k to k_ref:
+      -log(k / k_ref) / S, with S = d log k / d(common shift) measured by one
+      extra solve at the start and refreshed by secant along the iteration.
+
+    At a fixed point both corrections vanish, which is exactly mu s Phi =
+    phi_ref and k = k_ref. The shape update is the Picard iteration that
+    diverges for a strongly absorbing zone (see :func:`sph_correct`);
+    the caller falls back to JFNK when this does not reach ``tol``. On fuel
+    zones, whose factors stay near 1, it converges in a few dozen solves
+    instead of the hundreds Newton-Krylov needs.
+    """
+    def residual_rows(x, phi, k):
+        mismatch = ln_ref - x - np.log(phi)
+        ln_s = float(mismatch.mean())
+        return np.append(-mismatch + ln_s, np.log(k / k_ref)), ln_s
+
+    x, phi, k = np.asarray(x0, dtype=float), phi0, k0
+    # sensitivity of log k to a common shift of the corrected log factors
+    h = 1e-3
+    probe = prob.evaluate(np.clip(x + h, -_MAX_ABS_LOG_FACTOR, _MAX_ABS_LOG_FACTOR))
+    if probe is None:
+        return
+    sens = (np.log(probe[1]) - np.log(k)) / h
+    if not np.isfinite(sens) or abs(sens) < 1e-8:
+        return                                 # k does not respond: no k lever
+    X, F = [], []
+    last = (float(x.mean()), np.log(k))
+    for _ in range(max_iter):
+        rows, ln_s = residual_rows(x, phi, k)
+        prob.record(x, k, rows, s=float(np.exp(ln_s)))
+        if np.abs(rows).max() <= tol:
+            return
+        target = x - rows[:-1] - rows[-1] / sens       # shape + level updates
+        f = target - x
+        X.append(x)
+        F.append(f)
+        if len(F) > depth:
+            X.pop(0)
+            F.pop(0)
+        x_new = np.clip(_anderson_step(X, F, relax), -_MAX_ABS_LOG_FACTOR,
+                        _MAX_ABS_LOG_FACTOR)
+        out = prob.evaluate(x_new)
+        if out is None:
+            return
+        phi_new, k_new = out
+        # secant refresh of the level sensitivity, when the mean moved enough
+        dmean = float(x_new.mean()) - last[0]
+        if abs(dmean) > 1e-6:
+            s_new = (np.log(k_new) - last[1]) / dmean
+            if np.isfinite(s_new) and s_new * sens > 0.0 and 0.2 < s_new / sens < 5.0:
+                sens = s_new
+        last = (float(x_new.mean()), np.log(k_new))
+        x, phi, k = x_new, phi_new, k_new
+    rows, ln_s = residual_rows(x, phi, k)
+    prob.record(x, k, rows, s=float(np.exp(ln_s)))
 
 
 def sph_kinetics(kinetics, factors):

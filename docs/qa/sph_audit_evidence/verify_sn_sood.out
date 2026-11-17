@@ -1,0 +1,145 @@
+# LA-13511 analytic criticality set (Sood, Forster, Parsons 1999) -- triangular S_N verification, 2026-11-16
+# tools/verify_sn_sood.py <problems> gpu scb  (jobs 252765 one-group slabs, 252766 two-group slabs, 252767 cylinders; slabs on the LU engine, CPU)
+
+LA-13511 analytic criticality set, triangular S_N (scb), device gpu
+
+problem 2 PUa-1-0-SL: slab, r_c = 1.853722 cm, scattering order 0
+  cells    80 (    480 triangles) quad (4, 16): k - 1 =    +88.60 pcm, outers 12, converged True [0 s]
+  cells   160 (    800 triangles) quad (4, 16): k - 1 =    +93.94 pcm, outers 12, converged True [1 s]
+  cells   320 (   1440 triangles) quad (4, 16): k - 1 =    +96.28 pcm, outers 12, converged True [1 s]
+  cells   640 (   2720 triangles) quad (4, 16): k - 1 =    +97.36 pcm, outers 12, converged True [2 s]
+  cells  1280 (   5280 triangles) quad (4, 16): k - 1 =    +97.88 pcm, outers 12, converged True [4 s]
+  observed order 1.06, Richardson mesh limit at (4, 16): +98.35 pcm
+  cells  1280 quad (8, 32): k - 1 =    +21.56 pcm [14 s]
+  cells  1280 quad (12, 48): k - 1 =    -35.87 pcm [32 s]
+
+problem 12 Ua-1-0-SL: slab, r_c = 2.872934 cm, scattering order 0
+  cells    80 (    480 triangles) quad (4, 16): k - 1 =    +15.68 pcm, outers 12, converged True [0 s]
+  cells   160 (    800 triangles) quad (4, 16): k - 1 =    +32.42 pcm, outers 12, converged True [1 s]
+  cells   320 (   1440 triangles) quad (4, 16): k - 1 =    +39.77 pcm, outers 12, converged True [1 s]
+  cells   640 (   2720 triangles) quad (4, 16): k - 1 =    +43.18 pcm, outers 12, converged True [2 s]
+  cells  1280 (   5280 triangles) quad (4, 16): k - 1 =    +44.81 pcm, outers 12, converged True [4 s]
+  observed order 1.06, Richardson mesh limit at (4, 16): +46.32 pcm
+  cells  1280 quad (8, 32): k - 1 =    +10.35 pcm [15 s]
+  cells  1280 quad (12, 48): k - 1 =    -20.84 pcm [32 s]
+
+problem 34 PUb-1-1-SL: slab, r_c = 0.79606 cm, scattering order 1
+  cells    80 (    480 triangles) quad (4, 16): k - 1 =    +63.25 pcm, outers 11, converged True [0 s]
+  cells   160 (    800 triangles) quad (4, 16): k - 1 =    +65.65 pcm, outers 11, converged True [1 s]
+  cells   320 (   1440 triangles) quad (4, 16): k - 1 =    +66.63 pcm, outers 11, converged True [1 s]
+  cells   640 (   2720 triangles) quad (4, 16): k - 1 =    +67.06 pcm, outers 11, converged True [2 s]
+  cells  1280 (   5280 triangles) quad (4, 16): k - 1 =    +67.25 pcm, outers 11, converged True [3 s]
+  observed order 1.11, Richardson mesh limit at (4, 16): +67.42 pcm
+  cells  1280 quad (8, 32): k - 1 =    +17.49 pcm [13 s]
+  cells  1280 quad (12, 48): k - 1 =    -29.32 pcm [30 s]
+
+problem 35 PUb-1-2-SL: slab, r_c = 0.78396 cm, scattering order 2
+  cells    80 (    480 triangles) quad (4, 16): k - 1 =    +68.47 pcm, outers 11, converged True [0 s]
+  cells   160 (    800 triangles) quad (4, 16): k - 1 =    +72.17 pcm, outers 11, converged True [1 s]
+  cells   320 (   1440 triangles) quad (4, 16): k - 1 =    +73.76 pcm, outers 11, converged True [1 s]
+  cells   640 (   2720 triangles) quad (4, 16): k - 1 =    +74.48 pcm, outers 11, converged True [2 s]
+  cells  1280 (   5280 triangles) quad (4, 16): k - 1 =    +74.82 pcm, outers 11, converged True [4 s]
+  observed order 1.08, Richardson mesh limit at (4, 16): +75.13 pcm
+  cells  1280 quad (8, 32): k - 1 =    +21.41 pcm [13 s]
+  cells  1280 quad (12, 48): k - 1 =    -26.33 pcm [29 s]
+
+summary: k - 1 in pcm (finest mesh at (4, 16); mesh limit by Richardson; quadrature effect (12, 48) - (4, 16) on the finest mesh; their sum)
+ problem   identifier  P    finest  order  mesh lim     quad  estimate
+       2   PUa-1-0-SL  0    +97.88   1.06    +98.35  -133.75    -35.40
+      12    Ua-1-0-SL  0    +44.81   1.06    +46.32   -65.65    -19.33
+      34   PUb-1-1-SL  1    +67.25   1.11    +67.42   -96.58    -29.16
+      35   PUb-1-2-SL  2    +74.82   1.08    +75.13  -101.15    -26.02
+
+LA-13511 analytic criticality set, triangular S_N (scb), device gpu
+
+problem 54 URRa-2-0-SL: slab, r_c = 7.566853 cm, scattering order 0
+  cells    80 (    480 triangles) quad (4, 16): k - 1 =   -795.80 pcm, outers 7, converged True [0 s]  flux err interior max 0.479 %, face +5.55 / +18.71 %
+  cells   160 (    800 triangles) quad (4, 16): k - 1 =   -294.05 pcm, outers 7, converged True [1 s]  flux err interior max 0.166 %, face +2.98 / +10.09 %
+  cells   320 (   1440 triangles) quad (4, 16): k - 1 =   -113.28 pcm, outers 7, converged True [1 s]  flux err interior max 0.059 %, face +1.53 / +5.59 %
+  cells   640 (   2720 triangles) quad (4, 16): k - 1 =    -45.33 pcm, outers 7, converged True [3 s]  flux err interior max 0.023 %, face +0.75 / +3.04 %
+  cells  1280 (   5280 triangles) quad (4, 16): k - 1 =    -17.80 pcm, outers 7, converged True [5 s]  flux err interior max 0.015 %, face +0.36 / +1.58 %
+  observed order 1.30, Richardson mesh limit at (4, 16): +0.94 pcm
+  cells  1280 quad (8, 32): k - 1 =    -21.21 pcm [18 s]  flux err interior max 0.010 %, face +0.49 / +1.78 %
+  cells  1280 quad (12, 48): k - 1 =    -25.20 pcm [41 s]  flux err interior max 0.015 %, face +0.32 / +1.30 %
+
+problem 71 URRa-2-1-SL: slab, r_c = 9.4916 cm, scattering order 1
+  cells    80 (    480 triangles) quad (4, 16): k - 1 =   -678.81 pcm, outers 12, converged True [1 s]  flux err interior max 0.557 %, face +5.78 / +18.98 %
+  cells   160 (    800 triangles) quad (4, 16): k - 1 =   -266.19 pcm, outers 12, converged True [1 s]  flux err interior max 0.274 %, face +3.23 / +10.78 %
+  cells   320 (   1440 triangles) quad (4, 16): k - 1 =   -118.31 pcm, outers 13, converged True [3 s]  flux err interior max 0.168 %, face +1.70 / +6.27 %
+  cells   640 (   2720 triangles) quad (4, 16): k - 1 =    -63.99 pcm, outers 13, converged True [5 s]  flux err interior max 0.130 %, face +0.85 / +3.60 %
+  cells  1280 (   5280 triangles) quad (4, 16): k - 1 =    -42.66 pcm, outers 13, converged True [8 s]  flux err interior max 0.117 %, face +0.40 / +2.00 %
+  observed order 1.35, Richardson mesh limit at (4, 16): -28.86 pcm
+  cells  1280 quad (8, 32): k - 1 =    -46.66 pcm [33 s]  flux err interior max 0.128 %, face +0.51 / +2.17 %
+  cells  1280 quad (12, 48): k - 1 =    -51.55 pcm [73 s]  flux err interior max 0.141 %, face +0.29 / +1.65 %
+
+summary: k - 1 in pcm (finest mesh at (4, 16); mesh limit by Richardson; quadrature effect (12, 48) - (4, 16) on the finest mesh; their sum)
+ problem   identifier  P    finest  order  mesh lim     quad  estimate
+      54  URRa-2-0-SL  0    -17.80   1.30     +0.94    -7.40     -6.46
+      71  URRa-2-1-SL  1    -42.66   1.35    -28.86    -8.89    -37.75
+
+LA-13511 analytic criticality set, triangular S_N (scb), device gpu
+
+problem 13 Ua-1-0-CY: cylinder, r_c = 5.284935 cm, scattering order 0
+  cells    16 (    528 triangles) quad (4, 16): k - 1 =   -999.82 pcm, outers 13, converged True [3 s]
+  cells    32 (   1954 triangles) quad (4, 16): k - 1 =   -387.51 pcm, outers 13, converged True [1 s]
+  cells    64 (   7602 triangles) quad (4, 16): k - 1 =   -166.77 pcm, outers 14, converged True [2 s]
+  cells   128 (  30120 triangles) quad (4, 16): k - 1 =    -81.35 pcm, outers 14, converged True [6 s]
+  cells   256 ( 119799 triangles) quad (4, 16): k - 1 =    -47.26 pcm, outers 14, converged True [26 s]
+  observed order 1.32, Richardson mesh limit at (4, 16): -24.61 pcm
+  cells   256 quad (8, 32): k - 1 =    -29.51 pcm [70 s]
+  cells   256 quad (12, 48): k - 1 =    -28.42 pcm [150 s]
+
+problem 36 Ua-1-1-CY: cylinder, r_c = 5.514296811 cm, scattering order 1
+  cells    16 (    528 triangles) quad (4, 16): k - 1 =   -919.29 pcm, outers 12, converged True [1 s]
+  cells    32 (   1954 triangles) quad (4, 16): k - 1 =   -357.85 pcm, outers 13, converged True [1 s]
+  cells    64 (   7602 triangles) quad (4, 16): k - 1 =   -155.27 pcm, outers 13, converged True [2 s]
+  cells   128 (  30120 triangles) quad (4, 16): k - 1 =    -76.60 pcm, outers 13, converged True [6 s]
+  cells   256 ( 119775 triangles) quad (4, 16): k - 1 =    -45.45 pcm, outers 13, converged True [23 s]
+  observed order 1.34, Richardson mesh limit at (4, 16): -25.02 pcm
+  cells   256 quad (8, 32): k - 1 =    -27.13 pcm [64 s]
+  cells   256 quad (12, 48): k - 1 =    -25.93 pcm [134 s]
+
+problem 37 Ub-1-1-CY: cylinder, r_c = 6.940205668 cm, scattering order 1
+  cells    16 (    528 triangles) quad (4, 16): k - 1 =   -546.46 pcm, outers 10, converged True [1 s]
+  cells    32 (   1954 triangles) quad (4, 16): k - 1 =   -230.84 pcm, outers 10, converged True [1 s]
+  cells    64 (   7602 triangles) quad (4, 16): k - 1 =   -111.46 pcm, outers 10, converged True [2 s]
+  cells   128 (  30120 triangles) quad (4, 16): k - 1 =    -60.88 pcm, outers 10, converged True [5 s]
+  cells   256 ( 119773 triangles) quad (4, 16): k - 1 =    -41.24 pcm, outers 10, converged True [22 s]
+  observed order 1.37, Richardson mesh limit at (4, 16): -28.79 pcm
+  cells   256 quad (8, 32): k - 1 =    -18.18 pcm [60 s]
+  cells   256 quad (12, 48): k - 1 =    -16.39 pcm [122 s]
+
+summary: k - 1 in pcm (finest mesh at (4, 16); mesh limit by Richardson; quadrature effect (12, 48) - (4, 16) on the finest mesh; their sum)
+ problem   identifier  P    finest  order  mesh lim     quad  estimate
+      13    Ua-1-0-CY  0    -47.26   1.32    -24.61   +18.84     -5.76
+      36    Ua-1-1-CY  1    -45.45   1.34    -25.02   +19.52     -5.51
+      37    Ub-1-1-CY  1    -41.24   1.37    -28.79   +24.85     -3.94
+
+# finer meshes, problems 71 and 54, quadrature (4, 16) (CPU):
+71 cells  2560: k-1   -33.60 pcm; flux err % interior [[-0.002, -0.017, -0.064], [-0.01, -0.028, -0.112]] face +0.19/+1.10 [79s]
+71 cells  5120: k-1   -29.49 pcm; flux err % interior [[-0.002, -0.017, -0.065], [-0.008, -0.026, -0.11]] face +0.09/+0.64 [115s]
+54 cells  2560: k-1    -5.78 pcm; flux err % interior [[0.001, 0.005, 0.013], [-0.003, -0.0, 0.007]] face +0.17/+0.79 [17s]
+54 cells  5120: k-1    -0.22 pcm; flux err % interior [[0.001, 0.004, 0.012], [-0.001, 0.002, 0.009]] face +0.08/+0.39 [36s]
+
+# independent reference: tools/slab_sn_1d.py 2,12,34,35,54,71 N 2000 (jobs 252779-252781; Gauss-Legendre S_N, diamond difference, Richardson 1000/2000 cells)
+independent 1-D slab S_N: Gauss-Legendre S64, diamond difference, 1000 and 2000 cells, Richardson (second order)
+    2 PUa-1-0-SL   Richardson: k - 1 =    -8.916 pcm
+   12 Ua-1-0-SL    Richardson: k - 1 =    -4.814 pcm
+   34 PUb-1-1-SL   Richardson: k - 1 =    -7.267 pcm
+   35 PUb-1-2-SL   Richardson: k - 1 =    -3.760 pcm
+   54 URRa-2-0-SL  Richardson: k - 1 =    -0.521 pcm
+   71 URRa-2-1-SL  Richardson: k - 1 =   -32.221 pcm
+independent 1-D slab S_N: Gauss-Legendre S128, diamond difference, 1000 and 2000 cells, Richardson (second order)
+    2 PUa-1-0-SL   Richardson: k - 1 =    -2.344 pcm
+   12 Ua-1-0-SL    Richardson: k - 1 =    -1.187 pcm
+   34 PUb-1-1-SL   Richardson: k - 1 =    -1.794 pcm
+   35 PUb-1-2-SL   Richardson: k - 1 =    +1.767 pcm
+   54 URRa-2-0-SL  Richardson: k - 1 =    -0.082 pcm
+   71 URRa-2-1-SL  Richardson: k - 1 =   -31.662 pcm
+independent 1-D slab S_N: Gauss-Legendre S256, diamond difference, 1000 and 2000 cells, Richardson (second order)
+    2 PUa-1-0-SL   Richardson: k - 1 =    -0.724 pcm
+   12 Ua-1-0-SL    Richardson: k - 1 =    -0.290 pcm
+   34 PUb-1-1-SL   Richardson: k - 1 =    -0.442 pcm
+   35 PUb-1-2-SL   Richardson: k - 1 =    +3.130 pcm
+   54 URRa-2-0-SL  Richardson: k - 1 =    +0.027 pcm
+   71 URRa-2-1-SL  Richardson: k - 1 =   -31.523 pcm

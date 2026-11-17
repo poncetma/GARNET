@@ -1,0 +1,57 @@
+# tools/diagnose_sph_normalization.py 16 sn-p2:4:16 raster:4 0,180 gpu interior   (job 252724)
+SPH on the interior zones of HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:4, device gpu
+
+angle 0: k_ref 1.015993; rings {np.int64(1): np.int64(6), np.int64(2): np.int64(12), np.int64(3): np.int64(12)}; no SPH +2586 pcm, dP 13.99 %
+  variant             conv  iter   dk pcm   dP % |   <mu> g1   <mu> g6  <mu> g11 | thermal mu by ring: ring 1 (min-mean-max)  ring 2 (min-mean-max)  ring 3 (min-mean-max)  | central g1/g6/g11  drum_be g1/g6/g11  drum_absorber g1/g6/g11
+  A fixed k           True   333     -0.0   0.00 |     0.860     0.645     0.590 | 0.531-0.531-0.532       0.572-0.577-0.583       0.715-0.717-0.719     | 0.736/0.614/0.434  0.869/1.11/0.772  0.806/2.61/64.8
+  B flux-volume       True    55   +558.3   0.00 |     1.007     0.986     1.028 | 0.924-0.925-0.925       0.996-1.008-1.019       1.244-1.248-1.252     | 0.873/0.965/0.754  0.968/1.45/1.13  0.913/3.92/150
+  C fixed k from B    True   266     -0.0   0.00 |     0.860     0.645     0.590 | 0.531-0.531-0.532       0.572-0.577-0.583       0.715-0.717-0.719     | 0.736/0.614/0.434  0.869/1.11/0.772  0.806/2.61/64.8
+  [782 s]
+
+angle 180: k_ref 1.112618; rings {np.int64(1): np.int64(6), np.int64(2): np.int64(12), np.int64(3): np.int64(12)}; no SPH +1122 pcm, dP 2.51 %
+  variant             conv  iter   dk pcm   dP % |   <mu> g1   <mu> g6  <mu> g11 | thermal mu by ring: ring 1 (min-mean-max)  ring 2 (min-mean-max)  ring 3 (min-mean-max)  | central g1/g6/g11  drum_be g1/g6/g11  drum_absorber g1/g6/g11
+  A fixed k           True   150     +0.0   0.00 |     1.040     0.861     0.722 | 0.683-0.684-0.684       0.709-0.712-0.715       0.756-0.758-0.759     | 0.906/0.835/0.561  0.917/0.903/0.585  1.19/2.05/8.96
+  B flux-volume       True    64   +758.6   0.01 |     1.010     0.999     1.162 | 1.160-1.161-1.162       1.157-1.165-1.173       1.157-1.160-1.163     | 0.889/0.992/0.959  0.877/1.01/0.839  1.15/2.13/12
+  C fixed k from B    True   156     +0.0   0.00 |     1.040     0.861     0.722 | 0.683-0.684-0.684       0.709-0.712-0.715       0.756-0.758-0.759     | 0.906/0.835/0.561  0.917/0.903/0.585  1.19/2.05/8.96
+  [710 s]
+
+
+# tools/diagnose_sph_normalization.py 16 sn-p2:4:16 local:4:2:polar 0 gpu fuel   (job 252729, angle 0; angle 180 rerun in 252785)
+SPH on the fuel zones of HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model local:4:2:polar, device gpu
+
+angle 0: k_ref 1.015993; rings {np.int64(1): np.int64(6), np.int64(2): np.int64(12), np.int64(3): np.int64(12)}; no SPH +1971 pcm, dP 10.44 %
+  variant             conv  iter   dk pcm   dP % |   <mu> g1   <mu> g6  <mu> g11 | thermal mu by ring: ring 1 (min-mean-max)  ring 2 (min-mean-max)  ring 3 (min-mean-max)
+  A fixed k           True   116     +0.0   0.00 |     1.045     0.792     0.201 | 0.169-0.169-0.169       0.189-0.191-0.192       0.277-0.278-0.279     
+  B flux-volume       True    45  +2291.3   0.03 |     1.000     1.001     1.036 | 1.237-1.238-1.238       0.921-0.991-1.061       0.755-0.757-0.759     
+  C fixed k from B    True   124     -0.0   0.00 |     1.045     0.792     0.201 | 0.169-0.169-0.169       0.189-0.191-0.192       0.277-0.278-0.279     
+  [1645 s]
+
+
+# tools/diagnose_sph_normalization.py 16 sn-p2:4:16 local:4:2:polar 180 gpu fuel   (job 252785)
+SPH on the fuel zones of HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model local:4:2:polar, device gpu
+
+angle 180: k_ref 1.112618; rings {np.int64(1): np.int64(6), np.int64(2): np.int64(12), np.int64(3): np.int64(12)}; no SPH +911 pcm, dP 1.95 %
+  variant             conv  iter   dk pcm   dP % |   <mu> g1   <mu> g6  <mu> g11 | thermal mu by ring: ring 1 (min-mean-max)  ring 2 (min-mean-max)  ring 3 (min-mean-max)
+  A fixed k           True    72     -0.0   0.00 |     1.140     0.933     0.687 | 0.627-0.628-0.628       0.672-0.680-0.688       0.731-0.733-0.734     
+  B flux-volume       True    38   +867.4   0.02 |     1.001     1.000     1.001 | 1.043-1.044-1.045       0.995-1.004-1.013       0.967-0.969-0.972     
+  C fixed k from B    True    61     -0.0   0.00 |     1.140     0.933     0.687 | 0.627-0.628-0.628       0.672-0.680-0.688       0.731-0.733-0.734     
+  [1920 s]
+
+
+# tools/diagnose_sph_normalization.py 16 sn-p2:4:16 local:4:2:polar 0,180 gpu interior   (job 252786)
+SPH on the interior zones of HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model local:4:2:polar, device gpu
+
+angle 0: k_ref 1.015993; rings {np.int64(1): np.int64(6), np.int64(2): np.int64(12), np.int64(3): np.int64(12)}; no SPH +1971 pcm, dP 10.44 %
+  variant             conv  iter   dk pcm   dP % |   <mu> g1   <mu> g6  <mu> g11 | thermal mu by ring: ring 1 (min-mean-max)  ring 2 (min-mean-max)  ring 3 (min-mean-max)  | central g1/g6/g11  drum_be g1/g6/g11  drum_absorber g1/g6/g11
+  A fixed k           True   266     -0.0   0.00 |     0.919     0.782     0.640 | 0.582-0.582-0.582       0.623-0.635-0.647       0.749-0.752-0.754     | 0.786/0.748/0.475  0.9/0.914/0.731  0.818/1.79/47.6
+  B flux-volume       True    50   +423.2   0.00 |     1.007     0.999     1.048 | 0.966-0.967-0.967       1.025-1.046-1.066       1.194-1.197-1.201     | 0.87/0.971/0.79  0.954/1.07/0.986  0.878/2.28/134
+  C fixed k from B    True   333     -0.0   0.00 |     0.919     0.782     0.640 | 0.582-0.582-0.582       0.623-0.635-0.647       0.749-0.752-0.754     | 0.786/0.748/0.475  0.9/0.914/0.731  0.818/1.79/47.6
+  [3622 s]
+
+angle 180: k_ref 1.112618; rings {np.int64(1): np.int64(6), np.int64(2): np.int64(12), np.int64(3): np.int64(12)}; no SPH +911 pcm, dP 1.95 %
+  variant             conv  iter   dk pcm   dP % |   <mu> g1   <mu> g6  <mu> g11 | thermal mu by ring: ring 1 (min-mean-max)  ring 2 (min-mean-max)  ring 3 (min-mean-max)  | central g1/g6/g11  drum_be g1/g6/g11  drum_absorber g1/g6/g11
+  A fixed k           True   175     -0.0   0.00 |     1.059     0.844     0.779 | 0.739-0.740-0.740       0.766-0.771-0.777       0.809-0.811-0.813     | 0.923/0.819/0.607  0.908/0.89/0.696  1.27/4.39/41.3
+  B flux-volume       True    58   +599.2   0.01 |     1.012     0.999     1.089 | 1.061-1.062-1.062       1.084-1.089-1.093       1.105-1.107-1.110     | 0.885/0.993/0.874  0.862/1.01/0.911  1.23/4.3/51.6
+  C fixed k from B    True   132     +0.0   0.00 |     1.059     0.844     0.779 | 0.739-0.740-0.740       0.766-0.771-0.777       0.809-0.811-0.813     | 0.923/0.819/0.607  0.908/0.89/0.696  1.27/4.39/41.3
+  [2722 s]
+

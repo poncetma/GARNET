@@ -356,6 +356,66 @@ field and operator setup per startup.
 
 See [quasistatic_acceleration_plan.md](quasistatic_acceleration_plan.md#predictor-corrector-iqs-2026-10-29-audit-fix).
 
+### Anisotropic scattering in tri-S_N (2026-11-16)
+
+`TriSNTransportSolver(scattering_order=L)` expands the scattering source in
+real spherical harmonics of the 2-D problem: Schmidt semi-normalized
+associated Legendre functions with the polar axis along z, keeping only the
+(l, k) with l + k even (the others are odd in the polar cosine and vanish in
+2-D). Per group the solver carries the flux moments `S_j = Σ_m w_m R_j(Ω_m) ψ_m`
+and rebuilds the angular source as
+`q_m = Σ_j (2 l_j + 1) R_j(Ω_m) Σs,l_j S_j`, so a cell's angular source is a
+flat value per ordinate (SCB: per ordinate and corner). On construction the
+quadrature's Gram matrix of the basis is checked against `diag(1/(2l+1))` and
+a quadrature that cannot integrate the requested order raises `ValueError`.
+Moments use the Gauss–Seidel ordering of the scalar flux: down-scatter from
+the current outer, up-scatter from the previous one. DSA builds its diffusion
+operator from `Σt − Σs1(g→g)`. After a CMFD rebalance the higher moments are
+rescaled with the cell's scalar-flux ratio. The volume-mixed second material
+is blended into each cell's moment matrices like every other cross section.
+
+The within-group P0 scattering is Σt − removal in every scheme. For a material
+with an explicit `total` it is kept even when negative: out-scatter
+transport-corrected data of a hydrogenous moderator have it below zero, and
+clipping it at zero created neutrons wherever it applied (+1470 pcm on the
+refine-16 HP-MR core). With Σt = 1/(3D) a negative value is still clipped,
+since that total is only an estimate. A negative within-group term leaves the
+sweep, DSA (`Σt − Σs,gg` > Σt) and CMFD well posed.
+
+Verification (`tests/verification/test_tri_sn_anisotropic.py`): zero higher
+moments reproduce the isotropic solve to 1e-11 in `k` on both engines and both
+schemes; the LU and level-scheduled engines agree; a periodic infinite medium
+keeps `k = k∞` with P2 scattering; and in a bare one-group core with
+Σs1/Σt = 0.4 the gap between P1 scattering and the diagonal transport
+correction is 7.0 %, 3.3 % and 1.8 % of the anisotropy effect at 1, 0.5 and
+0.25 cm cells (SCB). It halves with the cell size, so it is the first-order
+error of the cell-flat anisotropic source and not a difference in the
+physics. On the HP-MR pin-resolved core the GPU and CPU paths give the same
+`k` to 1e-7.
+
+**Analytic verification.** The anisotropic path reproduces the critical
+dimensions of the LA-13511 set (Sood, Forster & Parsons 1999;
+`garnet/benchmarks/sood.py`, `tools/verify_sn_sood.py`,
+`tests/verification/test_tri_sn_sood.py`).
+
+- **Cylinders.** Bare one-group cylinders with P1 scattering, 36 and the
+  strongly forward 37 (negative kernel near μ = −1), extrapolate in mesh and
+  quadrature to −5.5 and −3.9 pcm. The isotropic control 13 gives −5.8 pcm.
+- **Slabs.** The triangular solver has no reflective boundary, so a slab is
+  built from fuel columns followed by a black, non-scattering layer of 40
+  optical thicknesses on a periodic grid. Each face then sees an exact vacuum,
+  and the slab is infinite along the strips.
+  - P1 and P2 one-group slabs track their isotropic controls; all are within
+    ±35 pcm, which is the 2-D product quadrature on optically thin slabs.
+  - The two-group P1 slab 71 converges to −35 pcm.
+- **Independent check of problem 71.** `tools/slab_sn_1d.py` is a 1-D
+  Gauss–Legendre diamond-difference eigenvalue solver that shares no code with
+  `tri_sn`, after OpenSN's `transport_anisotropic_scattering_verification`
+  test. It puts 71 at −31.5 pcm at S256 and every other slab within 3 pcm of
+  k = 1, so 71's residual is in its tabulated data.
+- **Discrimination.** Without the anisotropy the same problems are 2900 to
+  21 000 pcm off.
+
 ### Exact drum absorber area
 
 `model.annular_sector_fraction` intersects each triangle with the annular

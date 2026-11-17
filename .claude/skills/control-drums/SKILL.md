@@ -105,6 +105,19 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
 
 1. **Reference**: full core, vacuum boundary, finer than the node model near
    the drums; pin-resolved when pin powers are wanted (`build_hpmr2d_pins`).
+   Scatter anisotropically as the data allow: `TriSNTransportSolver(...,
+   scattering_order=2)` with the library's moments (`Material.sigma_s_moments`).
+   Griffin ISOXML `Total` is the TRUE total, so isotropic S_N on it, or
+   `D = 1/(3 Total)`, has no transport correction. Light moderators and
+   reflectors (hydride, Be, graphite) scatter strongly forward: on HP-MR,
+   isotropic S_N is +2400 pcm off P2, out-scatter-corrected isotropic S_N
+   +210 pcm, and P3 differs from P2 by 1 pcm. Collapse zone constants from
+   transport-corrected data (`transport_corrected`, `pin_reference(
+   homogenize_tc=...)` in `tools/sph_hpmr_nodes.py`). Check the balance
+   `Σa + ΣP0 = Σt` of every material: Be reflectors and drums count (n,2n)
+   twice in P0, and GARNET's removal then loses the gain unless the
+   absorption is made net (`net_absorption`; on HP-MR the drum worth moves by
+   about 430 pcm at refine 4).
 2. **Zones**: one per fuel assembly with the same numbering on every mesh
    (`hpmr_assembly_zones`, `hpmr_mesh_zones`).
 3. **Factors**: `sph_correct(..., normalization="none", k_ref=k_reference,

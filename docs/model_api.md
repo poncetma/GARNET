@@ -67,6 +67,38 @@ bottom first, and reports their number in `n_planes`; a 2-D file has
 They also reject incomplete fission data, such as a positive `nuFission`
 without a `FissionSpectrum`.
 
+`sigma_s_moments` (optional, shape `(L+1, G, G)`, `[l][g_from][g_to]`) carries
+the Legendre scattering moments P0…PL without the `(2l+1)` factor; moment 0
+must equal `sigma_s`. `read_material` fills it from a Griffin ISOXML library,
+which stores the TRUE total cross section in `Total` (Σa + ΣP0 out-scatter),
+not a transport cross section, so its `diffusion = 1/(3 Total)` carries no
+transport correction. Two ways to use the moments:
+
+- `TriSNTransportSolver(..., scattering_order=L)` scatters anisotropically up to
+  order `L` (2-D, both sweep engines).
+- `transport_corrected(material, method)` returns isotropic data with
+  Σtr = Σt − c, `D = 1/(3Σtr)` and the within-group P0 reduced by `c`, where
+  `c = Σ_g' Σs1(g→g')` (`"outscatter"`, the default) or `Σs1(g→g)`
+  (`"diagonal"`). The balance (removal, transfers, absorption, fission) is
+  unchanged. A within-group P0 that would go negative is clipped at zero with a
+  `RuntimeWarning`; the HP-MR YH moderator needs this in group 8 under
+  `"outscatter"`.
+
+`blend_materials` blends the moments linearly, and a constituent without them
+counts as isotropic. SPH scaling multiplies them by the factor like every other
+cross section.
+
+Every GARNET solver removes `Σa + Σ_{g'≠g} Σs(g→g')` from a group
+(`Material.removal`), while a transport code given the total and the P0 matrix
+removes `Σt − Σs(g→g)`. They agree only when `Σa + Σ_g' Σs0(g→g') = Σt`. A
+library whose scattering matrix counts (n,2n) with its multiplicity and whose
+total counts it once breaks this. The HP-MR library does so for Be, by 0.0146
+/cm in the fastest group, and with its stored absorption GARNET loses the
+(n,2n) gain. `net_absorption(material)` sets `Σa = Σt − Σ_g' Σs0(g→g')`,
+which can be negative. `Material` accepts a negative absorption while the
+removal stays positive in every group. Use it only on data whose `sigma_t` is
+the true total.
+
 Use `fuel.replace(sigma_a=fuel.sigma_a * 1.01)` to change selected constants.
 It returns a validated copy, retains the other fields (including
 `kappa_fission`), and copies array data so the original material is independent.

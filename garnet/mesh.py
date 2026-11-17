@@ -875,7 +875,8 @@ class UnstructuredDiffusionSolver:
         return (corrA * grad).sum(axis=0) + (corrB * grad[:, nb]).sum(axis=(0, 1))
 
     def solve(self, tol_k=1e-7, tol_source=1e-8, max_outer=1000,
-              inner_rtol_floor=1e-11, anderson_depth=8) -> MeshResult:
+              inner_rtol_floor=1e-11, anderson_depth=8, flux0=None,
+              k_guess=1.0) -> MeshResult:
         """Power iteration on the fission source, Anderson-accelerated.
 
         The fission-source map ``F -> (1/k) sum_g nuSigma_f,g A_g^-1 chi_g F`` is a
@@ -885,14 +886,21 @@ class UnstructuredDiffusionSolver:
         scheme used in the transient step and the SPH solve), collapsing the slow
         modes so the eigenvector converges in far fewer outers. ``anderson_depth``
         <= 1 recovers the plain power iteration.
+
+        ``flux0`` (G, n_cells) and ``k_guess`` warm-start the iteration from a
+        previous solve, e.g. inside an SPH factor solve where each evaluation
+        perturbs the cross sections only slightly; the converged eigenpair is
+        unchanged.
         """
         xp, G = self.xp, self.G
         synchronize(xp)
         t0 = time.perf_counter()
         n = self.mesh.n_cells
         area = self.area
-        phi = [xp.ones(n, dtype=self.dtype) for _ in range(G)]
-        k = 1.0
+        phi = ([xp.ones(n, dtype=self.dtype) for _ in range(G)] if flux0 is None
+               else [xp.asarray(np.asarray(flux0)[g], dtype=self.dtype).copy()
+                     for g in range(G)])
+        k = float(k_guess)
         F = sum(self.nsf[g] * phi[g] for g in range(G))
         F = F * (n / float(xp.sum(F)))                    # normalize source, sum = n
         conv = False

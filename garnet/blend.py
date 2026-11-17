@@ -156,38 +156,71 @@ class MaterialBlend:
         return self.harmonic(arr) if harmonic else self.linear(arr)
 
 
-def blend_material(base, partner, weight, name=None):
-    """One Material equal to a volume blend of two, by the rules of
+def blend_materials(materials, fractions, name=None):
+    """One Material equal to a volume blend of several, by the rules of
     :class:`MaterialBlend`: reaction cross sections (absorption, production,
-    kappa*Sigma_f, total, scattering) linear in the partner fraction ``weight``,
-    the diffusion coefficient harmonic, the emission spectrum weighted by each
-    component's total nu*Sigma_f. For solvers that take one material per cell
-    (:class:`garnet.mesh.UnstructuredDiffusionSolver`), so a volume-mixed cell
-    reproduces the mixed cell of the raster solvers exactly."""
+    kappa*Sigma_f, total, scattering and its Legendre moments) linear in the
+    volume fractions, the diffusion coefficient harmonic (its transport cross
+    section 1/(3D) is linear), the emission spectrum weighted by each constituent's total
+    nu*Sigma_f. This is flat-flux homogenization of a cell's constituents; for
+    any number of them it is exact in the reaction rates a flat cell flux
+    implies, which the two-material ``mix_material``/``mix_weight`` blend is
+    only for two."""
     from .materials import Material
 
+    mats = list(materials)
+    f = np.asarray(fractions, dtype=float)
+    if f.shape != (len(mats),) or np.any(f < 0.0) or not np.isclose(f.sum(), 1.0):
+        raise ValueError("fractions must be one non-negative value per material, "
+                         f"summing to 1; got {f}")
+    keep = [i for i in range(len(mats)) if f[i] > 0.0]
+    if len(keep) == 1:
+        return mats[keep[0]]
+    mats, f = [mats[i] for i in keep], f[keep]
+
+    def lin(attr):
+        return sum(w * np.asarray(getattr(m, attr), dtype=float) for w, m in zip(f, mats))
+
+    prod = np.array([w * float(np.sum(m.nu_sigma_f)) for w, m in zip(f, mats)])
+    chi = (sum(p * np.asarray(m.chi, dtype=float) for p, m in zip(prod, mats)) / prod.sum()
+           if prod.sum() > 0.0 else np.asarray(mats[0].chi))
+    kappa = None
+    if any(m.kappa_fission is not None for m in mats):
+        kappa = sum(w * (np.zeros_like(np.asarray(m.sigma_a, dtype=float))
+                         if m.kappa_fission is None else np.asarray(m.kappa_fission))
+                    for w, m in zip(f, mats))
+    diffusion = 1.0 / sum(w / np.asarray(m.diffusion, dtype=float)
+                          for w, m in zip(f, mats))
+    # Legendre scattering moments blend linearly like every reaction rate; a
+    # constituent without them scatters isotropically (moments l >= 1 zero).
+    order = max(m.scattering_order for m in mats)
+    moments = None
+    if order > 0:
+        G = mats[0].n_groups
+        moments = np.zeros((order + 1, G, G))
+        for w, m in zip(f, mats):
+            own = (np.asarray(m.sigma_s_moments) if m.sigma_s_moments is not None
+                   else np.asarray(m.sigma_s)[None])
+            moments[:own.shape[0]] += w * own
+    label = name or "+".join(f"{w:.4f}*{m.name}" for w, m in zip(f, mats))
+    return Material(name=label, diffusion=diffusion, sigma_a=lin("sigma_a"),
+                    nu_sigma_f=lin("nu_sigma_f"), sigma_s=lin("sigma_s"), chi=chi,
+                    total=lin("sigma_t"), kappa_fission=kappa,
+                    sigma_s_moments=moments)
+
+
+def blend_material(base, partner, weight, name=None):
+    """Two-material :func:`blend_materials`: ``base`` at ``1 - weight`` and
+    ``partner`` at ``weight``, reproducing a ``mix_material``/``mix_weight`` cell
+    of the raster solvers exactly. For solvers that take one material per cell
+    (:class:`garnet.mesh.UnstructuredDiffusionSolver`)."""
     w = float(weight)
     if not 0.0 <= w <= 1.0:
         raise ValueError(f"weight must lie in [0, 1], got {weight}")
-
-    def lin(a, b):
-        return (1.0 - w) * np.asarray(a, dtype=float) + w * np.asarray(b, dtype=float)
-
-    pb = (1.0 - w) * float(np.sum(base.nu_sigma_f))
-    po = w * float(np.sum(partner.nu_sigma_f))
-    chi = ((pb * np.asarray(base.chi) + po * np.asarray(partner.chi)) / (pb + po)
-           if pb + po > 0.0 else np.asarray(base.chi))
-    kb, ko = base.kappa_fission, partner.kappa_fission
-    kappa = (None if kb is None and ko is None else
-             lin(np.zeros_like(base.sigma_a) if kb is None else kb,
-                 np.zeros_like(base.sigma_a) if ko is None else ko))
-    diffusion = 1.0 / ((1.0 - w) / np.asarray(base.diffusion, dtype=float)
-                       + w / np.asarray(partner.diffusion, dtype=float))
-    return Material(name=name or f"{base.name}+{w:.4f}*{partner.name}",
-                    diffusion=diffusion, sigma_a=lin(base.sigma_a, partner.sigma_a),
-                    nu_sigma_f=lin(base.nu_sigma_f, partner.nu_sigma_f),
-                    sigma_s=lin(base.sigma_s, partner.sigma_s), chi=chi,
-                    total=lin(base.sigma_t, partner.sigma_t), kappa_fission=kappa)
+    if w == 0.0 or w == 1.0:
+        return blend_materials([base, partner], [1.0 - w, w], name=name)
+    return blend_materials([base, partner], [1.0 - w, w],
+                           name=name or f"{base.name}+{w:.4f}*{partner.name}")
 
 
 def per_cell_blended_materials(materials, cell_material, mix_material, mix_weight):

@@ -14,8 +14,9 @@ The library is the NEAMS Virtual Test Bed's, at
 https://github.com/idaholab/virtual_test_bed; a copy is kept in
 ``dev-refs/vtb_isoxml/`` (dev-refs is reference input, never imported).
 
-What is stored per material: D, chi, kappaFission, nuFission, sigma_a and the
-scattering matrix -- plus, once, the kinetics that belong to the library rather
+What is stored per material: D, chi, kappaFission, nuFission, sigma_a, the
+P0 scattering matrix, the true total cross section (``total``) and all
+Legendre scattering moments (``ssL``, shape (L+1, G, G)) -- plus, once, the kinetics that belong to the library rather
 than to any one material: the group speeds, the precursor decay constants, the
 delayed fractions and the delayed spectrum. Also the Tfuel/Tmod tabulation
 axes, because they are what make a real temperature feedback possible instead
@@ -69,6 +70,12 @@ def _pack(xml, ids, extra=None):
         data[f"{key}.chi"] = m.chi
         data[f"{key}.kf"] = (m.kappa_fission if m.kappa_fission is not None
                              else np.zeros(G))
+        # The library's Total is the TRUE total and the anisotropy is in the
+        # Legendre moments (garnet.griffin_xs); keep both, so anisotropic S_N
+        # and transport-corrected data can be built from the vendored files.
+        data[f"{key}.total"] = m.sigma_t
+        if m.sigma_s_moments is not None:
+            data[f"{key}.ssL"] = m.sigma_s_moments
     data["G"] = np.array(G)
     data["ids"] = np.array(list(ids.keys()))
 

@@ -70,7 +70,7 @@ def test_form_functions_reproduce_the_reference_at_the_generation_state():
 
 
 def test_pin_resolved_core_puts_the_lattice_in_every_fuel_assembly():
-    p, pins = build_hpmr2d_pins(refine=8)
+    p, pins = build_hpmr2d_pins(refine=8, data="placeholder", mixing="two")
     assert len(pins.kind) == 127 * len(HPMR_FUEL_SITES)
     assert int(pins.fuel.sum()) == 63 * len(HPMR_FUEL_SITES)
     z = hpmr_assembly_zones(p)
@@ -95,3 +95,48 @@ def test_pin_resolved_core_puts_the_lattice_in_every_fuel_assembly():
     hex_area = np.sqrt(3.0) / 2.0 * PITCH ** 2
     counts = np.bincount(zone, minlength=len(z.names))[z.fuel]
     np.testing.assert_allclose(counts * area, hex_area, rtol=1e-12)
+
+
+def test_exact_mixing_keeps_every_pin_layer_at_its_documented_volume():
+    # Flat-flux homogenization of one assembly must equal the documented
+    # volume mix of the six pin materials in every cross section: that holds
+    # only if every constituent, thin shells included, keeps its exact area.
+    from garnet import flux_weighted_homogenize
+    from garnet.benchmarks.hpmr import _ASSEMBLY_VOLUME_FRACTIONS
+    from garnet.benchmarks.hpmr_assembly import PIN_XS_IDS
+    from garnet.blend import blend_materials
+
+    p, _ = build_hpmr2d_pins(refine=8, drum_angle_deg=0.0)
+    z = hpmr_assembly_zones(p)
+    G = p.materials[0].n_groups
+    assert G == 11
+    hm, _, _ = flux_weighted_homogenize(
+        np.ones((G,) + p.material_map.shape), p.materials, p.material_map,
+        z.region_map, cell_volume=p.grid.cell_volume, mix_material=p.mix_material,
+        mix_weight=p.mix_weight, mix_region_map=z.mix_region_map)
+    pins = p.materials[PIN_OFFSET:PIN_OFFSET + 6]
+    frac = np.array([_ASSEMBLY_VOLUME_FRACTIONS[i] for i in PIN_XS_IDS])
+    want = blend_materials(pins, frac / frac.sum())
+    for zi in np.flatnonzero(z.fuel)[:4]:
+        for attr in ("sigma_a", "nu_sigma_f", "sigma_t"):
+            np.testing.assert_allclose(getattr(hm[zi], attr), getattr(want, attr),
+                                       rtol=2e-3)
+    # the drum arc stays a two-material blend
+    assert np.all(p.mix_material[p.mix_material >= 0] == 5)
+
+
+def test_blend_materials_follows_the_two_material_rules():
+    from garnet.blend import blend_material, blend_materials
+    from garnet.benchmarks.hpmr_core_pins import hpmr_pin_core_materials
+
+    _, pins = hpmr_pin_core_materials("g11")
+    a = blend_materials([pins[0], pins[1]], [0.7, 0.3])
+    b = blend_material(pins[0], pins[1], 0.3)
+    np.testing.assert_allclose(a.diffusion, b.diffusion, rtol=1e-14)
+    np.testing.assert_allclose(a.sigma_s, b.sigma_s, rtol=1e-14)
+    np.testing.assert_allclose(1.0 / a.diffusion,
+                               0.7 / pins[0].diffusion + 0.3 / pins[1].diffusion,
+                               rtol=1e-14)
+    assert blend_materials(pins[:3], [0.0, 1.0, 0.0]) is pins[1]
+    with pytest.raises(ValueError, match="fractions"):
+        blend_materials(pins[:2], [0.6, 0.6])

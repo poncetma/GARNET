@@ -15,7 +15,8 @@ from .griffin_xs import (read_library as read_griffin_library,
                         volume_homogenize)
 from .grid import Grid
 from .hex import HexDiffusionEigenSolver, HexGrid, offset_to_axial
-from .materials import Kinetics, Material, ONE_GROUP_DEMO, PWR_TWO_GROUP
+from .materials import (Kinetics, Material, ONE_GROUP_DEMO, PWR_TWO_GROUP,
+                        net_absorption, transport_corrected)
 from .mesh import (Mesh, MeshResult, UnstructuredDiffusionSolver, assemble_mesh,
                   assemble_mesh_3d, read_gmsh)
 from .model import (CylindricalModel, FeedbackSpec, HexLattice, MaterialSummary,
@@ -162,6 +163,8 @@ __all__ = [
     "region_average",
     "sph_correct",
     "sph_kinetics",
+    "transport_corrected",
+    "net_absorption",
     "apply_sph_factors",
     "sph_correct_monolithic",
     "sph_get_correct",

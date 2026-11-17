@@ -27,6 +27,14 @@ class Material:
                   the SP3 solver for the higher angular moments; if omitted,
                   1/(3 D_g) is used (exact for transport-corrected data with
                   isotropic scattering).
+    sigma_s_moments : optional Legendre moments of the scattering matrix,
+                  shape (L+1, G, G), [l, g_from, g_to], moments WITHOUT the
+                  (2l+1) factor (Sigma_s1 = mean-cosine-weighted scattering).
+                  Moment 0 is the P0 matrix. With moments present, ``total``
+                  must be the true total cross section: the anisotropy lives in
+                  the moments, read by an anisotropic S_N solve. Isotropic
+                  solvers need transport-corrected data instead
+                  (:func:`transport_corrected`).
     """
 
     diffusion: np.ndarray
@@ -41,6 +49,7 @@ class Material:
     # solvers only need nu_sigma_f; power edits use this when present.
     kappa_fission: np.ndarray | None = None
     name: str = ""
+    sigma_s_moments: np.ndarray | None = None
 
     def __post_init__(self):
         self.diffusion = np.atleast_1d(np.asarray(self.diffusion, dtype=np.float64))
@@ -61,8 +70,14 @@ class Material:
                 raise ValueError(f"{key} must contain finite values")
         if np.any(self.diffusion <= 0):
             raise ValueError("diffusion coefficients must be positive")
-        if np.any(self.sigma_a < 0) or np.any(self.nu_sigma_f < 0) or np.any(self.sigma_s < 0):
+        if np.any(self.nu_sigma_f < 0) or np.any(self.sigma_s < 0):
             raise ValueError("cross sections must be non-negative")
+        if np.any(self.sigma_a < 0) and np.any(self.removal <= 0):
+            # A net absorption (see net_absorption) is negative where the
+            # (n,2n) gain exceeds capture; the removal must still be positive.
+            raise ValueError("cross sections must be non-negative; a negative (net) "
+                             "absorption is accepted only while the removal "
+                             "Sigma_a + out-scatter stays positive in every group")
         if np.any(self.chi < 0):
             raise ValueError("chi must be non-negative")
         if self.is_fissile and not np.isclose(self.chi.sum(), 1.0):
@@ -76,6 +91,19 @@ class Material:
                                             dtype=np.float64).reshape(G)
             if not np.all(np.isfinite(self.kappa_fission)) or np.any(self.kappa_fission < 0):
                 raise ValueError("kappa_fission must be finite and non-negative")
+        if self.sigma_s_moments is not None:
+            m = np.asarray(self.sigma_s_moments, dtype=np.float64)
+            if m.ndim != 3 or m.shape[1:] != (G, G) or m.shape[0] < 1:
+                raise ValueError(f"sigma_s_moments must have shape (L+1, {G}, {G}), "
+                                 f"got {m.shape}")
+            if not np.all(np.isfinite(m)):
+                raise ValueError("sigma_s_moments must be finite")
+            self.sigma_s_moments = m
+
+    @property
+    def scattering_order(self) -> int:
+        """Highest Legendre scattering moment carried (0 if isotropic)."""
+        return 0 if self.sigma_s_moments is None else self.sigma_s_moments.shape[0] - 1
 
     def replace(self, **changes) -> "Material":
         """Return an independent, validated copy with selected fields changed.
@@ -201,3 +229,81 @@ ONE_GROUP_DEMO = Material(
     sigma_a=[0.030],
     nu_sigma_f=[0.035],
 )
+
+
+def net_absorption(material: Material) -> Material:
+    """Copy whose absorption closes the balance on the TRUE total cross section:
+    Sigma_a,g = Sigma_t,g - sum_g' Sigma_s0[g -> g'].
+
+    GARNET's solvers remove Sigma_a + sum_{g' != g} Sigma_s[g -> g'] from each
+    group (``Material.removal``; the within-group term cancels), while a
+    transport code given the total and the P0 matrix removes
+    Sigma_t - Sigma_s[g -> g]. The two agree only if
+    Sigma_a + sum_g' Sigma_s0 = Sigma_t. A library whose scattering matrix
+    counts (n,2n) with its multiplicity while the total counts the reaction
+    once (Griffin ISOXML, Serpent's scattering production matrix) exceeds that
+    by Sigma_(n,2n), and with the library absorption every GARNET solver loses
+    the (n,2n) gain. The net absorption restores it, and is negative where the
+    gain exceeds capture: Be in the fastest group of the HP-MR library,
+    -0.0086 /cm against +0.0060 /cm. ``Material`` accepts that while the
+    removal stays positive.
+
+    Only for data whose ``sigma_t`` is the true total, not ``1/(3D)`` of
+    transport-corrected diffusion data. It commutes with
+    :func:`transport_corrected`, which lowers the total and the within-group
+    scattering by the same amount.
+    """
+    return material.replace(sigma_a=material.sigma_t - material.sigma_s.sum(axis=1))
+
+
+def transport_corrected(material: Material, method: str = "outscatter") -> Material:
+    """Transport-corrected copy of a material with P1 scattering moments.
+
+    Isotropic-scattering solvers (diffusion, SPN, isotropic S_N) need the
+    anisotropy of scattering folded into the total cross section. With the P1
+    moment Sigma_s1[g -> g'] (no (2l+1) factor) the corrected total is
+
+        Sigma_tr,g = Sigma_t,g - c_g,   D_g = 1 / (3 Sigma_tr,g),
+
+    and the within-group P0 scattering is reduced by the same c_g, which keeps
+    the balance Sigma_tr = Sigma_a + sum_g' Sigma_s0~(g -> g'):
+
+    * ``"outscatter"`` (the out-scatter approximation): c_g = sum_g'
+      Sigma_s1[g -> g'], the P1 moment of everything scattered out of g;
+    * ``"diagonal"``: c_g = Sigma_s1[g -> g], the within-group P1 term only,
+      the usual transport approximation for isotropic S_N.
+
+    The out-scatter correction can exceed the within-group P0 scattering
+    (hydrogenous moderators in a few groups); the stored diagonal is then
+    clipped at zero with a warning. No solver reads that diagonal: diffusion
+    ignores it, and the triangular S_N solver takes its within-group
+    scattering as total minus removal, which it keeps negative for data with
+    an explicit total such as these, so the balance holds.
+
+    The result carries no ``sigma_s_moments``: it is data for isotropic
+    solvers and must not be combined with an anisotropic scattering solve.
+    """
+    import warnings
+
+    if method not in ("outscatter", "diagonal"):
+        raise ValueError(f"method must be 'outscatter' or 'diagonal', got {method!r}")
+    if material.scattering_order < 1:
+        raise ValueError(f"material {material.name!r} carries no P1 scattering "
+                         "moment to transport-correct with")
+    s1 = material.sigma_s_moments[1]
+    corr = s1.sum(axis=1) if method == "outscatter" else np.diag(s1).copy()
+    total = material.sigma_t - corr
+    if np.any(total <= 0.0):
+        raise ValueError(f"transport correction of {material.name!r} leaves a "
+                         "non-positive total cross section")
+    sigma_s = np.array(material.sigma_s, dtype=float, copy=True)
+    diag = np.diag(sigma_s) - corr
+    if np.any(diag < 0.0):
+        warnings.warn(f"{method} transport correction of {material.name!r} makes "
+                      f"the within-group scattering negative in groups "
+                      f"{(np.flatnonzero(diag < 0.0) + 1).tolist()}; clipped at 0",
+                      RuntimeWarning, stacklevel=2)
+    sigma_s[np.diag_indices_from(sigma_s)] = np.maximum(diag, 0.0)
+    return material.replace(diffusion=1.0 / (3.0 * total), total=total,
+                            sigma_s=sigma_s, sigma_s_moments=None,
+                            name=f"{material.name}-tc-{method}")

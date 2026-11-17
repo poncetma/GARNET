@@ -544,3 +544,31 @@ def test_apply_sph_factors_matches_the_corrected_materials():
         np.testing.assert_array_equal(a.sigma_s, b.sigma_s)
     with pytest.raises(ValueError, match="factors"):
         apply_sph_factors(hmats, mu[:2])
+
+
+def test_fixed_k_anderson_matches_newton():
+    # The Anderson-accelerated fixed point (classic SPH update plus a common
+    # shift driving k to k_ref) must find the factors Newton finds.
+    grid, mats, mmap, region, dV, coarse = _reflected_slab()
+    k_ref, hmats, rflux, rvol, solve = _generation(grid, mats, mmap, region, dV,
+                                                   VACUUM_X, coarse=coarse)
+    fuel = np.array([False, True, True, True, False])
+    newton = sph_correct(hmats, None, rflux, solve, normalization="none",
+                         k_ref=k_ref, sph_regions=fuel, tol=1e-9, method="hybr")
+    anderson = sph_correct(hmats, None, rflux, solve, normalization="none",
+                           k_ref=k_ref, sph_regions=fuel, tol=1e-9, method="anderson")
+    assert newton.converged and anderson.converged
+    np.testing.assert_allclose(anderson.factors, newton.factors, rtol=1e-7)
+    assert abs(anderson.k_eff - k_ref) * 1e5 < 1e-3
+
+
+def test_fixed_k_anderson_falls_back_when_no_solution_exists():
+    # No exact solution (see test_fixed_k_reports_its_floor_when_no_solution_exists):
+    # the fixed point cannot converge, the JFNK fallback cannot either, and the
+    # result must say so with its floor.
+    grid, mats, mmap, region, dV, bc = _leaky_colorset(cuts=(12, 18))
+    k_ref, hmats, rflux, _, solve = _generation(grid, mats, mmap, region, dV, bc)
+    out = sph_correct(hmats, region, rflux, solve, normalization="none",
+                      k_ref=k_ref, tol=1e-9, method="anderson", max_iter=60)
+    assert not out.converged and out.residual > 1e-3
+    assert abs(solve(out.corrected_materials)[1] - out.k_eff) < 1e-10

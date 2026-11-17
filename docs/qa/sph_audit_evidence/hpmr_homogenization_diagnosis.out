@@ -1,0 +1,23 @@
+# tools/diagnose_hpmr_homogenization.py 16 0,180 <cases> raster:16,raster:4 gpu   (job 252641, 2026-11-16)
+# net absorption, cache /data/scratch/shared/poncet_m/garnet-sph-ref-net; dk = zone model without SPH minus reference k
+HP-MR zone homogenization before SPH: reference refine 16, device gpu
+
+ angle      reference  homog. TC     k_ref fuel D_thermal |        raster:16 |         raster:4
+   0.0      diffusion       None  1.051321          0.455 |     +1467p   28s |     +2014p    3s
+   0.0  diffusion-tco outscatter  1.032137          0.507 |     +1035p    9s |     +1727p    2s
+   0.0        sn:4:16       None  1.037997          0.450 |     +2143p   11s |     +2681p    2s
+   0.0        sn:4:16 outscatter  1.037997          0.496 |      -375p   10s |      +301p    3s
+   0.0    sn-tcd:4:16   diagonal  1.017027          0.500 |     +1898p    9s |     +2553p    3s
+   0.0    sn-tco:4:16 outscatter  1.016267          0.498 |     +1862p    9s |     +2540p    2s
+   0.0     sn-p2:4:16       None  1.015993          0.452 |     +4427p   10s |     +4966p    2s
+   0.0     sn-p2:4:16 outscatter  1.015993          0.498 |     +1908p   10s |     +2586p    3s
+   0.0     sn-p2:4:16   diagonal  1.015993          0.501 |     +2021p    9s |     +2676p    2s
+ 180.0      diffusion       None  1.137815          0.462 |      +188p   11s |      +360p    3s
+ 180.0  diffusion-tco outscatter  1.127882          0.513 |      +136p   10s |      +346p    2s
+ 180.0        sn:4:16       None  1.124325          0.459 |      +891p   13s |     +1064p    3s
+ 180.0        sn:4:16 outscatter  1.124325          0.505 |      -342p   12s |      -131p    3s
+ 180.0    sn-tcd:4:16   diagonal  1.111533          0.509 |      +868p   13s |     +1087p    4s
+ 180.0    sn-tco:4:16 outscatter  1.112805          0.506 |      +872p   14s |     +1083p    4s
+ 180.0     sn-p2:4:16       None  1.112618          0.460 |     +2145p   16s |     +2317p    4s
+ 180.0     sn-p2:4:16 outscatter  1.112618          0.506 |      +912p   15s |     +1122p    4s
+ 180.0     sn-p2:4:16   diagonal  1.112618          0.509 |      +777p   13s |      +996p    3s

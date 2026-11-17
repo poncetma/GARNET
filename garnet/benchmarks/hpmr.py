@@ -133,7 +133,9 @@ def hpmr_materials_builtin(fuel, three_d=False):
                         nu_sigma_f=d[f"{n}.nsf"], sigma_s=d[f"{n}.ss"],
                         chi=chi if chi.sum() > 0 else None,
                         kappa_fission=(d[f"{n}.kf"]
-                                       if d[f"{n}.kf"].sum() > 0 else None))
+                                       if d[f"{n}.kf"].sum() > 0 else None),
+                        sigma_s_moments=(d[f"{n}.ssL"]
+                                         if f"{n}.ssL" in d.files else None))
 
     G = int(d["G"])
     void = Material(name="void", diffusion=[1.0] * G, sigma_a=[0.0] * G,

@@ -14,10 +14,19 @@ Format, as decoded from the VTB HP-MR library and verified by the balance
 - one ``Multigroup_Cross_Section_Library`` per material, keyed by integer ID;
 - each is tabulated on a temperature grid (``Tfuel``/``Tmod``), one ``Table``
   per grid node, selected here by ``grid_index`` (e.g. "3 3" ~ 800 K);
-- inside a table, the ``pseudo`` isotope carries ``Total`` (transport XS, so
-  D = 1/(3 Total)), ``Absorption`` (Sigma_a), ``nuFission``,
-  ``FissionSpectrum`` (chi) and a Legendre-expanded ``Scattering`` matrix
-  whose P0 moment (the first NGroup rows) is the diffusion scattering matrix;
+- inside a table, the ``pseudo`` isotope carries ``Total``, ``Absorption``
+  (Sigma_a), ``nuFission``, ``FissionSpectrum`` (chi) and a Legendre-expanded
+  ``Scattering`` matrix (``L`` attribute: moments P0..PL, NGroup rows each,
+  without the (2l+1) factor);
+- ``Total`` is the TRUE total cross section, not a transport cross section:
+  Absorption + the P0 scattering out of each group reproduces it (to 1e-4 or
+  better in the VTB HP-MR library, 5.7 % off for Be through (n,2n)), and the P1
+  moments are large (Sigma_s1/Sigma_t up to 0.56 in the YH moderator). INL's
+  Griffin model of the HP-MR reads this library with anisotropic S_N
+  scattering (``NA = 2``). So ``D = 1/(3 Total)`` below has NO transport
+  correction; use :func:`garnet.materials.transport_corrected` for diffusion
+  or isotropic S_N, or the moments with an anisotropic S_N solve. (Until
+  2026-11-16 this note called ``Total`` a transport cross section; it is not.)
 - the ``Scattering`` ``Profile`` gives, per *sink* group, the ``first last``
   range of *source* groups scattering into it; the ``Value`` rows list those
   entries, so entry k of sink row g is Sigma_s(source=first+k -> g).
@@ -181,19 +190,24 @@ def read_material(path, mid, grid_index="3 3", name=None) -> Material:
     kappa_fission = np.zeros(G) if kappa_fission is None else kappa_fission
     chi = np.zeros(G) if chi is None else chi
 
-    # P0 scattering: first G rows of the profile/value blocks. Profile row g
-    # (sink) gives the source-group range; GARNET wants sigma_s[source, sink].
+    # Scattering moments: G profile/value rows per Legendre order. Profile row
+    # g (sink) gives the source-group range; GARNET wants [l, source, sink].
     sc = iso.find("Scattering")
     if sc is None or sc.find("Profile") is None or sc.find("Value") is None:
         raise KeyError(f"{path} material {mid} grid {grid_index!r} lacks the "
                        f"required <Scattering> Profile/Value data")
     prof = [ln.split() for ln in sc.find("Profile").text.split("\n") if ln.strip()]
     val = [ln.split() for ln in sc.find("Value").text.split("\n") if ln.strip()]
-    sigma_s = np.zeros((G, G))
-    for sink in range(G):
-        first, last = int(prof[sink][0]), int(prof[sink][1])
-        for k, source in enumerate(range(first, last + 1)):
-            sigma_s[source - 1, sink] = float(val[sink][k])
+    if len(prof) % G or len(prof) != len(val):
+        raise ValueError(f"{path} material {mid}: scattering blocks are not whole "
+                         f"multiples of NGroup={G}")
+    moments = np.zeros((len(prof) // G, G, G))
+    for l in range(moments.shape[0]):
+        for sink in range(G):
+            first, last = int(prof[l * G + sink][0]), int(prof[l * G + sink][1])
+            for k, source in enumerate(range(first, last + 1)):
+                moments[l, source - 1, sink] = float(val[l * G + sink][k])
+    sigma_s = moments[0].copy()
 
     fissile = bool(np.any(nu_sigma_f > 0))
     if fissile and chi.sum() > 0:
@@ -204,7 +218,8 @@ def read_material(path, mid, grid_index="3 3", name=None) -> Material:
                     sigma_a=sigma_a, nu_sigma_f=nu_sigma_f, sigma_s=sigma_s,
                     chi=chi, total=total,
                     kappa_fission=(kappa_fission
-                                   if np.any(kappa_fission > 0) else None))
+                                   if np.any(kappa_fission > 0) else None),
+                    sigma_s_moments=moments if moments.shape[0] > 1 else None)
 
 
 def read_library(path, ids, grid_index="3 3") -> dict:

@@ -1,13 +1,19 @@
 """How finely must SPH factors be tabulated in drum angle? (HP-MR 2-D)
 
-    python tools/assess_sph_angle_tables.py [ref_refine] [node_spec] [device] [variants]
+    python tools/assess_sph_angle_tables.py [reference] [node_spec] [device] [variants]
 
 Plan step 5 of the SPH audit (docs/qa/sph_audit_2026-11-13.md, Sec. 9.3):
 cross sections, factors and form functions are tabulated in drum angle and
 interpolated linearly, as in Griffin (Kumar et al., Ann. Nucl. Energy 230 (2026)
 112111, Sec. 3.5.1, where form functions needed a 5 degree grid). This measures
-the cross-section and factor part on the assembly-zone workflow: TriSP3
-reference on the uniform raster (``ref_refine``, volume-mixed arc), a node model
+the cross-section and factor part on the assembly-zone workflow. ``reference``
+is either an integer R (TriSP3 on the assembly-level raster of refine R with
+the volume-mixed arc and two-group placeholder data, the first study) or
+``pinR:METHOD`` (the faithful pin-resolved core at refine R, 11-group, exact
+pin blending, solved by METHOD, a method of tools/hpmr_pin_reference.py such
+as ``sn-p2:4:16`` (anisotropic S_N, the faithful reference), and cached by it;
+zone constants are collapsed with transport-corrected data, see
+``pin_reference`` in tools/sph_hpmr_nodes.py). A node model
 given by ``node_spec`` (see tools/sph_hpmr_nodes.py: ``raster:R``,
 ``smeared:R``, ``local:R:L:polar|centroid``), one zone per fuel assembly,
 fixed-k SPH. ``variants`` is a comma list of ``fuel`` (fuel zones only, the
@@ -32,7 +38,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from sph_hpmr_nodes import describe, merge_drum, node_model  # noqa: E402
+from sph_hpmr_nodes import describe, merge_drum, node_model, pin_reference  # noqa: E402
 
 from garnet import (TriSP3EigenSolver, apply_sph_factors,  # noqa: E402
                     flux_weighted_homogenize, sph_correct)
@@ -40,7 +46,10 @@ from garnet.benchmarks.hpmr import build_hpmr2d, hpmr_assembly_zones  # noqa: E4
 from garnet.materials import Material  # noqa: E402
 from garnet.power import fission_energy_xs  # noqa: E402
 
-ref_refine = int(sys.argv[1]) if len(sys.argv) > 1 else 16
+ref_spec = sys.argv[1] if len(sys.argv) > 1 else "16"
+PIN_REF = ref_spec.startswith("pin")
+ref_refine = int(ref_spec[3:].split(":")[0]) if PIN_REF else int(ref_spec)
+ref_method = ref_spec.split(":", 1)[1] if PIN_REF else "sp3" 
 node_spec = sys.argv[2] if len(sys.argv) > 2 else "raster:4"
 device = sys.argv[3] if len(sys.argv) > 3 else "auto"
 VARIANTS = tuple(sys.argv[4].split(",")) if len(sys.argv) > 4 else ("fuel",)
@@ -52,6 +61,8 @@ MERGE = merge_drum(node_spec)
 
 
 def reference(angle):
+    if PIN_REF:
+        return pin_reference(ref_refine, ref_method, angle, MERGE, device)
     p = build_hpmr2d(refine=ref_refine, drum_angle_deg=angle, absorber="polar")
     z = hpmr_assembly_zones(p, merge_drum=MERGE)
     r = TriSP3EigenSolver(p.grid, p.materials, p.material_map, active=p.active,
@@ -101,7 +112,9 @@ interior = fuel | np.isin(np.arange(len(zones.names)),
                           [i for i, n in enumerate(zones.names)
                            if n in ("central", "drum_be", "drum_absorber", "drum")])
 masks = {"fuel": fuel, "interior": interior}
-print(f"HP-MR 2-D SPH tables in drum angle: TriSP3 reference refine {ref_refine}; "
+print(f"HP-MR 2-D SPH tables in drum angle: "
+      f"{'pin-resolved 11-group ' + ref_method if PIN_REF else 'assembly-level TriSP3'} "
+      f"reference refine {ref_refine}; "
       f"node model {describe(node_spec)} ({nodes[GRID[0]]['n_cells']} cells); "
       f"device {device}; {len(GRID)} states "
       f"[{time.perf_counter() - t0:.0f} s for the references]\n", flush=True)
@@ -117,7 +130,7 @@ for a in GRID:
     line = f"{a:6.1f} {ref['k']:10.6f} {dk0:+9.1f}p {dp0:5.2f}% |"
     for v in VARIANTS:
         out = sph_correct(ref["hm"], zones.region_map, ref["rflux"], solve,
-                          normalization="none", k_ref=ref["k"], sph_regions=masks[v],
+                          normalization="none", k_ref=ref["k"], verbose=True, sph_regions=masks[v],
                           tol=1e-7, mu0=factors.get((a - STEP, v)))
         factors[a, v] = out.factors
         mu = out.factors[fuel, -1]
