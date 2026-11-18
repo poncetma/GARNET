@@ -528,3 +528,41 @@ def zone_boundary_currents(zones, cells, J):
     zone = np.asarray(zones.region_map).reshape(-1)[cells]
     bregs = sorted(set(zone.tolist()))
     return bregs, np.array([J[zone == b].sum(axis=0) for b in bregs])
+
+
+def absorber_split_zones(zones):
+    """Zones with the absorber of every drum zone moved to a zone of its own.
+
+    The mix component (the volume-mixed B4C) of each cell whose mix region is
+    a drum zone z goes to a new zone "<name of z>:B4C"; everything else stays.
+    Homogenizing on these zones gives, per drum zone, the non-absorber and the
+    absorber constants and region fluxes, whose flux-volume weighted mix is
+    the drum zone's constants (``shielded_mix``). Returns (zones, {z: zB}).
+    """
+    names, material = list(zones.names), list(zones.material)
+    fuel, site = list(zones.fuel), list(zones.site)
+    mix = np.array(zones.mix_region_map, copy=True)
+    of = {}
+    for z, n in enumerate(zones.names):
+        if not n.startswith("drum") or not np.any(mix == z):
+            continue
+        of[z] = len(names)
+        mix[mix == z] = len(names)
+        names.append(f"{n}:B4C")
+        material.append(zones.material[z])
+        fuel.append(False)
+        site.append(zones.site[z])
+    return _replace_zones(zones, zones.region_map, mix, names, material, fuel, site), of
+
+
+def shielded_mix(x_rest, x_abs, v_rest, v_abs, s):
+    """Flux-volume weighted mix of two parts' constants, per group.
+
+    x_* : (..., G) constants of the non-absorber and absorber parts (for a
+    scattering matrix the leading axis is the source group, weighted alike);
+    v_* : part volumes; s : (G,) absorber-to-rest average flux ratio.
+    Returns (x_rest + rho x_abs) / (1 + rho), rho = v_abs s / v_rest."""
+    rho = (v_abs / max(v_rest, 1e-300)) * np.asarray(s, float)
+    if np.ndim(x_rest) == 2:                      # (G, G) scattering, by source group
+        rho = rho[:, None]
+    return (np.asarray(x_rest) + rho * np.asarray(x_abs)) / (1.0 + rho)

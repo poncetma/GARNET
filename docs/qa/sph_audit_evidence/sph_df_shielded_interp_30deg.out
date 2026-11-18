@@ -1,0 +1,16 @@
+SPH-DF tables in drum angle, HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones with inner/outer boundary split, drums as core + 8 ring sectors (sector boundaries on the outward line) (drum outer layers Be only, arc to the ring sectors); interpolating cross sections and factors separately, device cpu; generated at [0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 135.0, 150.0, 165.0, 180.0]
+
+Table spacing 30 deg (table at [np.float64(0.0), np.float64(30.0), np.float64(60.0), np.float64(90.0), np.float64(120.0), np.float64(150.0), np.float64(180.0)]); dk pcm | worst assembly % | pin RMS % | worst pin %
+ angle                 no equivalence                  SPH-DF, f = 1        SPH-DF + form functions
+  15.0      +832.9  4.20  6.52  32.05      -266.1  7.12 10.43  61.09      -266.1  7.48  6.87  53.93
+  45.0      +827.5  3.42  4.55  14.18      +306.6  2.89  5.50  23.85      +306.6  3.38  3.05  16.34
+  75.0      +346.3  2.57  5.65  35.63     -1377.9  8.25 10.56  51.69     -1377.9  7.84  8.86  49.23
+ 105.0      +252.8  2.94  4.79  18.77      -353.5  2.67  5.23  21.38      -353.5  2.29  2.44  18.62
+ 135.0      +490.2  1.02  4.00   9.08      +480.8  2.23  4.35  11.12      +480.8  2.61  2.38  13.66
+ 165.0      +147.3  2.90  4.46  10.09      -817.9  6.86  6.67  30.52      -817.9  6.35  4.53  28.67
+
+Worst over the off-table angles (|dk| pcm, worst assembly %, pin RMS %, worst pin %):
+ spacing tests                 no equivalence                  SPH-DF, f = 1        SPH-DF + form functions
+   30.0d     6       832.9  4.20  6.52  35.63      1377.9  8.25 10.56  61.09      1377.9  7.84  8.86  53.93
+
+total 982 s

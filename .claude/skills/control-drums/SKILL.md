@@ -118,29 +118,38 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
    twice in P0, and GARNET's removal then loses the gain unless the
    absorption is made net (`net_absorption`; on HP-MR the drum worth moves by
    about 430 pcm at refine 4).
-2. **Zones** (baseline since 2026-11-17):
-   - one per fuel assembly, one per Be reflector hex, and one each per drum body and drum absorber arc (`hpmr_assembly_zones(per_hex=True)`, same numbering on every mesh);
-   - every hex on the vacuum boundary split into an inner and an outer zone (`split_boundary_layer`, carried to the nested reference raster by `transfer_boundary_layer`, `tools/sph_hpmr_nodes.py`).
+2. **Zones** (baseline since 2026-11-18): `sector_zoning_hooks(8, aligned=True, outer_arc_to_sector=True)` in `tools/sph_hpmr_nodes.py`; in `tools/assess_sph_df_tables.py` set `SPH_DRUM_SECTORS=8 SPH_OUTER_BE=1 SPH_SECTOR_ALIGN=1`.
+   - **Fuel and Be hexes:** one zone per fuel assembly and per Be reflector hex.
+   - **Inner/outer split:** every hex on the vacuum boundary is split into an inner and an outer zone (the first row of node cells).
+   - **Drum hexes, inside:** each drum is one merged hex whose inner part becomes a core (within 10.25 cm of the drum centre) and 8 ring sectors fixed in space. The sector boundaries lie on the drum's outward line and every 45° from it, so the arc edges cross them at drum angles that are multiples of 45°. The arc moves through the sectors, so their absorber content changes continuously with angle.
+   - **Drum hexes, outer layer:** it holds Be only; the absorber fraction of its cells goes to the ring sector at the same azimuth.
+   - **Zone maps:** identical on node and reference rasters (exact nesting).
 
-   Per-drum zones matter: corner and mid-edge drums need absorber factors a factor of 2–2.5 apart.
+   **No zone with a vacuum face may hold B4C.** A uniform boundary zone that holds part of the arc cannot reproduce where the reference leaks, and SPH-DF has no solution at some angles (`tools/probe_sph_drum_zonings.py`).
+
+   The older per-arc zoning, with a separate absorber-arc zone per drum that moves with the drum, has three problems:
+   - its absorber factors swing between 60 and 590 with angle;
+   - it has no solution at 165°;
+   - interpolated in angle, it keeps a floor of about 200 pcm and 2 % pin RMS at any table spacing.
 3. **Factors: SPH-DF** (Labouré et al., Ann. Nucl. Energy 128 (2019) 443), `sph_bcf_correct`:
    - SPH factors on every zone plus a boundary discontinuity factor on each outer zone, flux-volume normalized;
    - reference outgoing currents from `TriSNTransportSolver.region_partial_currents` (`load_or_solve_currents`), coarse leakage from `tri_boundary_leakage`.
 
-   On HP-MR it reproduces `k` and every zone rate at both drum states, with fuel factors of 0.88–1.17.
-   - **Check feasibility first** (`tools/probe_sph_bcf_feasibility.py`). Without the inner/outer split the zero-flux leakage limit of the coarse model is below the reference in some groups, no solution exists, and the boundary factors run to their cap.
+   On HP-MR, with the sector zones, it reproduces `k` and every zone rate at all 13 table angles 0°–180°. Fuel factors are 0.84–1.18, drum factors 0.3–3.6, and boundary factors 0.1–4.2.
+   - **Check feasibility first** (`tools/probe_sph_bcf_feasibility.py`, `tools/probe_sph_drum_zonings.py`). Without the inner/outer split, or with B4C in a boundary zone, the zero-flux leakage limit of the coarse model is below the reference in some groups. No solution exists then, and the boundary factors run to their upper cap.
+   - **Small boundary factors are legitimate.** A boundary zone shadowed by the arc needs γ ≈ 1e-6, which is why the floor is exp(−30).
+   - **Reference currents** must come from the S_N problem of the method (`load_or_solve_currents` builds it). Never use the problem returned by `pin_reference`, which carries transport-corrected homogenization data.
    - **Do not use flux-volume SPH alone** with a vacuum boundary: +400 to +770 pcm.
    - **Avoid fixed-k SPH** (`normalization="none"`): it reproduces `k` by distorting the fuel factors through the fuel–reflector interface (0.55–0.75; 0.06–20 with smeared drums).
 4. **Node model**: drums resolved and volume-mixed as in §1–2. Factors on
    coarse drum cells absorb the drum discretization error, which then does
    not interpolate in angle.
-5. **Tables in drum angle**: zone cross sections, factors
-   (`apply_sph_factors`) and per-group form functions (`pin_footprints` or
-   `mesh_pin_footprints`, `group_form_functions`,
-   `reconstruct_group_form_functions`), linearly interpolated. With resolved
-   drums, 45° tables kept `k` within 5.5–14 pcm and 15° tables within
-   1.2–11 pcm. Validate the spacing for each new core with the two tools
-   above, on a reference angle step finer than the table.
+5. **Tables in drum angle**: zone cross sections, SPH factors (`apply_sph_factors`), boundary factors and per-group form functions (`pin_footprints` or `mesh_pin_footprints`, `group_form_functions`, `reconstruct_group_form_functions`), linearly interpolated. Tool: `tools/assess_sph_df_tables.py` (`generate`, `evaluate`, `attribute`).
+   - **Use a 5° table with the sector zoning.** With the 1.9 cm node mesh and SPH-DF on the HP-MR, interpolating to the midpoints between table points kept `k` within 38 pcm, assemblies within 0.28 %, pin RMS 0.22 % and the worst pin within 2.0 %.
+   - **Coarser tables lose accuracy quickly:** 10° gives 121 pcm and 1.0 % pin RMS, 15° gives 171 pcm and 1.2 %, 30° gives 670 pcm and 4.7 %.
+   - **The coarse-table error is the drum sectors' cross sections.** The arc fills a 45° sector within 45° of rotation and the constants go from Be to near-black, so linear interpolation over-predicts the absorption between table points. Fuel, reflector and boundary factors interpolate essentially exactly.
+   - **What did not help:** interpolating μΣ instead of μ and Σ, and a self-shielding rebuild of the sector constants.
+   - **Validate the spacing for each new core** against references at the table midpoints, and use `attribute` to see which class of quantity carries the error.
 6. **Construction check**: at every table angle the reconstruction reproduces
    the reference pin rates to round-off; anything else is a bug.
 7. **Transients**: `sph_kinetics(kinetics, factors)` gives the speeds v/mu;
