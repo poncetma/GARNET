@@ -128,6 +128,66 @@ def load_or_solve(refine: int, angle: float, method: str, device: str = "auto",
     return out
 
 
+def currents_path(cache: str, method: str, refine: int, angle: float,
+                  per_hex: bool = False) -> str:
+    tag = "_currents_hex" if per_hex else "_currents"
+    return os.path.join(cache, f"{method_tag(method)}_r{refine}_a{angle:g}{tag}.npz")
+
+
+def load_or_solve_currents(refine: int, angle: float, method: str, device: str = "auto",
+                           cache: str = DEFAULT_CACHE, problem=None, per_hex: bool = False,
+                           region_map=None, tag: str | None = None):
+    """Reference partial currents on the assembly-zone surfaces (S_N only), cached.
+
+    Solves the S_N reference again on the levels engine and tallies the
+    outgoing and incoming currents through every zone interface and through
+    each zone's vacuum boundary (TriSNTransportSolver.region_partial_currents,
+    zones of garnet.benchmarks.hpmr.hpmr_assembly_zones without merged drums,
+    pooled or ``per_hex``, cached separately).
+    Returns dict(k, boundaries={zone: (G, 2)}, interfaces={(a, b): (G, 2)})
+    with [J_out, J_in] in the normalization of the solve's flux, which is also
+    stored in the flux cache when missing.
+    """
+    from garnet.benchmarks.hpmr import hpmr_assembly_zones
+
+    path = (currents_path(cache, method, refine, angle, per_hex) if region_map is None
+            else os.path.join(cache, f"{method_tag(method)}_r{refine}_a{angle:g}_currents_{tag}.npz"))
+    if region_map is not None and not tag:
+        raise ValueError("a custom region_map needs a cache tag")
+    if os.path.exists(path):
+        d = np.load(path)
+        return dict(k=float(d["k"]),
+                    boundaries={int(r): d["b_J"][i] for i, r in enumerate(d["b_regions"])},
+                    interfaces={(int(a), int(b)): d["i_J"][i]
+                                for i, (a, b) in enumerate(d["i_pairs"])})
+    kind, tc, order, quad = parse(method)
+    if kind != "sn":
+        raise ValueError("reference currents need an S_N method")
+    p = problem if problem is not None else problem_for(method, refine, angle)
+    t0 = time.perf_counter()
+    solver = TriSNTransportSolver(p.grid, p.materials, p.material_map, active=p.active,
+                                  mix_material=p.mix_material, mix_weight=p.mix_weight,
+                                  n_polar=quad[0], n_azi=quad[1], bc="vacuum",
+                                  scheme="scb", device=device, engine="levels",
+                                  scattering_order=order)
+    r = solver.solve(verbose=True, **TOL_SN)
+    rmap = (hpmr_assembly_zones(p, per_hex=per_hex).region_map if region_map is None
+            else np.asarray(region_map))
+    itf, bnd = solver.region_partial_currents(r, rmap)
+    os.makedirs(cache, exist_ok=True)
+    flux_file = cache_path(cache, method, refine, angle)
+    if not os.path.exists(flux_file):
+        np.savez(flux_file, flux=asnumpy(r.flux), k=r.k_eff, converged=bool(r.converged),
+                 seconds=time.perf_counter() - t0, outers=int(r.outer_iterations))
+    b_regions = sorted(bnd)
+    i_pairs = sorted(itf)
+    np.savez(path, k=r.k_eff, b_regions=np.array(b_regions, int),
+             b_J=np.array([bnd[b] for b in b_regions]),
+             i_pairs=np.array(i_pairs, int).reshape(-1, 2),
+             i_J=np.array([itf[i] for i in i_pairs]))
+    return dict(k=r.k_eff, boundaries=bnd, interfaces=itf)
+
+
 def main():
     refine = int(sys.argv[1])
     angles = [float(a) for a in sys.argv[2].split(",")]

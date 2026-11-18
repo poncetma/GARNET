@@ -638,46 +638,86 @@ class HpmrZones:
     site: tuple
 
 
-def _zones_from_sites(rows, cols, mmap, mix_material, merge_drum):
-    """Zone map from per-cell hex sites and base materials (see
-    :func:`hpmr_assembly_zones`)."""
-    mmap = np.asarray(mmap)
-    if merge_drum:
-        others = (VOID, CENTRAL, BE_REFLECTOR, DRUM_BE)
-        names = ("void", "central", "be_reflector", "drum")
-    else:
-        others = (VOID, CENTRAL, BE_REFLECTOR, DRUM_BE, DRUM_ABSORBER)
-        names = tuple(MATERIAL_NAMES[m] for m in others)
-    zone_of_material = np.full(max(int(mmap.max()) + 1, len(MATERIAL_NAMES)), -1,
-                               dtype=np.int64)
-    zone_of_material[list(others)] = np.arange(len(others))
-    if merge_drum:
-        zone_of_material[DRUM_ABSORBER] = zone_of_material[DRUM_BE]
-    region = zone_of_material[mmap]
-    # site -> fuel zone, vectorized through an integer key per site
-    keys = np.array([(R + 1000) * 4096 + (C + 1000) for R, C in _FUEL_SITES])
+def _site_lookup(sites, rows, cols):
+    """Index of each cell's hex site in ``sites`` (-1 if not one of them)."""
+    keys = np.array([(R + 1000) * 4096 + (C + 1000) for R, C in sites])
     order = np.argsort(keys)
     cell_key = (np.asarray(rows) + 1000) * 4096 + (np.asarray(cols) + 1000)
     pos = np.clip(np.searchsorted(keys[order], cell_key), 0, len(keys) - 1)
     hit = keys[order][pos] == cell_key
-    fuel_cells = hit & (mmap != VOID)
-    region[fuel_cells] = len(others) + order[pos[fuel_cells]]
+    return np.where(hit, order[pos], -1)
+
+
+def _zones_from_sites(rows, cols, mmap, mix_material, merge_drum, per_hex=False):
+    """Zone map from per-cell hex sites and base materials (see
+    :func:`hpmr_assembly_zones`)."""
+    mmap = np.asarray(mmap)
+    zone_of_material = np.full(max(int(mmap.max()) + 1, len(MATERIAL_NAMES)), -1,
+                               dtype=np.int64)
+    if not per_hex:
+        if merge_drum:
+            others = (VOID, CENTRAL, BE_REFLECTOR, DRUM_BE)
+            names = ("void", "central", "be_reflector", "drum")
+        else:
+            others = (VOID, CENTRAL, BE_REFLECTOR, DRUM_BE, DRUM_ABSORBER)
+            names = tuple(MATERIAL_NAMES[m] for m in others)
+        zone_of_material[list(others)] = np.arange(len(others))
+        if merge_drum:
+            zone_of_material[DRUM_ABSORBER] = zone_of_material[DRUM_BE]
+        region = zone_of_material[mmap]
+        absorber_zone = np.full(mmap.shape, zone_of_material[DRUM_ABSORBER])
+        material = list(others)
+        sites = [None] * len(others)
+    else:
+        # One zone per hex of the outer ring: each Be reflector hex, and each
+        # drum's body and absorber arc separately (or together with
+        # merge_drum), as Laboure et al. (2019) give every hexagon its own
+        # equivalence region.
+        nbe, nd = len(_BE_SITES), len(_DRUM_SITES)
+        names = (("void", "central") + tuple(f"be_reflector{s}" for s in _BE_SITES)
+                 + (tuple(f"drum{s}" for s in _DRUM_SITES) if merge_drum else
+                    tuple(f"drum_be{s}" for s in _DRUM_SITES)
+                    + tuple(f"drum_absorber{s}" for s in _DRUM_SITES)))
+        zone_of_material[[VOID, CENTRAL]] = [0, 1]
+        region = zone_of_material[mmap]
+        be_idx = _site_lookup(_BE_SITES, rows, cols)
+        drum_idx = _site_lookup(_DRUM_SITES, rows, cols)
+        sel = (mmap == BE_REFLECTOR) & (be_idx >= 0)
+        region[sel] = 2 + be_idx[sel]
+        body_zone = np.where(drum_idx >= 0, 2 + nbe + drum_idx, -1)
+        absorber_zone = (body_zone if merge_drum
+                         else np.where(drum_idx >= 0, 2 + nbe + nd + drum_idx, -1))
+        sel = (mmap == DRUM_BE) & (drum_idx >= 0)
+        region[sel] = body_zone[sel]
+        sel = (mmap == DRUM_ABSORBER) & (drum_idx >= 0)
+        region[sel] = absorber_zone[sel]
+        material = ([VOID, CENTRAL] + [BE_REFLECTOR] * nbe
+                    + [DRUM_BE] * nd + ([] if merge_drum else [DRUM_ABSORBER] * nd))
+        sites = ([None, None] + list(_BE_SITES) + list(_DRUM_SITES)
+                 + ([] if merge_drum else list(_DRUM_SITES)))
+    nother = len(names)
+    fuel_idx = _site_lookup(_FUEL_SITES, rows, cols)
+    fuel_cells = (fuel_idx >= 0) & (mmap != VOID)
+    region[fuel_cells] = nother + fuel_idx[fuel_cells]
     if np.any(region < 0):
         raise ValueError("cells outside the fuel sites carry a material with no "
                          "zone; mesh and site list are inconsistent")
     mix_region = None
     if mix_material is not None:
         mm = np.asarray(mix_material)
-        mix_region = np.where(mm == DRUM_ABSORBER, zone_of_material[DRUM_ABSORBER],
+        mix_region = np.where(mm == DRUM_ABSORBER, absorber_zone,
                               np.where(mm >= 0, region, -1)).astype(np.int64)
+        if np.any((mm == DRUM_ABSORBER) & (mix_region < 0)):
+            raise ValueError("absorber mixed into a cell outside the drum sites")
     names = names + tuple(f"fuel{s}" for s in _FUEL_SITES)
-    material = np.array(list(others) + [FUEL] * len(_FUEL_SITES), dtype=np.int64)
+    material = np.array(material + [FUEL] * len(_FUEL_SITES), dtype=np.int64)
     return HpmrZones(region_map=region, mix_region_map=mix_region, names=names,
                      material=material, fuel=material == FUEL,
-                     site=tuple([None] * len(others) + list(_FUEL_SITES)))
+                     site=tuple(sites + list(_FUEL_SITES)))
 
 
-def hpmr_assembly_zones(problem: HpmrProblem, merge_drum: bool = False) -> HpmrZones:
+def hpmr_assembly_zones(problem: HpmrProblem, merge_drum: bool = False,
+                        per_hex: bool = False) -> HpmrZones:
     """One zone per fuel assembly and one per other material.
 
     Zones 0-4 are the void, central block, Be reflector, drum body and drum
@@ -695,21 +735,30 @@ def hpmr_assembly_zones(problem: HpmrProblem, merge_drum: bool = False) -> HpmrZ
         0-3, fuel from 4): the hex-homogenized drum, whose flux-weighted
         constants a ``absorber="smeared"`` node raster uses (Kumar et al.'s
         homogenized-drum variant).
+    per_hex : one zone per hex of the outer ring instead of one per material:
+        each of the 12 Be reflector hexes, and each of the 12 drums' body and
+        absorber arc ("be_reflector(R, C)", "drum_be(R, C)",
+        "drum_absorber(R, C)"; zones 2.., fuel after them). The drums sit in
+        two environments (ring-3 corners, ring-4 mid-edges), which pooled
+        zones force to share one factor; Laboure et al. (Ann. Nucl. Energy 128
+        (2019) 443, HTTR) give every hexagon its own equivalence region.
+        ``site`` then holds the hex of every zone but the void and the
+        central block.
     """
     if problem.raster is None or np.asarray(problem.material_map).ndim != 3:
         raise ValueError("hpmr_assembly_zones needs a 2-D problem from build_hpmr2d")
     rows, cols = cell_sites(problem.raster, PITCH)
     return _zones_from_sites(rows, cols, problem.material_map, problem.mix_material,
-                             merge_drum)
+                             merge_drum, per_hex)
 
 
-def hpmr_mesh_zones(problem, merge_drum: bool = False) -> HpmrZones:
+def hpmr_mesh_zones(problem, merge_drum: bool = False, per_hex: bool = False) -> HpmrZones:
     """:func:`hpmr_assembly_zones` for an unstructured HP-MR mesh
     (:func:`hpmr_locally_refined_problem`), same numbering; arrays are per cell
     (n_cells,)."""
     rows, cols = point_sites(np.asarray(problem.mesh.centroid)[:, :2], PITCH)
     return _zones_from_sites(rows, cols, problem.cell_material, problem.mix_material,
-                             merge_drum)
+                             merge_drum, per_hex)
 
 
 def hpmr_transport_mask(problem: HpmrProblem, region: str = "drum") -> np.ndarray:

@@ -1,0 +1,214 @@
+# SPH-DF (SPH + boundary discontinuity factors, Laboure et al. 2019) on HP-MR 2-D, refine-16 sn-p2:4:16 reference, raster:8 nodes, 2026-11-17
+# tools/diagnose_sph_bcf.py / tools/probe_sph_bcf_feasibility.py; zoning pooled | hex (per hex of the outer ring) | hex + SPH_SPLIT=1 (inner/outer zones in every boundary hex)
+
+## job 253094: pooled zones, all variants (drums-out SPH-DF int. cancelled)
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, device gpu
+angle 0: k_ref 1.015993 (currents re-solve 1.015993); boundary zones ['be_reflector', 'drum_be']; no SPH +2319 pcm, dP 13.75 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal |         absorber          drum Be        reflector | boundary factors be_reflector  drum_be
+  FV interior    True    49    +434.4   0.00 | 0.959-1.193 |   0.877/2.72/164     0.954/1.17/1            1/1/1 | -  [203 s]
+  FV all         True    71    +408.0   0.00 | 1.021-1.181 |    0.87/2.72/180  0.942/1.2/0.929 0.957/1.12/0.895 | -  [297 s]
+  SPH-DF all    False   400     +55.8   0.13 | 0.908-1.153 |   0.894/2.66/102  0.986/1.32/1.15   1.05/1.25/1.12 | 7.47/2.98e+03/2.98e+03  8.59/26/7.72  [1935 s]
+  SPH-DF int.   False   400    +601.5   0.33 | 0.933-1.189 |  0.859/2.51/77.2  0.946/1.19/1.07            1/1/1 | 7.39/2.98e+03/2.82e+03  6.9/11.8/3.11  [1976 s]
+  [4699 s]
+angle 180: k_ref 1.112618 (currents re-solve 1.112618); boundary zones ['be_reflector', 'drum_be']; no SPH +1250 pcm, dP 3.51 %
+  FV interior    True    53    +663.3   0.01 | 1.089-1.104 |   1.22/3.18/45.4 0.857/1.01/0.897            1/1/1 | -  [262 s]
+  FV all         True    69    +750.4   0.01 | 1.106-1.149 |   1.16/3.34/45.7 0.834/1.02/0.898 0.851/1.03/0.928 | -  [318 s]
+  SPH-DF all    False   400    +400.3   0.59 | 1.011-1.087 |     1.65/3.78/47 0.853/1.03/0.927  0.889/1.07/1.04 | 4.18/59.8/23.5  4.05/576/114  [2428 s]
+
+## job 253126: per-hex zones, drums in
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, device gpu
+angle 0: k_ref 1.015993 (currents re-solve 1.015993); 24 vacuum-boundary zones; no SPH +2319 pcm, dP 13.75 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV interior    True    55    +462.7   0.00 | 0.954-1.211 | 0.86-0.91/2.33-3.52/111-259, 0.937-0.992/1.15-1.23/0.99-1.07, 1/1/1 | -  [227 s]  thermal absorber corner/edge drums 111-114 / 233-259
+  FV all         True    70    +417.5   0.00 | 1.012-1.191 | 0.856-0.9/2.31-3.57/124-267, 0.928-0.979/1.18-1.27/0.927-0.971, 0.966-0.973/1.13-1.14/0.905-0.913 | -  [285 s]  thermal absorber corner/edge drums 124-127 / 239-267
+  SPH-DF all    False   400    +216.7   0.22 | 0.898-1.177 | 0.875-0.929/2.21-3.39/69.1-119, 0.967-1.03/1.23-1.39/1.11-1.23, 1.05-1.06/1.22-1.23/1.12-1.13 | 6.7-6.75/10.5-10.7/3.74-3.76  5.8-9.6/8.03-9.06/2.91-3.35  [1972 s]  thermal absorber corner/edge drums 69.1-69.7 / 113-119
+
+## job 253127: per-hex zones, drums out (cancelled during SPH-DF)
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, device gpu
+angle 180: k_ref 1.112618 (currents re-solve 1.112618); 24 vacuum-boundary zones; no SPH +1250 pcm, dP 3.51 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV interior    True    52    +669.6   0.01 | 1.089-1.102 | 1.16-1.41/2.71-5.41/31.8-80.6, 0.85-0.868/0.999-1.01/0.892-0.904, 1/1/1 | -  [204 s]  thermal absorber corner/edge drums 31.8-32.3 / 78.4-80.6
+  FV all         True    80    +762.1   0.01 | 1.105-1.148 | 1.11-1.37/2.84-5.66/32.6-77.3, 0.829-0.836/1.01-1.02/0.882-0.914, 0.848-0.852/1.03-1.03/0.925-0.928 | -  [279 s]  thermal absorber corner/edge drums 32.6-33 / 75.3-77.3
+
+## job 253142: per-hex, fixed-k, drums in (FK all hit the time limit)
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, device gpu
+angle 0: k_ref 1.015993 (currents re-solve 1.015993); 24 vacuum-boundary zones; no SPH +2319 pcm, dP 13.75 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FK interior    True   302      -0.0   0.00 | 0.547-0.726 | 0.797-0.857/1.65-2.67/44.6-117, 0.882-0.944/0.923-1.03/0.708-0.762, 1/1/1 | -  [1139 s]  thermal absorber corner/edge drums 44.6-45.5 / 108-117
+
+## job 253143: per-hex, fixed-k, drums out (FK all: JFNK crash, since guarded)
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, device gpu
+angle 180: k_ref 1.112618 (currents re-solve 1.112618); 24 vacuum-boundary zones; no SPH +1250 pcm, dP 3.51 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FK interior    True   221      +0.0   0.00 | 0.685-0.752 | 1.22-1.47/2.67-5.77/20.9-121, 0.915-0.94/0.881-0.9/0.629-0.684, 1/1/1 | -  [1160 s]  thermal absorber corner/edge drums 20.9-21.2 / 116-121
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphhex2/repo/tools/diagnose_sph_bcf.py", line 151, in <module>
+    out = run()
+          ^^^^^
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphhex2/repo/tools/diagnose_sph_bcf.py", line 137, in <lambda>
+    "FK all": lambda: sph_correct(ref["hm"], z.region_map, ref["rflux"], node["solve"],
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphhex2/repo/tools/../garnet/sph.py", line 847, in sph_correct
+    root(residual_k, z0, method="krylov",
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_root.py", line 263, in root
+    sol = _root_nonlin_solve(_wrapped_fun, x0, args=args, jac=jac,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_root.py", line 372, in _root_nonlin_solve
+    x, info = nonlin.nonlin_solve(f, x0, jacobian=jacobian(**jac_options),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_nonlin.py", line 216, in nonlin_solve
+    raise ValueError("Jacobian inversion yielded zero vector. "
+
+## job 253179: smeared drums, refine 4, drums in
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model smeared:4, per-hex zones, device gpu
+angle 0: k_ref 1.015993 (currents re-solve 1.015993); 24 vacuum-boundary zones; no SPH +3239 pcm, dP 12.34 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV interior    True    49   +2314.7   0.02 | 0.795-0.989 | -, 0.858-0.897/1.55-1.82/1.74-2.28, 1/1/1 | -  [95 s]  thermal drum corner/edge drums 1.74-1.75 / 2.27-2.28
+  FV all         True    80   +1866.3   0.02 | 0.754-0.935 | -, 0.872-0.919/1.66-2.06/1.56-1.82, 1.12-1.13/1.9-1.91/1.45-1.46 | -  [148 s]  thermal drum corner/edge drums 1.56-1.56 / 1.82-1.82
+  FK interior    True   568      -0.0   0.00 | 0.059-0.101 | -, 0.583-0.68/0.551-0.766/0.222-0.327, 1/1/1 | -  [1350 s]  thermal drum corner/edge drums 0.222-0.223 / 0.326-0.327
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphsmear/repo/tools/diagnose_sph_bcf.py", line 163, in <module>
+    out = run()
+          ^^^^^
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphsmear/repo/tools/diagnose_sph_bcf.py", line 149, in <lambda>
+    "FK all": lambda: sph_correct(ref["hm"], z.region_map, ref["rflux"], node["solve"],
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphsmear/repo/tools/../garnet/sph.py", line 847, in sph_correct
+    root(residual_k, z0, method="krylov",
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_root.py", line 263, in root
+    sol = _root_nonlin_solve(_wrapped_fun, x0, args=args, jac=jac,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_root.py", line 372, in _root_nonlin_solve
+    x, info = nonlin.nonlin_solve(f, x0, jacobian=jacobian(**jac_options),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_nonlin.py", line 216, in nonlin_solve
+    raise ValueError("Jacobian inversion yielded zero vector. "
+
+## job 253180: smeared drums, refine 4, drums out
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model smeared:4, per-hex zones, device gpu
+angle 180: k_ref 1.112618 (currents re-solve 1.112618); 24 vacuum-boundary zones; no SPH -1396 pcm, dP 7.91 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV interior    True    51   -2010.2   0.07 | 0.703-1.308 | -, 0.968-0.974/1.08-1.1/1.14-1.21, 1/1/1 | -  [134 s]  thermal drum corner/edge drums 1.14-1.14 / 1.2-1.21
+  FV all         True    87   -2097.4   0.06 | 0.772-1.295 | -, 0.96-0.969/1.08-1.1/1.12-1.15, 0.997-1/1.04-1.04/0.904-0.908 | -  [208 s]  thermal drum corner/edge drums 1.12-1.12 / 1.15-1.15
+  FK interior    True   242      -0.0   0.00 | 18.675-20.213 | -, 0.938-0.987/1.15-1.2/6.59-9.18, 1/1/1 | -  [621 s]  thermal drum corner/edge drums 9.13-9.18 / 6.59-6.64
+
+## job 253181: smeared drums, refine 8, drums in
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model smeared:8, per-hex zones, device gpu
+angle 0: k_ref 1.015993 (currents re-solve 1.015993); 24 vacuum-boundary zones; no SPH +3196 pcm, dP 12.18 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV interior    True    48   +2316.8   0.02 | 0.793-0.969 | -, 0.839-0.879/1.51-1.75/1.8-2.32, 1/1/1 | -  [171 s]  thermal drum corner/edge drums 1.8-1.81 / 2.3-2.32
+  FV all         True    78   +1862.8   0.02 | 0.747-0.919 | -, 0.85-0.896/1.63-2/1.62-1.88, 1.09-1.1/1.91-1.93/1.53-1.54 | -  [299 s]  thermal drum corner/edge drums 1.62-1.62 / 1.88-1.88
+  FK interior    True   434      -0.0   0.00 | 0.058-0.097 | -, 0.586-0.683/0.54-0.741/0.224-0.326, 1/1/1 | -  [1875 s]  thermal drum corner/edge drums 0.224-0.225 / 0.325-0.326
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphsmear/repo/tools/diagnose_sph_bcf.py", line 163, in <module>
+    out = run()
+          ^^^^^
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphsmear/repo/tools/diagnose_sph_bcf.py", line 149, in <lambda>
+    "FK all": lambda: sph_correct(ref["hm"], z.region_map, ref["rflux"], node["solve"],
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/scratch/shared/poncet_m/garnet-stage-sphsmear/repo/tools/../garnet/sph.py", line 847, in sph_correct
+    root(residual_k, z0, method="krylov",
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_root.py", line 263, in root
+    sol = _root_nonlin_solve(_wrapped_fun, x0, args=args, jac=jac,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_root.py", line 372, in _root_nonlin_solve
+    x, info = nonlin.nonlin_solve(f, x0, jacobian=jacobian(**jac_options),
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/psi/conda-envs/x86_64/ra-standard_py312/lib/python3.12/site-packages/scipy/optimize/_nonlin.py", line 216, in nonlin_solve
+    raise ValueError("Jacobian inversion yielded zero vector. "
+
+## job 253182: smeared drums, refine 8, drums out
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model smeared:8, per-hex zones, device gpu
+angle 180: k_ref 1.112618 (currents re-solve 1.112618); 24 vacuum-boundary zones; no SPH -1368 pcm, dP 7.68 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV interior    True    48   -2026.7   0.07 | 0.700-1.254 | -, 0.945-0.95/1.09-1.1/1.18-1.24, 1/1/1 | -  [239 s]  thermal drum corner/edge drums 1.18-1.18 / 1.24-1.24
+  FV all         True    78   -2132.9   0.06 | 0.743-1.237 | -, 0.933-0.941/1.09-1.1/1.16-1.2, 0.964-0.97/1.05-1.06/0.947-0.951 | -  [384 s]  thermal drum corner/edge drums 1.16-1.16 / 1.19-1.2
+  FK interior    True   156      +0.0   0.00 | 16.306-17.622 | -, 0.943-0.995/1.14-1.19/6.68-9.08, 1/1/1 | -  [851 s]  thermal drum corner/edge drums 9.03-9.08 / 6.68-6.73
+
+## job 253290: per-hex + inner/outer split, drums in
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, boundary hexes split inner/outer, device gpu
+angle 0: k_ref 1.015993 (currents re-solve 1.015993); 24 vacuum-boundary zones; no SPH +2319 pcm, dP 13.75 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV all         True    83    +392.7   0.00 | 1.003-1.189 | 0.856-0.902/2.3-3.57/119-262, 0.93-1.49/1.19-1.29/0.936-0.981, 0.969-1.46/1.14-1.26/0.919-1 | -  [266 s]  thermal absorber corner/edge drums 119-122 / 236-262
+  SPH-DF all     True    85      -0.0   0.00 | 0.877-1.169 | 0.874-0.945/2.23-3.56/65.6-148, 0.971-3.91/1.3-2.72/1.15-1.93, 1.07-3.5/1.3-2.65/1.2-2.04 | 4.23-4.26/2.96-3/2.34-2.37  3.94-5.01/2.62-3.08/1.89-2.21  [274 s]  thermal absorber corner/edge drums 65.6-66.5 / 139-148
+  [586 s]
+
+## job 253291: per-hex + inner/outer split, drums out
+SPH-DF on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, boundary hexes split inner/outer, device gpu
+angle 180: k_ref 1.112618 (currents re-solve 1.112618); 24 vacuum-boundary zones; no SPH +1250 pcm, dP 3.51 %
+  variant        conv  iter    dk pcm   dP % |  fuel thermal | absorber, drum Be, reflector (groups 1/6/11) | boundary factors, reflector / drums (groups 1/6/11)
+  FV all         True    87    +669.2   0.01 | 1.099-1.128 | 1.17-1.43/2.86-4.95/34-54.7, 0.834-1.3/1.02-2.12/0.891-1.32, 0.852-1.33/1.04-1.25/0.944-1.07 | -  [411 s]  thermal absorber corner/edge drums 34-34.5 / 53.6-54.7
+  SPH-DF all     True    89      -0.0   0.00 | 0.970-1.065 | 1.66-3.41/4.03-12.4/61.7-192, 0.855-2.79/1.04-3.54/0.904-2.67, 0.91-2.71/1.13-2.71/1.09-2.37 | 3.29-3.31/2.99-3.05/2.72-2.75  3.1-3.82/2.52-3.45/1.91-3.05  [445 s]  thermal absorber corner/edge drums 61.7-63.5 / 181-192
+  [906 s]
+
+## job 253280: feasibility probe, per-hex
+SPH-DF feasibility on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, device gpu
+angle 0: 24 boundary zones; flux-volume SPH (all zones) converged
+  no SPH: feasibility index (zero-flux max / reference), min over boundary zones, and Marshak / reference, per group
+   group      1      2      3      4      5      6      7      8      9     10     11
+   index   1.06   0.97   0.99   0.96   0.98   0.98   0.96   0.93   0.83   0.80   0.75
+   zone  drum_b drum_b be_ref be_ref be_ref drum_b drum_b drum_b drum_b drum_b drum_b
+   Marsh   0.59   0.73   0.80   0.84   0.85   0.86   0.84   0.82   0.74   0.73   0.71
+   infeasible conditions (index < 1): 171 of 264: drum_be(2, -4) g11 0.75, drum_be(-4, 2) g11 0.75, drum_be(2, 2) g11 0.75, drum_be(-2, 4) g11 0.76, drum_be(4, -2) g11 0.76, drum_be(-2, -2) g11 0.76, drum_be(2, -4) g10 0.80, drum_be(-4, 2) g10 0.80, drum_be(2, 2) g10 0.80, drum_be(-2, 4) g10 0.80, drum_be(4, -2) g10 0.80, drum_be(-2, -2) g10 0.81
+  flux-volume SPH, all zones: feasibility index (zero-flux max / reference), min over boundary zones, and Marshak / reference, per group
+   index   1.04   1.00   1.05   1.03   1.04   1.09   1.11   1.11   1.00   0.96   0.87
+   zone  drum_b drum_b drum_b be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref
+   Marsh   0.59   0.73   0.81   0.86   0.90   0.93   0.95   0.96   0.90   0.88   0.84
+   infeasible conditions (index < 1): 42 of 264: be_reflector(-3, -1) g11 0.87, be_reflector(-1, -3) g11 0.87, be_reflector(-3, 4) g11 0.87, be_reflector(4, -3) g11 0.87, be_reflector(-1, 4) g11 0.88, be_reflector(4, -1) g11 0.88, be_reflector(-4, 3) g11 0.88, be_reflector(3, -4) g11 0.88, be_reflector(-4, 1) g11 0.88, be_reflector(1, -4) g11 0.88, be_reflector(3, 1) g11 0.88, be_reflector(1, 3) g11 0.88
+  [326 s]
+angle 180: 24 boundary zones; flux-volume SPH (all zones) converged
+   index   1.09   1.00   1.01   0.96   0.78   1.00   1.01   1.04   1.05   1.04   0.99
+   zone  drum_b be_ref be_ref be_ref drum_b be_ref be_ref be_ref be_ref be_ref be_ref
+   Marsh   0.60   0.75   0.81   0.80   0.62   0.85   0.84   0.91   0.95   0.94   0.93
+   infeasible conditions (index < 1): 50 of 264: drum_be(3, -3) g5 0.78, drum_be(-3, 3) g5 0.78, drum_be(0, 3) g5 0.79, drum_be(3, 0) g5 0.79, drum_be(0, -3) g5 0.79, drum_be(-3, 0) g5 0.79, be_reflector(1, -4) g4 0.96, be_reflector(-4, 1) g4 0.96, be_reflector(3, 1) g4 0.96, be_reflector(1, 3) g4 0.96, be_reflector(3, -4) g4 0.96, be_reflector(-4, 3) g4 0.96
+   index   0.94   0.94   0.99   0.97   0.68   0.69   0.87   0.93   0.88   0.86   0.75
+   zone  drum_b be_ref be_ref be_ref drum_b drum_b drum_b drum_b drum_b drum_b drum_b
+   Marsh   0.54   0.70   0.76   0.75   0.51   0.56   0.69   0.69   0.68   0.68   0.66
+   infeasible conditions (index < 1): 204 of 264: drum_be(3, -3) g5 0.68, drum_be(-3, 3) g5 0.68, drum_be(0, -3) g5 0.69, drum_be(-3, 0) g5 0.69, drum_be(3, 0) g5 0.69, drum_be(0, 3) g5 0.69, drum_be(3, -3) g6 0.69, drum_be(-3, 3) g6 0.69, drum_be(0, -3) g6 0.69, drum_be(-3, 0) g6 0.69, drum_be(3, 0) g6 0.69, drum_be(0, 3) g6 0.69
+  [438 s]
+
+## job 253281: feasibility probe, pooled
+SPH-DF feasibility on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, pooled zones, device gpu
+angle 0: 2 boundary zones; flux-volume SPH (all zones) converged
+  no SPH: feasibility index (zero-flux max / reference), min over boundary zones, and Marshak / reference, per group
+   group      1      2      3      4      5      6      7      8      9     10     11
+   index   1.11   0.98   0.99   0.96   0.98   0.99   1.00   0.98   0.88   0.85   0.80
+   zone  be_ref be_ref be_ref be_ref be_ref be_ref be_ref drum_b drum_b drum_b drum_b
+   Marsh   0.61   0.74   0.80   0.84   0.85   0.87   0.87   0.86   0.79   0.77   0.75
+   infeasible conditions (index < 1): 12 of 22: drum_be g11 0.80, drum_be g10 0.85, drum_be g9 0.88, be_reflector g11 0.94, be_reflector g4 0.96, drum_be g8 0.98, be_reflector g5 0.98, be_reflector g2 0.98, be_reflector g10 0.99, be_reflector g6 0.99, be_reflector g3 0.99, be_reflector g7 1.00
+  flux-volume SPH, all zones: feasibility index (zero-flux max / reference), min over boundary zones, and Marshak / reference, per group
+   index   1.04   1.01   1.05   1.03   1.04   1.07   1.09   1.09   0.98   0.94   0.86
+   zone  drum_b drum_b be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref
+   Marsh   0.59   0.73   0.81   0.87   0.89   0.92   0.94   0.94   0.89   0.87   0.83
+   infeasible conditions (index < 1): 4 of 22: be_reflector g11 0.86, drum_be g11 0.94, be_reflector g10 0.94, be_reflector g9 0.98
+  [334 s]
+angle 180: 2 boundary zones; flux-volume SPH (all zones) converged
+   index   1.12   1.00   1.01   0.96   0.97   1.00   1.01   1.04   1.05   1.04   0.99
+   zone  drum_b be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref
+   Marsh   0.61   0.76   0.81   0.82   0.77   0.86   0.88   0.91   0.95   0.94   0.93
+   infeasible conditions (index < 1): 5 of 22: be_reflector g4 0.96, be_reflector g5 0.97, drum_be g5 0.99, be_reflector g11 0.99, be_reflector g6 1.00
+   index   0.96   0.95   0.99   0.98   0.93   0.95   0.94   0.94   0.91   0.90   0.83
+   zone  be_ref be_ref be_ref be_ref drum_b drum_b drum_b drum_b drum_b drum_b drum_b
+   Marsh   0.55   0.71   0.77   0.78   0.70   0.72   0.72   0.72   0.72   0.72   0.70
+   infeasible conditions (index < 1): 18 of 22: drum_be g11 0.83, be_reflector g11 0.88, drum_be g10 0.90, drum_be g9 0.91, drum_be g5 0.93, drum_be g7 0.94, drum_be g8 0.94, drum_be g6 0.95, be_reflector g2 0.95, be_reflector g10 0.95, be_reflector g9 0.96, be_reflector g1 0.96
+  [380 s]
+
+## job 253289: feasibility probe, per-hex + split
+SPH-DF feasibility on HP-MR 2-D: sn-p2:4:16 reference at refine 16, node model raster:8, per-hex zones, boundary hexes split inner/outer, device gpu
+angle 0: 24 boundary zones; flux-volume SPH (all zones) converged
+  no SPH: feasibility index (zero-flux max / reference), min over boundary zones, and Marshak / reference, per group
+   group      1      2      3      4      5      6      7      8      9     10     11
+   index   4.24   2.95   2.56   2.06   1.96   1.96   1.96   1.95   1.95   1.92   1.80
+   zone  drum_b drum_b drum_b be_ref be_ref be_ref be_ref be_ref be_ref be_ref be_ref
+   Marsh   0.83   0.94   0.96   0.95   0.95   0.95   0.95   0.95   0.95   0.95   0.94
+   infeasible conditions (index < 1): 0 of 264
+  flux-volume SPH, all zones: feasibility index (zero-flux max / reference), min over boundary zones, and Marshak / reference, per group
+   index   6.00   4.16   3.46   2.71   2.46   2.45   2.45   2.37   2.01   1.91   1.73
+   zone  drum_b drum_b drum_b drum_b drum_b drum_b drum_b drum_b drum_b drum_b drum_b
+   Marsh   0.89   1.04   1.07   1.07   1.05   1.05   1.05   1.03   0.97   0.95   0.92
+  [321 s]
+angle 180: 24 boundary zones; flux-volume SPH (all zones) converged
+   index   3.75   2.78   2.34   1.97   1.65   1.87   1.95   1.94   1.94   1.91   1.78
+   zone  drum_b drum_b drum_b drum_b drum_b drum_b drum_b be_ref be_ref be_ref be_ref
+   Marsh   0.81   0.93   0.93   0.91   0.88   0.93   0.94   0.94   0.94   0.94   0.93
+   index   4.61   3.52   2.93   2.57   2.48   2.45   2.41   2.34   2.12   2.09   1.93
+   zone  drum_b drum_b drum_b drum_b drum_b be_ref be_ref be_ref be_ref be_ref be_ref
+   Marsh   0.84   0.99   1.01   1.02   1.03   1.05   1.04   1.03   0.99   0.98   0.97
+  [397 s]

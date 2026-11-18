@@ -500,6 +500,13 @@ class SphResult:
 _INFEASIBLE_PULL = 10.0
 # Bound on |log mu| inside the residual; exp(+-8) spans ~3e-4 .. 3e3.
 _MAX_ABS_LOG_FACTOR = 8.0
+# Lower bound on log gamma (sph_bcf_correct). The upper bound stays at
+# _MAX_ABS_LOG_FACTOR: reaching it means the zero-flux leakage limit is below
+# the reference and no solution exists. Small gamma is always reachable
+# (gamma -> 0 is a reflective face) and is the right answer for a boundary zone
+# that an absorber shadows: an HP-MR drum sector behind the B4C arc leaks
+# ~1e-6 of a Be zone's thermal current.
+_MIN_LOG_BCF = -30.0
 # Largest fixed-k system solved with a dense Jacobian by default.
 _DENSE_MAX_UNKNOWNS = 64
 # Relative finite-difference step of the Jacobian-free Newton products. Each
@@ -785,10 +792,7 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
             root(residual, x0, method=method,
                  options=dict(xtol=max(tol * 1e-4, 1e-14)))
         elif method == "jfnk":
-            from scipy.optimize import root
-            root(residual, x0, method="krylov",
-                 options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose),
-                              jac_options=dict(rdiff=_JFNK_RDIFF)))
+            _guarded_krylov(residual, x0, tol, max_iter, verbose)
         else:
             raise ValueError("method must be 'anderson', 'hybr', 'lm' or 'jfnk', "
                              f"got {method!r}")
@@ -844,9 +848,7 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
             method = "jfnk"
             z0 = best_z()
     if method == "jfnk":
-        root(residual_k, z0, method="krylov",
-             options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose),
-                          jac_options=dict(rdiff=_JFNK_RDIFF)))
+        _guarded_krylov(residual_k, z0, tol, max_iter, verbose)
     else:
         if method == "hybr":
             root(residual_k, z0, method="hybr", options=dict(xtol=xtol))
@@ -863,6 +865,26 @@ def sph_correct(homogenized_materials, region_map, reference_region_flux, solve,
                 root(residual_k, best_z(), method="hybr", options=dict(xtol=xtol))
     b = prob.best
     return finish(b["x"], b["k"], b["res"], s=b["s"])
+
+
+def _guarded_krylov(residual, z0, tol, max_iter, verbose):
+    """Jacobian-free Newton-Krylov whose failure is not fatal.
+
+    Every residual evaluation is recorded by _SphProblem, which keeps the best
+    point; the caller returns that point with ``converged`` measured, so a
+    Krylov breakdown (scipy raises ValueError "Jacobian inversion yielded zero
+    vector" when the finite-difference products vanish, measured on HP-MR
+    fixed-k SPH with the reflector corrected) or a linear-algebra failure ends
+    the solve instead of the program.
+    """
+    from scipy.optimize import root
+    try:
+        root(residual, z0, method="krylov",
+             options=dict(fatol=tol, maxiter=max_iter, disp=bool(verbose),
+                          jac_options=dict(rdiff=_JFNK_RDIFF)))
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError) as err:
+        if verbose:
+            print(f"    [sph] JFNK stopped: {err}", flush=True)
 
 
 def _fixed_k_anderson(prob, x0, phi0, k0, ln_ref, k_ref, tol, max_iter, depth,
@@ -929,6 +951,124 @@ def _fixed_k_anderson(prob, x0, phi0, k0, ln_ref, k_ref, tol, max_iter, depth,
         x, phi, k = x_new, phi_new, k_new
     rows, ln_s = residual_rows(x, phi, k)
     prob.record(x, k, rows, s=float(np.exp(ln_s)))
+
+
+def sph_bcf_correct(homogenized_materials, reference_region_flux,
+                    reference_boundary_current, solve, *, region_volume,
+                    sph_regions=None, tol=1e-7, max_iter=300, depth=5, relax=1.0,
+                    verbose=False) -> SphResult:
+    """SPH factors plus boundary discontinuity factors, flux-volume normalized.
+
+    The hybrid SPH-DF method of Laboure et al. (Ann. Nucl. Energy 128 (2019)
+    443, Sec. 4.2): SPH factors mu on the regions and a discontinuity factor
+    gamma (the "boundary coefficient", Eq. 36) on the vacuum boundary of each
+    region that has one, multiplying the Marshak albedo there. Conditions per
+    group g, with c_g the flux-volume normalization constant over the corrected
+    entries:
+
+        mu  c_g Phi        = phi_ref       (region reaction rates)
+        c_g L(mu, gamma)   = J_out,ref     (outgoing current through each
+                                            region's vacuum boundary)
+
+    Why the normalization is now legitimate: if every region is corrected and
+    every vacuum face carries gamma, the corrected problem is invariant under
+    Phi_g -> c Phi_g, mu_g -> mu_g / c, gamma_g -> gamma_g / c (the Robin term
+    8 D a / (h (h a + 2 sqrt3 D)) is homogeneous of degree one in (D, a)), so
+    the per-group normalization only fixes that gauge and k is reproduced.
+    Plain flux-volume SPH with a vacuum boundary has no such gauge, which is
+    the k error Laboure et al. trace to the normalization (Sec. 3.2). Leaving
+    regions uncorrected (``sph_regions``) breaks the gauge again.
+
+    reference_boundary_current : (B, G) outgoing current through the vacuum
+        boundary of each of the B boundary regions, in the normalization of
+        ``reference_region_flux`` (TriSNTransportSolver.region_partial_currents).
+    solve : callable(materials, gamma (B, G)) -> (region_flux (R, G), k_eff,
+        boundary_leakage (B, G)); the caller expands gamma onto the boundary
+        cells of each region as the solver's ``bcf`` and returns the coarse
+        leakage of the same regions (garnet.tri.tri_boundary_leakage).
+
+    Solved as an Anderson-accelerated fixed point: mu <- phi_ref / (c Phi),
+    gamma <- gamma J_ref / (c L), one coarse solve per iteration. Returns an
+    SphResult with ``factors`` = mu, ``bcf`` = gamma, ``residual`` = the
+    largest |log| mismatch of the conditions. mu stays within exp(+-8);
+    gamma within exp(-30) .. exp(8): a gamma at its upper bound with the
+    leakage still short marks an infeasible condition, while gamma of 1e-6
+    and below is legitimate for a boundary zone shadowed by an absorber.
+    """
+    ref = np.asarray(reference_region_flux, dtype=float)
+    R, G = ref.shape
+    if len(homogenized_materials) != R:
+        raise ValueError(f"{len(homogenized_materials)} materials for {R} regions")
+    V = np.asarray(region_volume, dtype=float).reshape(R)
+    Jref = np.asarray(reference_boundary_current, dtype=float)
+    if Jref.ndim != 2 or Jref.shape[1] != G:
+        raise ValueError(f"reference_boundary_current must be (B, {G}), got {Jref.shape}")
+    B = Jref.shape[0]
+    live = _sph_live_set(ref, sph_regions)
+    live2 = live.reshape(R, G)
+    blive = (Jref > np.abs(Jref).max() * 1e-12).reshape(-1)
+    nl, nb = int(live.sum()), int(blive.sum())
+    ln_ref = np.log(ref.reshape(-1)[live])
+    ln_J = np.log(Jref.reshape(-1)[blive])
+    ref_norm = (V[:, None] * ref * live2).sum(axis=0)              # (G,)
+    state = {"n": 0, "best": None}
+    lo = np.concatenate([np.full(nl, -_MAX_ABS_LOG_FACTOR), np.full(nb, _MIN_LOG_BCF)])
+    hi = np.full(nl + nb, _MAX_ABS_LOG_FACTOR)
+
+    def evaluate(x):
+        x = np.clip(x, lo, hi)
+        mu = np.ones(R * G)
+        mu[live] = np.exp(x[:nl])
+        mu = mu.reshape(R, G)
+        gam = np.ones(B * G)
+        gam[blive] = np.exp(x[nl:])
+        gam = gam.reshape(B, G)
+        mats = [_scale_material(homogenized_materials[i], mu[i]) for i in range(R)]
+        phi, k, leak = solve(mats, gam)
+        phi = np.asarray(phi, dtype=float).reshape(R, G)
+        leak = np.asarray(leak, dtype=float).reshape(B, G)
+        state["n"] += 1
+        c = ref_norm / np.maximum((V[:, None] * phi * live2).sum(axis=0), 1e-300)
+        cphi = (c[None, :] * phi).reshape(-1)[live]
+        cl = (c[None, :] * leak).reshape(-1)[blive]
+        if np.any(cphi <= 0) or np.any(cl <= 0):
+            return None
+        f = np.concatenate([ln_ref - np.log(cphi) - x[:nl], ln_J - np.log(cl)])
+        res = float(np.abs(f).max()) if f.size else 0.0
+        if state["best"] is None or res < state["best"][0]:
+            state["best"] = (res, x.copy(), mats, mu, gam, k)
+        if verbose:
+            i = int(np.argmax(np.abs(f))) if f.size else 0
+            if i < nl:
+                r, g = divmod(int(np.flatnonzero(live)[i]), G)
+                worst = f"mu[{r},{g}]={mu[r, g]:.3g}"
+            else:
+                b, g = divmod(int(np.flatnonzero(blive)[i - nl]), G)
+                worst = (f"gamma[{b},{g}]={gam[b, g]:.3g} (c L / J_ref = "
+                         f"{float(np.exp(-f[i])):.3f})")
+            print(f"    [sph-bcf] eval {state['n']:4d}  max|r| = {res:.3e}  k = {k:.8f}"
+                  f"  worst {worst}  gamma {gam.min():.3g}..{gam.max():.3g}", flush=True)
+        return f, res
+
+    x = np.zeros(nl + nb)
+    X, F = [], []
+    for _ in range(max_iter):
+        out = evaluate(x)
+        if out is None:
+            break
+        f, res = out
+        if res <= tol:
+            break
+        X.append(x.copy())
+        F.append(f)
+        if len(F) > depth:
+            X.pop(0)
+            F.pop(0)
+        x = np.clip(_anderson_step(X, F, relax), lo, hi)
+    res, x, mats, mu, gam, k = state["best"]
+    return SphResult(corrected_materials=mats, factors=mu, k_eff=k,
+                     iterations=state["n"], converged=bool(res <= tol), bcf=gam,
+                     residual=res, normalization="flux-volume")
 
 
 def sph_kinetics(kinetics, factors):

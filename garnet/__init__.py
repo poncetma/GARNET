@@ -50,7 +50,7 @@ from .sn import SNResult, SNTransportSolver, quadrature_2d
 from .tri_sn import TriSNTransportSolver
 from .sph import (SphResult, apply_sph_factors, flux_weighted_homogenize,
                   region_average, sph_correct, sph_correct_monolithic,
-                  sph_get_correct, sph_kinetics)
+                  sph_bcf_correct, sph_get_correct, sph_kinetics)
 from .tri import (TriDiffusionEigenSolver, TriGrid, TriSDP1EigenSolver,
                   TriSDP2EigenSolver, TriSDP3EigenSolver, TriSP1EigenSolver,
                   TriSP3EigenSolver, TriSP5EigenSolver, TriSP7EigenSolver)
@@ -168,6 +168,7 @@ __all__ = [
     "apply_sph_factors",
     "sph_correct_monolithic",
     "sph_get_correct",
+    "sph_bcf_correct",
     "SphResult",
     "SNTransportSolver",
     "TriSNTransportSolver",

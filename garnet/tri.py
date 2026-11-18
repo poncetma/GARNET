@@ -615,6 +615,51 @@ def tri_partial_currents(op, phi, region_map, active=None):
     return interfaces, boundaries
 
 
+def tri_boundary_leakage(op, phi, region_map, n_regions, active=None):
+    """Leakage through the vacuum boundary of each region, one group, (n_regions,).
+
+    The vectorized boundary branch of :func:`tri_partial_currents`: on every
+    exposed edge (off the array, or facing an inactive cell) the operator's
+    own Robin term ``8 D a / (h (h a + 2 sqrt3 D))``, with ``a`` the edge's
+    albedo times the boundary coefficient ``bcf``, times the cell flux, in
+    true current units (face area and ``j_scale``). This is the coarse
+    counterpart of the reference outgoing current on the vacuum boundary
+    (``TriSNTransportSolver.region_partial_currents``) for boundary
+    discontinuity factors (Laboure et al. 2019, Eq. 36).
+    """
+    from .tri_sn import _EDGES
+    nr, nc = op.shape[0], op.shape[1]
+    reg = np.asarray(region_map).reshape(nr, nc, 2)
+    phi = np.asarray(asnumpy(phi), dtype=float).reshape(nr, nc, 2)
+    act = (np.ones((nr, nc, 2), bool) if active is None
+           else np.asarray(active, bool).reshape(nr, nc, 2))
+    D = np.asarray(asnumpy(op.D_cell), dtype=float).reshape(nr, nc, 2)
+    bcf = (np.ones((nr, nc, 2)) if op.bcf_arr is None
+           else np.asarray(asnumpy(op.bcf_arr), dtype=float).reshape(nr, nc, 2))
+    I, J = np.meshgrid(np.arange(nr), np.arange(nc), indexing="ij")
+    leak = np.zeros(int(n_regions))
+    h = op.h
+    for (t, di, dj, tn, _n) in _EDGES:
+        ii, jj = I + di, J + dj
+        inside = (ii >= 0) & (ii < nr) & (jj >= 0) & (jj < nc)
+        nbr_act = np.zeros((nr, nc), bool)
+        nbr_act[inside] = act[ii[inside], jj[inside], tn]
+        exposed = act[:, :, t] & ~nbr_act
+        if not exposed.any():
+            continue
+        side = (0 if di < 0 else 1) if di else (2 if dj < 0 else 3)
+        a = np.where(inside, op.alpha_edge, op.edge_alpha[side]) * bcf[:, :, t]
+        Dc = D[:, :, t]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            term = np.where(np.isinf(a), 8.0 * Dc / (h * h),
+                            np.where(a > 0.0, 8.0 * Dc * a / (h * (h * a + 2.0 * _SQRT3 * Dc)),
+                                     0.0))
+        contrib = np.where(exposed, op.face_area * op.j_scale * term * phi[:, :, t], 0.0)
+        leak += np.bincount(reg[:, :, t].ravel(), weights=contrib.ravel(),
+                            minlength=int(n_regions))[:int(n_regions)]
+    return leak
+
+
 class TriDiffusionEigenSolver(DiffusionEigenSolver):
     """Multigroup triangular-FV diffusion k-eigenvalue solver.
 

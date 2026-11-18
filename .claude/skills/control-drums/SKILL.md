@@ -118,14 +118,19 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
    twice in P0, and GARNET's removal then loses the gain unless the
    absorption is made net (`net_absorption`; on HP-MR the drum worth moves by
    about 430 pcm at refine 4).
-2. **Zones**: one per fuel assembly with the same numbering on every mesh
-   (`hpmr_assembly_zones`, `hpmr_mesh_zones`).
-3. **Factors**: `sph_correct(..., normalization="none", k_ref=k_reference,
-   sph_regions=<fuel zones>)`. Do not correct regions that carry the vacuum
-   boundary: on HP-MR that turns a common rescaling into a boundary lever and
-   drives every fast factor to about 0.26. Check `converged` and `residual`;
-   the fixed-k problem has no solution when the node mesh cannot represent the
-   reference.
+2. **Zones** (baseline since 2026-11-17):
+   - one per fuel assembly, one per Be reflector hex, and one each per drum body and drum absorber arc (`hpmr_assembly_zones(per_hex=True)`, same numbering on every mesh);
+   - every hex on the vacuum boundary split into an inner and an outer zone (`split_boundary_layer`, carried to the nested reference raster by `transfer_boundary_layer`, `tools/sph_hpmr_nodes.py`).
+
+   Per-drum zones matter: corner and mid-edge drums need absorber factors a factor of 2–2.5 apart.
+3. **Factors: SPH-DF** (Labouré et al., Ann. Nucl. Energy 128 (2019) 443), `sph_bcf_correct`:
+   - SPH factors on every zone plus a boundary discontinuity factor on each outer zone, flux-volume normalized;
+   - reference outgoing currents from `TriSNTransportSolver.region_partial_currents` (`load_or_solve_currents`), coarse leakage from `tri_boundary_leakage`.
+
+   On HP-MR it reproduces `k` and every zone rate at both drum states, with fuel factors of 0.88–1.17.
+   - **Check feasibility first** (`tools/probe_sph_bcf_feasibility.py`). Without the inner/outer split the zero-flux leakage limit of the coarse model is below the reference in some groups, no solution exists, and the boundary factors run to their cap.
+   - **Do not use flux-volume SPH alone** with a vacuum boundary: +400 to +770 pcm.
+   - **Avoid fixed-k SPH** (`normalization="none"`): it reproduces `k` by distorting the fuel factors through the fuel–reflector interface (0.55–0.75; 0.06–20 with smeared drums).
 4. **Node model**: drums resolved and volume-mixed as in §1–2. Factors on
    coarse drum cells absorb the drum discretization error, which then does
    not interpolate in angle.
