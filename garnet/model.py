@@ -557,7 +557,7 @@ class _CoupledModel:
             kinetics_data,
             **solver_options(constructor_options, options),
         )
-        initial_problem = solver._unpack(problem_at(0.0))
+        initial_problem = solver._unpack(problem_at(0.0))[:4]
         if solve_kwargs.get("initial_steady") is not None:
             solve_kwargs["initial_steady"] = self._initial_steady(
                 solve_kwargs["initial_steady"], initial_problem,

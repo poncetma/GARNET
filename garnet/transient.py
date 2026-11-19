@@ -159,6 +159,20 @@ def _require_global_kinetics(kin: Kinetics, who: str, *,
             f"chi_delayed needs TransientSolver or the SDP1/SDPN solvers")
 
 
+_CURRENT = object()   # sentinel: TransientSolver._step_operators uses the current bcf
+
+
+def _volume_weights(grid, xp, dtype):
+    """Per-cell volume weights of the power integral, or None when all cells
+    are equal: the cell areas of a mesh (``grid.cell_weights()``), the radial
+    metric of a cylindrical grid."""
+    weights = getattr(grid, "cell_weights", None)
+    if weights is not None:
+        return xp.asarray(weights(), dtype=dtype)
+    met = getattr(grid, "cylindrical_metrics", lambda: None)()
+    return None if met is None else xp.asarray(met[0], dtype=dtype)
+
+
 def _masked_fields(xp, grid, materials, material_map, dtype, active, **kwargs):
     """Fields for a rebuilt step, with excised cells' sources removed.
 
@@ -480,6 +494,7 @@ class TransientSolver:
         self.mask_bc = mask_bc
         self.mix_material = mix_material
         self.mix_weight = mix_weight
+        self._bcf_now = None      # boundary coefficients of the current problem_at state
         # Geometry is pluggable: the Cartesian (GroupOperator/DiffusionEigenSolver)
         # or hex (HexGroupOperator/HexDiffusionEigenSolver) pair share signatures.
         self.group_operator = group_operator
@@ -505,14 +520,25 @@ class TransientSolver:
                 raise ValueError(
                     "precond_dtype must be a floating dtype narrower than dtype")
 
-    def _step_operators(self, fields, inv_vdt, groups):
-        """Build physical FP64 operators and optional FP32 preconditioners."""
+    def _step_operators(self, fields, inv_vdt, groups, bcf=_CURRENT):
+        """Build physical FP64 operators and optional FP32 preconditioners.
+
+        ``bcf`` (G, *grid) boundary coefficients reach the group operators as
+        ``bcf=bcf[g]``; by default those of the problem_at state the fields
+        were last built from."""
         xp = self.xp
+        if bcf is _CURRENT:
+            bcf = self._bcf_now
         ops = [self.group_operator(
             xp, self.grid, fields.diffusion[g],
             fields.removal[g] + inv_vdt[g], bc=self.bc,
-            active=self.active, mask_bc=self.mask_bc, **self._op_kwargs)
+            active=self.active, mask_bc=self.mask_bc, **self._op_kwargs,
+            **({} if bcf is None else {"bcf": bcf[g]}))
             for g in range(groups)]
+        if (getattr(ops[0], "symmetric", True) is False
+                and self._linsolve is pcg):
+            raise ValueError(f"{type(ops[0]).__name__} is not symmetric here "
+                             "(e.g. a non-orthogonal mesh): use linear_solver='gmres'")
         full = [neumann_preconditioner(
             op.apply, op.inv_diag, self.precond_degree) for op in ops]
         if self.precond_dtype is None:
@@ -524,7 +550,7 @@ class TransientSolver:
             xp.asarray(fields.removal[g] + inv_vdt[g],
                        dtype=self.precond_dtype),
             bc=self.bc, active=self.active, mask_bc=self.mask_bc,
-            **self._op_kwargs)
+            **self._op_kwargs, **({} if bcf is None else {"bcf": bcf[g]}))
             for g in range(groups)]
         safe = all(bool(xp.all(xp.isfinite(op.inv_diag)))
                    and bool(xp.all(op.inv_diag > 0.0)) for op in low_ops)
@@ -579,14 +605,24 @@ class TransientSolver:
 
     def _unpack(self, spec):
         """Normalize problem_at's return to (materials, material_map,
-        mix_material, mix_weight), defaulting the blend to the static one."""
+        mix_material, mix_weight, bcf), defaulting the blend to the static one
+        and the boundary coefficients to None."""
         if len(spec) == 2:
             mats, mmap = spec
-            return mats, mmap, self.mix_material, self.mix_weight
+            return mats, mmap, self.mix_material, self.mix_weight, None
         if len(spec) == 4:
+            return tuple(spec) + (None,)
+        if len(spec) == 5:
+            bcf = spec[4]
+            if bcf is not None:
+                shape = np.shape(bcf)
+                if (len(shape) != 1 + len(self.grid.shape)
+                        or tuple(shape[1:]) != tuple(self.grid.shape)):
+                    raise ValueError(f"problem_at bcf must be (G, *grid.shape), got {shape}")
             return tuple(spec)
-        raise ValueError("problem_at must return (materials, material_map) or "
-                         "(materials, material_map, mix_material, mix_weight), "
+        raise ValueError("problem_at must return (materials, material_map), "
+                         "(materials, material_map, mix_material, mix_weight) or "
+                         "(materials, material_map, mix_material, mix_weight, bcf), "
                          f"got {len(spec)} elements")
 
     def solve(self, t_end: float, dt: float, tol_step: float = 1e-6,
@@ -1090,11 +1126,14 @@ class TransientSolver:
         t0 = time.perf_counter()
 
         # --- initial condition: steady state, critically adjusted ------------
-        mats, mmap, mix_m0, mix_w0 = self._unpack(self.problem_at(0.0))
+        mats, mmap, mix_m0, mix_w0, bcf0 = self._unpack(self.problem_at(0.0))
+        self._bcf_now = bcf0
         # Mix arrays only reach solvers that were given them: pluggable
         # geometries (hex, ...) never see the kwargs in the default case.
         mix_kwargs = ({} if mix_m0 is None else
                       dict(mix_material=mix_m0, mix_weight=mix_w0))
+        if bcf0 is not None:
+            mix_kwargs["bcf"] = bcf0
         # The t=0 steady state must be built with the SAME state-dependent
         # cross sections the first step will see, or the transient starts from
         # an equilibrium of a different problem and shows a spurious jump.
@@ -1171,8 +1210,7 @@ class TransientSolver:
         # weight fed to the operators follows the operator itself -- the
         # volume-weighted SPD form wants a weighted source (.rhs_weight),
         # the divergence form and Cartesian grids take the source as-is.
-        met = getattr(self.grid, "cylindrical_metrics", lambda: None)()
-        vol_w = None if met is None else xp.asarray(met[0], dtype=self.dtype)
+        vol_w = _volume_weights(self.grid, xp, self.dtype)
 
         def total_power(src):
             return float(xp.sum(src if vol_w is None else src * vol_w))
@@ -1285,6 +1323,10 @@ class TransientSolver:
 
         ops, preconds, fallback_preconds, setup_fallbacks = \
             self._step_operators(fields, time_diagonal, G)
+        if step_solver == "monolithic" and getattr(ops[0], "symmetric", True) is False:
+            raise ValueError("monolithic group preconditioning needs symmetric "
+                             "within-group operators; this geometry's are not "
+                             "(non-orthogonal mesh): use step_solver='fixed-point'")
         operator_rebuilds = 1
         time_coefficient_key = getattr(scheme, "coefficient_key", None)
         workspaces = (pcg_workspaces(ops, phi)
@@ -1347,12 +1389,12 @@ class TransientSolver:
             costs one field/operator setup per startup, not per attempt.
             """
             probe_time = t_start + 1e-6 * step_width
-            p_mats, p_map, p_mix, p_weight = self._unpack(self.problem_at(probe_time))
+            p_mats, p_map, p_mix, p_weight, p_bcf = self._unpack(self.problem_at(probe_time))
             data = _masked_fields(xp, self.grid, p_mats, p_map, self.dtype,
                                   self.active, mix_material=p_mix,
                                   mix_weight=p_weight, xs_update=last_upd)
             delayed, shift = map_kinetic_fields(data, kin, step_width, self.dtype)
-            operators = self._step_operators(data, shift, G)[0]
+            operators = self._step_operators(data, shift, G, bcf=p_bcf)[0]
             source = data.fission_source(list(phi)) / k0
             return dict(
                 time=t_start, source=source, beta=delayed,
@@ -1377,7 +1419,7 @@ class TransientSolver:
         monolithic_workspace = None
         monolithic_workspace_bytes = 0
         coarse_setups = 0
-        last = (mats, mmap, mix_m0, mix_w0)
+        last = (mats, mmap, mix_m0, mix_w0, bcf0)
         last_upd = upd0
 
         # sigma_s is indexed [g_from][g_to]: any coupling above the diagonal
@@ -1571,7 +1613,7 @@ class TransientSolver:
             time_order_n = int(getattr(
                 scheme, "order_at", lambda _n: scheme.order)(n))
             spec = self._unpack(self.problem_at(t))
-            mats, mmap, mix_m, mix_w = spec
+            mats, mmap, mix_m, mix_w, _ = spec
             upd = self.xs_update_at(t) if self.xs_update_at is not None else None
             a0_n = scheme.a0(n)
             coefficient_key = getattr(scheme, "coefficient_key", None)
@@ -1601,6 +1643,7 @@ class TransientSolver:
                         # flux stack is state and must survive the rebuild.
                         batch.update(self._batch_fields(fields, G, batch["fsrc"]))
                     last, last_upd = spec, upd
+                    self._bcf_now = spec[4]
 
             # A BDF startup transition changes the time shift and precursor
             # elimination even if the spatial material fields are unchanged.
@@ -2349,8 +2392,7 @@ class TransientSDP1Solver:
             raise RuntimeError(f"initial steady state did not converge: {steady}")
         k0 = steady.k_eff
 
-        met = getattr(self.grid, "cylindrical_metrics", lambda: None)()
-        vol_w = None if met is None else xp.asarray(met[0], dtype=self.dtype)
+        vol_w = _volume_weights(self.grid, xp, self.dtype)
 
         def total_power(src):
             return float(xp.sum(src if vol_w is None else src * vol_w))
@@ -2630,8 +2672,7 @@ class TransientSDPNSolver:
             raise RuntimeError(f"initial steady state did not converge: {steady}")
         k0 = steady.k_eff
 
-        met = getattr(self.grid, "cylindrical_metrics", lambda: None)()
-        vol_w = None if met is None else xp.asarray(met[0], dtype=self.dtype)
+        vol_w = _volume_weights(self.grid, xp, self.dtype)
 
         def total_power(src):
             return float(xp.sum(src if vol_w is None else src * vol_w))

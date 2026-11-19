@@ -7,10 +7,13 @@ results and older reports. The Python package is now `garnet`.
 
 The core solvers support:
 - Cartesian and cylindrical r-z grids, body-fitted triangular meshes, and
-  extruded triangular prisms; unstructured meshes for diffusion.
-- Criticality and adjoint calculations with diffusion, SP1/3/5/7, and SDP1/2/3.
+  extruded triangular prisms; unstructured meshes for diffusion, including
+  transients on meshes refined locally around control drums.
+- Criticality and adjoint calculations with diffusion, SP1/3/5/7, and SDP1/2/3,
+  and discrete-ordinates (S_N) reference solutions on triangular meshes.
 - Neutron kinetics, coupled thermal transients, and quasi-static acceleration.
-- SPH correction and cross-section readers for Griffin and FEMFFUSION data.
+- SPH correction, including boundary discontinuity factors and tables in
+  control-drum angle, and cross-section readers for Griffin and FEMFFUSION data.
 
 ## Built for GPU
 
@@ -95,6 +98,7 @@ tests, states the acceptance criteria, and records dated CPU results.
 | Adaptive BDF, LRA-2D accuracy, and matched-error cost | [Rendered study (PDF)](benchmark-results/lra2d-adaptive-bdf-report/adaptive-bdf-lra-benchmark.pdf) · [data and reproduction](benchmark-results/lra2d-adaptive-bdf-report/) |
 | 3-D HP-MR guarded quasi-static transients on GH200 | [Accuracy study and recorded results](benchmark-results/hpmr-iqs-gh200/) |
 | T4 GPU accuracy and performance | [3-D transient study](benchmark-results/transient-acceleration/step-08a-adaptive-bdf-gpu-readiness.md) · [optimization studies](benchmark-results/transient-acceleration/) |
+| SPH equivalence for control-drum cores (HP-MR) | [SPH audit](docs/qa/sph_audit_2026-11-13.md) |
 | October 2026 code audit: findings, fixes, moved results, and open items | [Audit note](docs/qa/code_audit_2026-10-28.md) · [summary in the V&V report](docs/verification_validation.md#core-solver-code-audit) |
 
 These checks cover the numerical methods and the stated benchmark models.

@@ -17,8 +17,8 @@ from .grid import Grid
 from .hex import HexDiffusionEigenSolver, HexGrid, offset_to_axial
 from .materials import (Kinetics, Material, ONE_GROUP_DEMO, PWR_TWO_GROUP,
                         net_absorption, transport_corrected)
-from .mesh import (Mesh, MeshResult, UnstructuredDiffusionSolver, assemble_mesh,
-                  assemble_mesh_3d, read_gmsh)
+from .mesh import (Mesh, MeshDiffusionEigenSolver, MeshGrid, MeshGroupOperator, MeshResult,
+                  UnstructuredDiffusionSolver, assemble_mesh, assemble_mesh_3d, read_gmsh)
 from .model import (CylindricalModel, FeedbackSpec, HexLattice, MaterialSummary,
                    MeshModel, Model, ModelResult,
                    ReactorResult, TransientModelResult, TriReactor, hex_disk,
@@ -28,6 +28,7 @@ from .noise import (NoiseResult, NoiseSolver, NoiseSource,
 from .perturbation import first_order_reactivity
 from .power import fission_energy_xs, power_density
 from .quasistatic import (EffectiveKinetics, FixedShapeQuasiStaticResult,
+                          adiabatic_point_kinetics,
                           PointKineticsResult, QuasiStaticResult,
                           advance_point_kinetics,
                           equilibrium_precursors,
@@ -47,10 +48,10 @@ from .hybrid_sn import HybridSNDiffusionSolver, HybridSNResult
 from .hybrid_tri_sn import HybridTriSNDiffusionSolver
 from .ldfe import ldfe_quadrature_2d, ldfe_sphere, mirror_maps
 from .sn import SNResult, SNTransportSolver, quadrature_2d
-from .tri_sn import TriSNTransportSolver
+from .tri_sn import TriSNTransportSolver, sn_effective_kinetics
 from .drum_mesh import TriMeshProblem, refine_drum_band
-from .equivalence import (EquivalenceZones, NodeCells, SphDfNode, drum_core_zones,
-                          inherit_zones)
+from .equivalence import (EquivalenceZones, NodeCells, SphDfNode, SphDfState, SphDfTable,
+                          drum_core_zones, inherit_zones)
 from .sph import (SphResult, apply_sph_factors, flux_weighted_homogenize,
                   region_average, sph_correct, sph_correct_monolithic,
                   sph_bcf_correct, sph_get_correct, sph_kinetics)
@@ -195,4 +196,11 @@ __all__ = [
     "read_griffin_library",
     "read_griffin_material",
     "volume_homogenize",
+    "MeshGrid",
+    "MeshGroupOperator",
+    "MeshDiffusionEigenSolver",
+    "SphDfTable",
+    "SphDfState",
+    "sn_effective_kinetics",
+    "adiabatic_point_kinetics",
 ]

@@ -2835,3 +2835,76 @@ class TriSNTransportSolver:
                         solve_seconds=time.perf_counter() - t0,
                         n_ordinates=self.M, k_history=k_hist,
                         n_sweeps=self._sweep_count - sweeps0)
+
+
+def sn_effective_kinetics(forward_solver, forward, adjoint_solver, adjoint, kinetics, *,
+                          k0: float | None = None, rho: float = 0.0, angular: bool = True):
+    """Adjoint-weighted point-kinetics parameters of a triangular S_N state.
+
+    ``forward``/``adjoint`` are the :class:`SNResult` of ``forward_solver`` and
+    of ``adjoint_solver`` (``adjoint=True``, same problem). Returns
+    :class:`garnet.quasistatic.EffectiveKinetics` with
+
+    * beta_eff,i = <phi+, chi_d,i beta_i nuSf phi> / <phi+, chi nuSf phi>, from
+      the scalar fluxes (fission and delayed emission are isotropic, so this
+      is the exact discrete bilinear form);
+    * Lambda = k0 <psi+, psi / v> / <psi+, chi nuSf psi>, where the angular
+      product is taken from the flux moments the solve carries:
+      <psi+, psi> = phi+ phi / W + sum_j (2 l_j + 1) m+_j m_j per cell and
+      group, W the quadrature weight sum, with the adjoint's moments
+      m+_j = (-1)^l_j mt_j (psi+(O) = psit(-O)). This is exact for angular
+      fluxes within the P_L span of ``scattering_order``; ``angular=False``
+      keeps the scalar (P0) term only. The 1/v insertion (Sigma_t + eps/v)
+      gives the exact first-order Lambda for comparison.
+
+    ``k0`` defaults to the forward k; ``rho`` is stored as given (for a
+    quasi-static march, 1 - k0 / k(theta)). Global (G,) speeds only.
+    """
+    from .quasistatic import EffectiveKinetics
+
+    if forward_solver.adjoint or not adjoint_solver.adjoint:
+        raise ValueError("pass the forward solver first and an adjoint=True solver second")
+    G = forward_solver.G
+    v = np.asarray(kinetics.velocities, dtype=float)
+    if v.shape != (G,):
+        raise ValueError("sn_effective_kinetics needs global (G,) speeds")
+    k0 = float(forward.k_eff if k0 is None else k0)
+    phi = np.asarray(asnumpy(forward.flux), dtype=float).reshape(G, -1)
+    adj = np.asarray(asnumpy(adjoint.flux), dtype=float).reshape(G, -1)
+    nsf = np.asarray(forward_solver.nsf, dtype=float).reshape(G, -1)
+    chi = np.asarray(forward_solver.chi, dtype=float).reshape(G, -1)
+    V = float(forward_solver._measure)
+    fission = (nsf * phi).sum(axis=0)
+    fission_importance = V * float((adj * chi * fission[None]).sum())
+    time_importance = V * float(((adj * phi).sum(axis=1) / v).sum())
+    if angular and getattr(forward_solver, "_aniso", False):
+        mf, ma = forward_solver._last_moments, adjoint_solver._last_moments
+        if mf is None or ma is None:
+            raise ValueError("the solves carry no flux moments")
+        W = float(np.sum(forward_solver.w))
+        l = np.asarray(forward_solver._mom_l)
+        c = (2.0 * l + 1.0) * np.where(l % 2 == 0, 1.0, -1.0)
+        for g in range(G):
+            mfg = np.asarray(asnumpy(mf[g]), dtype=float).reshape(len(l), -1)
+            mag = np.asarray(asnumpy(ma[g]), dtype=float).reshape(len(l), -1)
+            time_importance += V * W * float((c[:, None] * mfg * mag).sum()) / v[g]
+    if fission_importance <= 0.0 or time_importance <= 0.0:
+        raise ValueError("forward/adjoint shapes have non-positive importance")
+    beta = np.asarray(kinetics.beta, dtype=float)
+    if beta.ndim != 1:
+        raise ValueError("sn_effective_kinetics needs global (I,) beta")
+    chi_d = kinetics.chi_delayed
+    beta_eff = []
+    for i, b in enumerate(beta):
+        if chi_d is None:
+            spectrum = chi
+        else:
+            cd = np.asarray(chi_d, dtype=float)
+            spectrum = (cd if cd.ndim == 1 else cd[i])[:, None] * np.ones_like(chi)
+        beta_eff.append(V * float((adj * spectrum * b * fission[None]).sum())
+                        / fission_importance)
+    return EffectiveKinetics(rho=float(rho), generation_time=k0 * time_importance
+                             / fission_importance, beta=np.array(beta_eff),
+                             decay=np.asarray(kinetics.decay, dtype=float).copy(),
+                             time_importance=time_importance,
+                             fission_importance=fission_importance)

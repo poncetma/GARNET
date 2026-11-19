@@ -174,6 +174,21 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
    the reference pin rates to round-off; anything else is a bug.
 7. **Transients**: `sph_kinetics(kinetics, factors)` gives the speeds v/mu;
    the uncorrected 1/v biased the generation time by +20.7 %.
+   - **Tabulated model in time:** `SphDfTable.load(dir, geometry_at)`
+     (`hpmr_sphdf_geometry` for HP-MR). `table.problem_at(theta_of_t)` returns
+     the corrected zone materials, the absorber blend at θ(t) and the
+     boundary factors as `bcf`, and `table.kinetics(base, θ0)` gives v/mu.
+   - **On the drum-band mesh:** `TransientSolver(MeshGrid(mesh, alpha), ...,
+     group_operator=MeshGroupOperator, eig_solver=MeshDiffusionEigenSolver,
+     linear_solver="gmres")`. The hanging-node correction makes the operator
+     non-symmetric, so CG and monolithic steps are rejected.
+   - **Step settings on HP-MR-like cores:** `rebalance=True, anderson_depth=1,
+     max_sweeps=4000, scatter_subsweeps=6, tol_step=1e-6`, as in
+     `hpmr_transient_bench`. The defaults stall near criticality.
+   - **Reference:** quasi-static S_N, with `sn_effective_kinetics` (forward and
+     `adjoint=True` solves) and `adiabatic_point_kinetics`. Plan and status:
+     `docs/sph_drum_transient_plan.md`.
+   - **Kinetics data:** `hpmr_kinetics_11g()`, the library's own (β = 680 pcm).
 
 Transport effects concentrated in the drums can also be handled by the hybrid
 solvers (`hpmr_transport_mask`, `hybrid_mask=`, `sn_mask=`); see the benchmark

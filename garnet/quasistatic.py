@@ -1711,3 +1711,27 @@ def quasistatic_coupled_transient(ctx, t_end, dt, *, shape_dt=2.0,
         residual_tol=residual_tol, fallback_residual=fallback_residual,
         adjoint_residual_tol=adjoint_residual_tol,
         **kwargs)
+
+
+def adiabatic_point_kinetics(k_of_angle: Callable, angle_of_t: Callable,
+                             parameters0: EffectiveKinetics, t_end: float, dt: float,
+                             *, k0: float | None = None) -> PointKineticsResult:
+    """Adiabatic (quasi-static) point kinetics along a control path.
+
+    The flux is the static eigenshape at the control state of the moment times
+    an amplitude: rho(t) = 1 - k0 / k(angle(t)), with ``k_of_angle`` the static
+    eigenvalue along the path (e.g. interpolated S_N references) and
+    ``parameters0`` the effective delayed-neutron data and generation time,
+    e.g. :func:`garnet.tri_sn.sn_effective_kinetics` at the initial state.
+    ``k0`` defaults to ``k_of_angle(angle_of_t(0))``. The march is
+    :func:`integrate_point_kinetics` (backward Euler, as ``TransientSolver``'s
+    default), so a comparison with a space-time solve isolates the shape
+    approximation. Exact for a homogeneous reflected medium in one group,
+    where the shape cannot change.
+    """
+    k0 = float(k_of_angle(angle_of_t(0.0)) if k0 is None else k0)
+
+    def parameters_at(t):
+        return replace(parameters0, rho=1.0 - k0 / float(k_of_angle(angle_of_t(t))))
+
+    return integrate_point_kinetics(parameters_at, t_end, dt)

@@ -693,6 +693,29 @@ def hpmr_drum_sector_zones(problem, n_sectors: int = 8, r_inner: float = 10.25,
     return zs, cells, boundary_zones(zs, cells), outer_of
 
 
+def hpmr_sphdf_geometry(refine: int = 4, levels: int = 1, absorber: str = "polar",
+                        n_sectors: int = 8, r_inner: float = 10.25, **options):
+    """``geometry_at(angle) -> (zones, mix_weight)`` of the baseline SPH-DF node
+    for :class:`garnet.equivalence.SphDfTable`: the drum-band refined mesh
+    (:func:`hpmr_locally_refined_problem`; ``levels=0`` the refine-``refine``
+    triangles as a mesh) zoned by :func:`hpmr_drum_sector_zones`. The mesh and
+    zone map are the same at every angle; the zones' absorber blend moves.
+    ``geometry_at.problem(angle)`` returns the node problem itself (its
+    ``mesh`` for :class:`garnet.mesh.MeshGrid`)."""
+    def problem(angle):
+        return hpmr_locally_refined_problem(refine=refine, levels=levels,
+                                            drum_angle_deg=float(angle), absorber=absorber)
+
+    def geometry_at(angle):
+        q = problem(angle)
+        zones = hpmr_drum_sector_zones(q, n_sectors=n_sectors, r_inner=r_inner,
+                                       **dict(options))[0]
+        return zones, q.mix_weight
+
+    geometry_at.problem = problem
+    return geometry_at
+
+
 def hpmr_transport_mask(problem: HpmrProblem, region: str = "drum") -> np.ndarray:
     """Cells that keep the full transport (SP3/SDPN) block in a hybrid solve;
     every other cell runs pure diffusion. Pass the result as ``hybrid_mask`` to

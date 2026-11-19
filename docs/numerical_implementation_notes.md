@@ -492,6 +492,28 @@ tools to `HexLattice` and to any raster or triangular mesh.
   boundary vertices are the end points of the boundary faces, so hanging nodes
   never mark an interior cell.
 
+### Diffusion transients on unstructured meshes; boundary coefficients in time (2026-11-19)
+
+The drum-band refined mesh is the default SPH-DF node, so drum transients must run on it. `garnet.mesh.MeshGrid` makes an unstructured mesh a geometry of the structured-solver framework (`shape = (n_cells,)`), next to the Cartesian, hex and triangular grids:
+
+- **`MeshGroupOperator`.** It has the group-operator signature, so `TransientSolver(..., group_operator=MeshGroupOperator, eig_solver=MeshDiffusionEigenSolver)` reuses the whole time integration: precursors, BDF and theta schemes, per-material kinetics, materials and blends that change in time, events.
+- **Volume-integrated operator.** The operator is the TPFA leakage plus removal, integrated over the cells, with `rhs_weight` = cell area. The transient's power integral takes its volume weights from `grid.cell_weights()`, the hook the cylindrical metric already used.
+- **Non-orthogonal correction applied implicitly.** The least-squares-gradient correction of `UnstructuredDiffusionSolver` (needed on hanging-node meshes: 49 pcm on HP-MR `local:4:1`) is linear in the flux. `MeshGroupOperator.apply` therefore includes it, and the operator is exact but not symmetric: GMRES is required, and CG or monolithic steps are rejected. `UnstructuredDiffusionSolver` lags the same correction into the source. The two converge to the same solution (1e-6 pcm). The face, gradient and Robin assembly is shared by both (`MeshGrid.group_terms`, `MeshGrid.correction_terms`); the refactored steady solver reproduces its former output bit for bit.
+- **Boundary coefficients in time.** `problem_at(t)` may return a fifth element `bcf` (G, *grid.shape). It reaches the initial eigen solve and every step's group operators as `bcf[g]` (triangular raster and mesh). A change of identity rebuilds the operators, like the other elements.
+
+Point-kinetics parameters of an S_N state (`garnet.tri_sn.sn_effective_kinetics`):
+- **β_eff** uses the forward and adjoint scalar fluxes, which is exact because emission is isotropic.
+- **Λ** uses ⟨ψ†, ψ/v⟩ from the flux moments the anisotropic solve carries: ⟨ψ†, ψ⟩ = φ†φ/W + Σ_j (2l_j+1) m†_j m_j, with the adjoint's odd moments sign-flipped (ψ†(Ω) = ψ̃(−Ω)).
+- **Accuracy of Λ on a three-group P2 test core:** against the 1/v insertion (Σ_t + ε/v), which is the exact first-order Λ, the moment Λ is within 1.2e-4 (step) and 2.7e-3 (SCB). The scalar-flux Λ is 4 % off.
+- **The quasi-static reference march.** `garnet.quasistatic.adiabatic_point_kinetics` marches ρ(t) = 1 − k0/k(θ(t)) with these parameters, using the backward-Euler convention of `TransientSolver`. On a bare homogeneous one-group core it reproduces the space-time transient to 6e-8.
+
+The tabulated SPH-DF model is `garnet.equivalence.SphDfTable`:
+- **Interpolation.** It interpolates the zone constants, μ, γ and the form functions linearly in drum angle and applies μ to the constants, as the steady evaluation does.
+- **State at an angle.** `state(angle)` returns the SPH-corrected zone materials, the node's zone maps and absorber blend at that angle, and the boundary coefficients γ on the boundary zones' cells.
+- **Transient driver.** `problem_at(angle_of_t)` feeds the transient. It returns the same tuple while the angle holds, so the operators are not rebuilt.
+- **Speeds.** `kinetics(base, angle)` gives the SPH speeds v/μ frozen at one angle, because the transient's kinetics are fixed in time.
+- **HP-MR check** (`local:4:1` tables): the state reproduces the table k at 90° (0.00 pcm against the reference), and the evaluation tool's interpolated k at 97.5° and 108.75° (+12.29 and −36.62 pcm).
+
 ### Exact pin-resolved assembly fractions
 
 `benchmarks.hpmr_assembly.build_hpmr_assembly2d` gives every triangle within

@@ -20,6 +20,12 @@ production swapped, at reversed direction. Checks:
   order), on both schemes. Broken on purpose (the forward flux as the
   weight), the transfer cases miss by 65-92 % and the nu*Sigma_f case by
   2.1e-3 with a first-order error ratio of 5: both criteria are needed.
+* point-kinetics parameters (``sn_effective_kinetics``): beta_eff against a
+  shift of the fission spectrum toward the delayed spectra (second order,
+  ratio 10.000); Lambda from the P2 flux moments against the 1/v insertion
+  (Sigma_t + eps/v, central difference: the exact first-order Lambda):
+  step 1.2e-4, while the scalar-flux (P0) Lambda misses by 4.1 %. Broken on
+  purpose (adjoint odd moments not sign-flipped) Lambda misses by 8.5 %.
 """
 
 import functools
@@ -27,9 +33,9 @@ import functools
 import numpy as np
 import pytest
 
-from garnet import Material
+from garnet import Kinetics, Material
 from garnet.tri import TriGrid
-from garnet.tri_sn import TriSNTransportSolver
+from garnet.tri_sn import TriSNTransportSolver, sn_effective_kinetics
 
 TIGHT = dict(tol_k=1e-12, tol_source=1e-11)
 N = 10
@@ -193,3 +199,48 @@ def test_first_order_perturbation_with_the_adjoint_is_second_order_accurate(sche
         errors.append(abs(predicted - direct) / abs(direct))
     assert errors[1] < 1.2e-3
     assert errors[0] / errors[1] == pytest.approx(10.0, rel=0.05)      # second order
+
+
+V_KIN = np.array([2.0e9, 4.0e7, 3.0e5])
+BETA = np.array([0.0025, 0.004])
+CHI_D = np.array([[0.5, 0.5, 0.0], [0.3, 0.7, 0.0]])
+KIN = Kinetics(velocities=V_KIN, beta=BETA, decay=[0.08, 1.2], chi_delayed=CHI_D)
+
+
+def _with(m, chi=None, eps_v=0.0):
+    return Material(name=m.name, diffusion=m.diffusion,
+                    sigma_a=np.asarray(m.sigma_a) + eps_v / V_KIN, nu_sigma_f=m.nu_sigma_f,
+                    sigma_s=m.sigma_s, chi=m.chi if chi is None else chi,
+                    total=np.asarray(m.total) + eps_v / V_KIN,
+                    sigma_s_moments=m.sigma_s_moments)
+
+
+def test_beta_eff_matches_a_delayed_spectrum_perturbation():
+    sf, rf = _base("step", False)
+    sa, ra = _base("step", True)
+    p = sn_effective_kinetics(sf, rf, sa, ra, KIN)
+    assert p.beta_total > BETA.sum() * 1.1          # softer delayed spectra matter here
+    fuel = _fuel()
+    shift = (BETA[:, None] * (CHI_D - np.asarray(fuel.chi)[None])).sum(axis=0)
+    lam = 1.0 / rf.k_eff
+    errors = []
+    for eps in (1e-1, 1e-2):
+        k = _solve([_with(fuel, chi=np.asarray(fuel.chi) + eps * shift), REFL, ABS],
+                   False)[1].k_eff
+        predicted = -lam * eps * (p.beta_total - BETA.sum())
+        errors.append(abs(predicted - (1.0 / k - lam)) / abs(1.0 / k - lam))
+    assert errors[1] < 1e-4
+    assert errors[0] / errors[1] == pytest.approx(10.0, rel=0.05)
+
+
+def test_generation_time_from_moments_matches_the_inverse_velocity_insertion():
+    sf, rf = _base("step", False)
+    sa, ra = _base("step", True)
+    p = sn_effective_kinetics(sf, rf, sa, ra, KIN)
+    p0 = sn_effective_kinetics(sf, rf, sa, ra, KIN, angular=False)
+    eps = 10.0
+    k_up, k_down = (_solve([_with(m, eps_v=s * eps) for m in (_fuel(), REFL, ABS)],
+                           False)[1].k_eff for s in (1.0, -1.0))
+    exact = rf.k_eff * (1.0 / k_up - 1.0 / k_down) / (2.0 * eps)
+    assert p.generation_time == pytest.approx(exact, rel=1e-3)          # 1.2e-4
+    assert abs(p0.generation_time / exact - 1.0) > 1e-2                 # 4.1 %: moments matter

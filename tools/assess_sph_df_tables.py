@@ -65,7 +65,8 @@ from garnet.pin_power import (footprint_flux, group_form_functions,  # noqa: E40
                               reconstruct_group_form_functions)
 from garnet.power import fission_energy_xs  # noqa: E402
 
-REFINE, METHOD = 16, "sn-p2:4:16"
+# SPH_REF_REFINE: refine of the S_N reference (default 16; 32 is the converged one, report §10.6)
+REFINE, METHOD = int(os.environ.get("SPH_REF_REFINE", "16")), "sn-p2:4:16"
 # SPH_TEST_STEPS: the reference angles, as the union of the multiples of each step
 # in [0, 180] (default 7.5: the 25-angle set; "5,7.5" adds the 5-degree set)
 STEPS = [float(s) for s in os.environ.get("SPH_TEST_STEPS", "7.5").split(",")]
@@ -137,7 +138,8 @@ tables = (rest[3] if len(rest) > 3 and rest[3] else
           os.path.join(cache, "sphdf_tables" + (f"_sec{SECTORS}" if SECTORS else "")
                        + ("o" if OUTER else "") + ("" if DRUM_OUTER else "u")
                        + ("b" if OUTER_BE else "") + ("a" if ALIGNED else "")
-                       + ("" if spec == "raster:8" else "_" + spec.replace(":", ""))))
+                       + ("" if spec == "raster:8" else "_" + spec.replace(":", ""))
+                       + ("" if REFINE == 16 else f"_r{REFINE}")))
 spacings = ([float(s) for s in rest[4].split(",")] if len(rest) > 4 and rest[4]
             else [15.0, 30.0, 45.0, 90.0])
 PINS = hpmr_pin_layout()

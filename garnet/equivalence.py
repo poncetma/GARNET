@@ -556,3 +556,200 @@ def reference_boundary_currents(sn_solver, sn_result, fine_zones: EquivalenceZon
     _, bnd = sn_solver.region_partial_currents(sn_result, np.asarray(fine_zones.region_map))
     G = next(iter(bnd.values())).shape[0] if bnd else 0
     return np.array([bnd[b][:, 0] if b in bnd else np.zeros(G) for b in boundary])
+
+
+# --- tabulated SPH-DF model in drum angle ------------------------------------
+
+#: Arrays of one zone-constant table entry (one row per zone).
+ZONE_KEYS = ("D", "sa", "nsf", "ss", "st", "chi", "kf")
+
+
+def zone_material_arrays(materials) -> dict:
+    """Stack zone :class:`~garnet.materials.Material` data into arrays (one row
+    per zone): the storage format of the SPH-DF tables."""
+    G = materials[0].n_groups
+    kf = np.array([m.kappa_fission if m.kappa_fission is not None else np.zeros(G)
+                   for m in materials])
+    return dict(D=np.array([m.diffusion for m in materials]),
+                sa=np.array([m.sigma_a for m in materials]),
+                nsf=np.array([m.nu_sigma_f for m in materials]),
+                ss=np.array([m.sigma_s for m in materials]),
+                st=np.array([m.sigma_t for m in materials]),
+                chi=np.array([m.chi for m in materials]), kf=kf,
+                has_kf=np.array([m.kappa_fission is not None for m in materials]))
+
+
+def zone_materials(arrays) -> list:
+    """Zone materials from :func:`zone_material_arrays` arrays."""
+    from .materials import Material
+    return [Material(name=f"zone-{i}", diffusion=arrays["D"][i], sigma_a=arrays["sa"][i],
+                     nu_sigma_f=arrays["nsf"][i], sigma_s=arrays["ss"][i],
+                     chi=arrays["chi"][i], total=arrays["st"][i],
+                     kappa_fission=arrays["kf"][i] if arrays["has_kf"][i] else None)
+            for i in range(len(arrays["D"]))]
+
+
+@dataclass
+class SphDfState:
+    """The SPH-DF node model at one drum angle, ready for a solver.
+
+    ``materials`` are the SPH-corrected zone materials (one per zone, a stable
+    order: per-material kinetics index them), ``region_map`` /
+    ``mix_region_map`` / ``mix_weight`` the node cells' zones and absorber
+    blend at that angle, ``bcf`` (G, *shape) the boundary coefficients (the
+    boundary factors gamma on the cells of the boundary zones, 1 elsewhere).
+    ``mu`` (R, G), ``gamma`` (B, G) and ``form`` are the interpolated factors.
+    """
+    angle: float
+    materials: list
+    region_map: np.ndarray
+    mix_region_map: np.ndarray | None
+    mix_weight: np.ndarray | None
+    bcf: np.ndarray
+    mu: np.ndarray
+    gamma: np.ndarray
+    form: np.ndarray | None
+    k_table: float | None = None       # the node k stored at a table angle
+
+    def problem(self):
+        """(materials, material_map, mix_material, mix_weight, bcf), the
+        ``problem_at`` tuple of :class:`garnet.transient.TransientSolver`."""
+        return (self.materials, self.region_map, self.mix_region_map, self.mix_weight,
+                self.bcf)
+
+
+class SphDfTable:
+    """SPH-DF model tabulated in drum angle, linearly interpolated, and the
+    ``problem_at`` of a drum transient.
+
+    Each table entry holds, at one angle, the zone constants (homogenized from
+    the reference: ``zone_material_arrays`` keys), the SPH factors ``mu``
+    (R, G), the boundary factors ``gamma`` (B, G) of the boundary zones
+    ``bregs`` and the per-group pin form functions ``form``. Between table
+    angles every array is interpolated linearly and the factors applied to the
+    interpolated constants (``apply_sph_factors``), as in the steady
+    evaluation (docs/qa/sph_audit_2026-11-13.md Sec. 10.6).
+
+    ``geometry_at(angle)`` returns ``(zones, mix_weight)`` of the node at that
+    angle: an :class:`EquivalenceZones` whose zone names and order match the
+    table, and the node cells' absorber fraction. The node mesh and the zone
+    map are fixed in space; only the absorber blend moves with the drums.
+    Geometries are cached per angle (``cache_size`` most recent).
+    """
+
+    def __init__(self, entries: dict, geometry_at, cache_size: int = 8):
+        if len(entries) < 2:
+            raise ValueError("an SPH-DF table needs at least two angles")
+        self.angles = np.array(sorted(float(a) for a in entries))
+        self.entries = {float(a): e for a, e in entries.items()}
+        first = self.entries[self.angles[0]]
+        self.names = tuple(str(n) for n in first["names"]) if "names" in first else None
+        self.bregs = [int(b) for b in first["bregs"]]
+        for a, e in self.entries.items():
+            if [int(b) for b in e["bregs"]] != self.bregs:
+                raise ValueError(f"boundary zones differ at {a:g} deg")
+            if self.names is not None and tuple(str(n) for n in e["names"]) != self.names:
+                raise ValueError(f"zone names differ at {a:g} deg")
+            if "converged" in e and not bool(e["converged"]):
+                raise ValueError(f"the SPH-DF generation at {a:g} deg did not converge")
+        self.geometry_at = geometry_at
+        self.cache_size = int(cache_size)
+        self._geo = {}
+
+    @classmethod
+    def load(cls, directory, geometry_at, angles=None, **kwargs):
+        """Read the ``sphdf_<angle>.npz`` entries of a table directory (as
+        written by ``tools/assess_sph_df_tables.py generate``), all of them
+        or those at ``angles``."""
+        import glob
+        import os
+        import re
+        entries = {}
+        for path in glob.glob(os.path.join(directory, "sphdf_*.npz")):
+            m = re.fullmatch(r"sphdf_([0-9.]+)\.npz", os.path.basename(path))
+            if m is None:
+                continue
+            a = float(m.group(1))
+            if angles is not None and not np.any(np.isclose(a, angles)):
+                continue
+            with np.load(path) as d:
+                entries[a] = {k: d[k] for k in d.files}
+        return cls(entries, geometry_at, **kwargs)
+
+    def subset(self, angles):
+        """The table restricted to ``angles`` (e.g. a coarser spacing)."""
+        keep = {a: e for a, e in self.entries.items() if np.any(np.isclose(a, angles))}
+        return SphDfTable(keep, self.geometry_at, self.cache_size)
+
+    def interpolate(self, angle: float) -> dict:
+        """Table arrays at ``angle``: linear between the two neighbouring
+        table angles, exact at a table angle."""
+        a = float(angle)
+        grid = self.angles
+        if not grid[0] - 1e-9 <= a <= grid[-1] + 1e-9:
+            raise ValueError(f"angle {a:g} outside the table [{grid[0]:g}, {grid[-1]:g}]")
+        i = int(np.searchsorted(grid, a))
+        if i < len(grid) and abs(grid[i] - a) < 1e-9:
+            out = {k: np.asarray(v) for k, v in self.entries[grid[i]].items()}
+            out["exact"] = True
+            return out
+        lo, hi = self.entries[grid[i - 1]], self.entries[grid[i]]
+        w = (a - grid[i - 1]) / (grid[i] - grid[i - 1])
+        out = {k: (1 - w) * np.asarray(lo[k]) + w * np.asarray(hi[k])
+               for k in ZONE_KEYS + ("mu", "gamma") + (("form",) if "form" in lo else ())}
+        out["has_kf"] = lo["has_kf"]
+        out["exact"] = False
+        return out
+
+    def _geometry(self, angle):
+        key = round(float(angle), 9)
+        if key not in self._geo:
+            if len(self._geo) >= self.cache_size:
+                self._geo.pop(next(iter(self._geo)))
+            zones, mix_weight = self.geometry_at(float(angle))
+            if self.names is not None and tuple(zones.names) != self.names:
+                raise ValueError(f"geometry_at({angle:g}) zones do not match the table")
+            self._geo[key] = (zones, mix_weight)
+        return self._geo[key]
+
+    def state(self, angle: float) -> SphDfState:
+        """The node model at ``angle``: SPH-corrected zone materials, the
+        node's zone maps and absorber blend, and the boundary coefficients."""
+        from .sph import apply_sph_factors
+        t = self.interpolate(angle)
+        mats = apply_sph_factors(zone_materials(t), t["mu"])
+        zones, mix_weight = self._geometry(angle)
+        region = np.asarray(zones.region_map)
+        G = t["mu"].shape[1]
+        bcf = np.ones((G,) + region.shape)
+        for b, reg in enumerate(self.bregs):
+            bcf[:, region == reg] = np.asarray(t["gamma"][b], dtype=float)[:, None]
+        mix_map = zones.mix_region_map
+        return SphDfState(angle=float(angle), materials=mats, region_map=region,
+                          mix_region_map=None if mix_map is None else np.asarray(mix_map),
+                          mix_weight=None if mix_map is None else np.asarray(mix_weight),
+                          bcf=bcf, mu=np.asarray(t["mu"]), gamma=np.asarray(t["gamma"]),
+                          form=t.get("form"),
+                          k_table=float(t["k"]) if t["exact"] and "k" in t else None)
+
+    def problem_at(self, angle_of_t):
+        """``problem_at(t)`` for :class:`garnet.transient.TransientSolver`:
+        the node state at the drum angle ``angle_of_t(t)``. The same tuple is
+        returned while the angle does not change, so the solver does not
+        rebuild its operators on a hold."""
+        last = {}
+
+        def problem_at(t):
+            a = float(angle_of_t(t))
+            if last.get("angle") != a:
+                last["angle"], last["problem"] = a, self.state(a).problem()
+            return last["problem"]
+
+        return problem_at
+
+    def kinetics(self, base, angle: float):
+        """Per-zone kinetics with the SPH speeds v/mu at ``angle``
+        (:func:`garnet.sph.sph_kinetics`). The transient's kinetics are fixed
+        in time, so this freezes mu for the speeds at one angle."""
+        from .sph import sph_kinetics
+        return sph_kinetics(base, self.interpolate(angle)["mu"])

@@ -38,6 +38,7 @@ import numpy as np
 
 from .backend import asnumpy, device_name, get_backend, synchronize
 from .linalg import get_linear_solver, neumann_preconditioner
+from .solver import DiffusionEigenSolver
 
 
 _VACUUM_ALPHA = 0.5
@@ -658,6 +659,281 @@ class _MeshGroupOperator:
         return self.diag * phi - (self.w_ell * gathered).sum(axis=0)
 
 
+@dataclass
+class MeshGroupTerms:
+    """Host arrays of one group's assembled operator on a :class:`MeshGrid`."""
+    w_ell: np.ndarray              # (K, n) coupling weight per ELLPACK slot
+    diag: np.ndarray               # (n,) diagonal: removal, leakage, Robin
+    boundary_alpha: np.ndarray     # (n_bfaces,) Robin coefficient (alpha * bcf)
+    boundary_weight: np.ndarray    # (n_bfaces,) Robin face term a D A / (d a + D)
+
+
+class MeshGrid:
+    """An unstructured :class:`Mesh` as a geometry for the structured-solver
+    framework (:class:`MeshDiffusionEigenSolver`, and
+    :class:`garnet.transient.TransientSolver` with
+    ``group_operator=MeshGroupOperator, eig_solver=MeshDiffusionEigenSolver``).
+
+    ``shape`` is ``(n_cells,)``: material maps, blends (``mix_material``,
+    ``mix_weight``), kinetics fields and fluxes are per-cell vectors. Cells have
+    different areas, so the operators are volume-integrated and carry
+    ``rhs_weight`` = cell area, and :meth:`cell_weights` gives the power
+    integral its volume weights. The boundary is every boundary face, with the
+    Robin coefficient ``alpha_boundary`` (0.5 vacuum) times the optional
+    per-cell ``bcf``; the solvers' ``bc``/``mask_bc`` arguments are ignored.
+
+    It also holds the geometry the assembly shares between groups and solves:
+    face arrays, per-side normal distances, the ELLPACK adjacency and the
+    least-squares gradient data of the non-orthogonal correction.
+    """
+
+    geometry = "mesh"
+
+    def __init__(self, mesh: Mesh, alpha_boundary=_VACUUM_ALPHA,
+                 nonorthogonal_correction=True):
+        self.mesh = mesh
+        self.alpha = float(alpha_boundary)
+        if not self.alpha >= 0.0:
+            raise ValueError(f"alpha_boundary must be >= 0 (inf = zero flux), got {alpha_boundary!r}")
+        self.n_cells = n = mesh.n_cells
+        self.shape = (n,)
+        self.cell_volume = np.asarray(mesh.area, dtype=float)
+        self.face_owner = np.array([f[0] for f in mesh.faces], dtype=np.int64)
+        self.face_neighbor = np.array([f[1] for f in mesh.faces], dtype=np.int64)
+        self.face_measure = np.array([f[2] for f in mesh.faces], dtype=float)
+        center_distance = np.array([f[3] for f in mesh.faces], dtype=float)
+        self.boundary_owner = np.array([b[0] for b in mesh.bfaces], dtype=np.int64)
+        self.boundary_measure = np.array([b[1] for b in mesh.bfaces], dtype=float)
+        self.boundary_distance = np.array([b[2] for b in mesh.bfaces], dtype=float)
+        # Per-side normal distances: from the face geometry when the assembler
+        # recorded it, else (a hand-built Mesh) half the centroid distance each.
+        self.has_geometry = geom = (mesh.face_normal is not None
+                                    and mesh.bface_normal is not None)
+        self.centroid = cen = np.asarray(mesh.centroid, dtype=float)
+        if geom:
+            dim = cen.shape[1]
+            self.face_normal = np.asarray(mesh.face_normal, dtype=float).reshape(len(mesh.faces), dim)
+            self.face_center = np.asarray(mesh.face_center, dtype=float).reshape(len(mesh.faces), dim)
+            self.dist_owner = np.einsum("fd,fd->f", self.face_normal,
+                                        self.face_center - cen[self.face_owner])
+            self.dist_neighbor = np.einsum("fd,fd->f", self.face_normal,
+                                           cen[self.face_neighbor] - self.face_center)
+        else:
+            self.dist_owner = self.dist_neighbor = 0.5 * center_distance
+        # ELLPACK adjacency (geometry, shared across groups).
+        self.nbr, self.fmap = _build_ell(self.face_owner, self.face_neighbor, n)
+        self.fpad = np.where(self.fmap >= 0, self.fmap, 0)    # safe index for padding
+        self._lsq = None
+        self.nonorthogonal = bool(nonorthogonal_correction and geom and self.face_owner.size
+                                  and self._gradient_geometry() is not None)
+
+    def cell_weights(self):
+        """Cell areas (volumes): the weights of the power integral."""
+        return self.cell_volume
+
+    def group_terms(self, D, removal, bcf=None, dtype=np.float64) -> MeshGroupTerms:
+        """Assemble one group: TPFA face weights, diagonal and Robin terms.
+
+        ``D``, ``removal`` per cell (n,); ``bcf`` per cell (n,) or None."""
+        n = self.n_cells
+        D = np.asarray(D, dtype=dtype)
+        removal = np.asarray(removal, dtype=dtype)
+        fo, fn = self.face_owner, self.face_neighbor
+        # Series resistance of the two half-cells: the harmonic mean of D
+        # weighted by each side's normal distance (equal halves on a
+        # uniform orthogonal mesh give the familiar 2 D_i D_j/(D_i+D_j) A/d).
+        face_w = self.face_measure.astype(dtype) / (self.dist_owner / D[fo]
+                                                    + self.dist_neighbor / D[fn])
+        # per-slot weights (0 where padded); diag from the same face weights.
+        w_ell = (np.where(self.fmap >= 0, face_w[self.fpad], 0.0).astype(dtype)
+                 if face_w.size else np.zeros(self.fmap.shape, dtype=dtype))
+        diag = removal * self.cell_volume.astype(dtype)
+        diag = diag + np.bincount(fo, weights=face_w, minlength=n)
+        diag = diag + np.bincount(fn, weights=face_w, minlength=n)
+        bo = self.boundary_owner
+        alpha = (np.full(bo.shape, self.alpha) if bcf is None
+                 else self.alpha * np.asarray(bcf, dtype=float)[bo])
+        boundary_weight = np.zeros(bo.shape)
+        if self.alpha != 0.0:
+            Db = D[bo]
+            if np.isinf(self.alpha):                 # zero-flux (Dirichlet) limit
+                boundary_weight = Db * self.boundary_measure / self.boundary_distance
+            else:
+                boundary_weight = (alpha * Db * self.boundary_measure
+                                   / (self.boundary_distance * alpha + Db))
+            diag = diag + np.bincount(bo, weights=boundary_weight, minlength=n)
+        return MeshGroupTerms(w_ell=w_ell, diag=diag, boundary_alpha=alpha,
+                              boundary_weight=np.asarray(boundary_weight, dtype=float))
+
+    def _gradient_geometry(self):
+        """Group-independent data of the non-orthogonal correction, or None
+        when the mesh is orthogonal (every centroid line parallel to its face
+        normal), where the correction vanishes identically. Cached."""
+        if self._lsq is not None:
+            return self._lsq or None
+        cen, nbr, fmap = self.centroid, self.nbr, self.fmap
+        n = nbr.shape[1]
+        dim = cen.shape[1]
+        valid = fmap >= 0
+        fpad = self.fpad
+        dx = cen[nbr] - cen[None, :, :]                     # (K, n, dim) slot vectors
+        dx[~valid] = 0.0
+        nrm = self.face_normal[fpad]                        # (K, n, dim), sign irrelevant
+        dn = np.einsum("knd,knd->kn", nrm, dx)
+        dtan = dx - nrm * dn[..., None]
+        dlen = np.linalg.norm(dx, axis=-1)
+        rel = np.linalg.norm(dtan, axis=-1) / np.where(valid, dlen, 1.0)
+        if not np.any(rel[valid] > 1e-8):
+            self._lsq = {}
+            return None
+        # Owner-side fraction t of the normal centroid distance for each slot.
+        own_side = self.face_owner[fpad] == np.arange(n)[None, :]
+        d_self = np.where(own_side, self.dist_owner[fpad], self.dist_neighbor[fpad])
+        t = np.where(valid, d_self / np.where(valid, self.dist_owner[fpad]
+                                              + self.dist_neighbor[fpad], 1.0), 0.0)
+        dtan[~valid] = 0.0
+        # Interior least-squares rows u_s = dx/|dx|, right-hand side (phi_s - phi_c)/|dx|.
+        inv_len = np.where(valid, 1.0 / np.where(valid, dlen, 1.0), 0.0)
+        u = dx * inv_len[..., None]                         # (K, n, dim)
+        M_int = np.einsum("kni,knj->nij", u, u)
+        mesh = self.mesh
+        bnorm = np.asarray(mesh.bface_normal, dtype=float).reshape(len(mesh.bfaces), dim)
+        bdx = np.asarray(mesh.bface_center, dtype=float).reshape(len(mesh.bfaces), dim) \
+            - cen[self.boundary_owner]
+        blen = np.linalg.norm(bdx, axis=1)
+        self._lsq = dict(t=t, dtan=dtan, u=u, inv_len=inv_len, M_int=M_int,
+                         bnorm=bnorm, bdx=bdx, blen=blen)
+        return self._lsq
+
+    def correction_terms(self, D, boundary_alpha, w_ell):
+        """Host (G0, Gs, corrA, corrB) of one group's non-orthogonal correction,
+        or None when it is off or the mesh is orthogonal.
+
+        Gradient: g_c = G0[:, c] phi_c + sum_s Gs[:, s, c] phi[nbr[s, c]], the
+        least-squares fit to the neighbour differences (rows weighted by
+        1/|dx|) plus, for each boundary face, the Robin law applied to the
+        linear reconstruction, alpha (phi_c + g.dx_b) + D g.n = 0 (exact for
+        a linear flux satisfying the boundary condition, and enough to pin the
+        gradient of a corner cell with a single neighbour).
+        Correction: the explicit part of the outward face flux,
+        w (t g_c + (1 - t) g_nbr) . d_tan per slot, with d_tan the component of
+        the centroid line tangential to the face and t the owner's fraction of
+        the normal distance. The ELLPACK layout keeps both a pure gather.
+        """
+        if not self.nonorthogonal:
+            return None
+        L = self._gradient_geometry()
+        n, dim = self.n_cells, self.centroid.shape[1]
+        bo = self.boundary_owner
+        Db = np.asarray(D, dtype=float)[bo]
+        alpha = np.asarray(boundary_alpha, dtype=float)
+        bdx, blen, bnorm = L["bdx"], L["blen"], L["bnorm"]
+        if np.isinf(self.alpha):
+            a_row = bdx / blen[:, None]
+            beta = -1.0 / blen
+        else:
+            s = alpha * blen + Db
+            a_row = (alpha[:, None] * bdx + Db[:, None] * bnorm) / s[:, None]
+            beta = -alpha / s
+        M = L["M_int"].copy()
+        np.add.at(M, bo, np.einsum("bi,bj->bij", a_row, a_row))
+        bvec = np.zeros((n, dim))
+        np.add.at(bvec, bo, a_row * beta[:, None])
+        Minv = np.linalg.pinv(M)                            # (n, dim, dim)
+        Gs = np.einsum("nij,knj->ikn", Minv, L["u"] * L["inv_len"][..., None])  # (dim, K, n)
+        G0 = -Gs.sum(axis=1) + np.einsum("nij,nj->in", Minv, bvec)            # (dim, n)
+        w = np.asarray(w_ell, dtype=float)
+        corrA = np.einsum("kn,kn,knd->dn", w, L["t"], L["dtan"])               # (dim, n)
+        corrB = np.einsum("kn,kn,knd->dkn", w, 1.0 - L["t"], L["dtan"])        # (dim, K, n)
+        return G0, Gs, corrA, corrB
+
+
+def _mesh_correction(terms, nbr, phi):
+    """Explicit (non-orthogonal) part of the leakage at flux phi."""
+    G0, Gs, corrA, corrB = terms
+    grad = G0 * phi + (Gs * phi[nbr]).sum(axis=1)                      # (dim, n)
+    return (corrA * grad).sum(axis=0) + (corrB * grad[:, nbr]).sum(axis=(0, 1))
+
+
+class MeshGroupOperator:
+    """Within-group diffusion operator on a :class:`MeshGrid`, with the
+    non-orthogonal correction applied implicitly.
+
+    Same constructor as the structured group operators,
+    ``(xp, grid, D, removal, bc=, active=, mask_bc=, bcf=)``, so it plugs into
+    :class:`garnet.transient.TransientSolver` and :class:`MeshDiffusionEigenSolver`.
+    ``apply`` is the volume-integrated TPFA operator plus the non-orthogonal
+    correction, ``inv_diag`` the TPFA Jacobi diagonal, and ``rhs_weight`` the
+    cell areas (sources are per unit volume). The correction is linear in the
+    flux, so the operator is exact, but it is not symmetric on a non-orthogonal
+    mesh (``symmetric`` False): use ``linear_solver="gmres"`` there.
+    :class:`UnstructuredDiffusionSolver` lags the same correction into the
+    source instead; both converge to the same discrete solution.
+
+    ``bc``, ``mask_bc`` are ignored (the boundary is the grid's Robin
+    coefficient) and ``active`` must be None (a mesh has no inactive cells).
+    """
+
+    def __init__(self, xp, grid: MeshGrid, D, removal, bc=None, active=None,
+                 mask_bc=None, bcf=None, symmetric=None):
+        if active is not None:
+            raise ValueError("MeshGroupOperator: a mesh has no inactive cells (active=None)")
+        self.xp = xp
+        dtype = np.asarray(asnumpy(D)).dtype
+        D_host = np.asarray(asnumpy(D), dtype=float).reshape(-1)
+        r_host = np.asarray(asnumpy(removal), dtype=float).reshape(-1)
+        bcf_host = None if bcf is None else np.asarray(asnumpy(bcf), dtype=float).reshape(-1)
+        t = grid.group_terms(D_host, r_host, bcf_host, dtype)
+        self.boundary_weight = t.boundary_weight
+        self._nbr = xp.asarray(grid.nbr.astype(np.int32))
+        self._tpfa = _MeshGroupOperator(xp, self._nbr, xp.asarray(t.w_ell), xp.asarray(t.diag))
+        self.inv_diag = self._tpfa.inv_diag
+        self.rhs_weight = xp.asarray(grid.cell_volume.astype(dtype))
+        noc = grid.correction_terms(D_host, t.boundary_alpha, t.w_ell)
+        self._noc = (None if noc is None
+                     else tuple(xp.asarray(a.astype(dtype)) for a in noc))
+        self.symmetric = self._noc is None
+
+    def apply(self, phi):
+        out = self._tpfa.apply(phi)
+        if self._noc is not None:
+            out = out + _mesh_correction(self._noc, self._nbr, phi)
+        return out
+
+
+class MeshDiffusionEigenSolver(DiffusionEigenSolver):
+    """Multigroup diffusion k-eigenvalue solver on a :class:`MeshGrid`, in the
+    structured-solver framework: material maps, per-cell blends
+    (``mix_material``, ``mix_weight``: linear cross sections, harmonic D),
+    ``xs_update``, ``bcf`` (G, n_cells) boundary coefficients, and the initial
+    state of :class:`garnet.transient.TransientSolver`. On a non-orthogonal
+    mesh pass ``linear_solver="gmres"``. The adjoint is not available there.
+    For steady solves :class:`UnstructuredDiffusionSolver` is the faster path
+    (lagged correction, CG); this class exists so the mesh can run transients.
+    """
+
+    def __init__(self, grid, *args, bcf=None, **kwargs):
+        if not isinstance(grid, MeshGrid):
+            raise TypeError("MeshDiffusionEigenSolver needs a MeshGrid")
+        self.bcf = bcf
+        super().__init__(grid, *args, **kwargs)
+        if not self.ops[0].symmetric and self._linsolve is get_linear_solver("cg"):
+            raise ValueError("the mesh is non-orthogonal, so the operator with its "
+                             "correction is not symmetric: use linear_solver='gmres'")
+
+    def _linear_components(self, g, adjoint):
+        if adjoint and not self.ops[g].symmetric:
+            raise NotImplementedError("adjoint on a non-orthogonal mesh")
+        return super()._linear_components(g, adjoint)
+
+    def _build_operators(self, grid, diffusion, sigma_t, removal, bc):
+        bcf = self.bcf
+        self.ops = [MeshGroupOperator(self.xp, grid, diffusion[g], removal[g],
+                                      active=self.active,
+                                      bcf=None if bcf is None else bcf[g])
+                    for g in range(self.n_groups)]
+
+
 class UnstructuredDiffusionSolver:
     """Multigroup k-eigenvalue diffusion FV solver on an arbitrary Gmsh mesh.
 
@@ -726,84 +1002,35 @@ class UnstructuredDiffusionSolver:
         cell_measure = np.asarray(mesh.area, dtype=dtype)
         D = [np.array([self.mats[m].diffusion[g] for m in cm], dtype=dtype) for g in range(G)]
         removal = [np.array([self.mats[m].removal[g] for m in cm], dtype=dtype) for g in range(G)]
-
-        # Face and boundary connectivity as flat arrays (host; moved to device).
-        face_owner = np.array([f[0] for f in mesh.faces], dtype=np.int64)
-        face_neighbor = np.array([f[1] for f in mesh.faces], dtype=np.int64)
-        face_measure = np.array([f[2] for f in mesh.faces], dtype=dtype)
-        center_distance = np.array([f[3] for f in mesh.faces], dtype=dtype)
-        boundary_owner = np.array([b[0] for b in mesh.bfaces], dtype=np.int64)
-        boundary_measure = np.array([b[1] for b in mesh.bfaces], dtype=dtype)
-        boundary_distance = np.array([b[2] for b in mesh.bfaces], dtype=dtype)
         if bcf is not None:
             bcf = np.asarray(bcf, dtype=float)
             if bcf.shape != (G, n):
                 raise ValueError(f"bcf must be (G, n_cells) = {(G, n)}, got {bcf.shape}")
             if np.any(bcf < 0) or not np.all(np.isfinite(bcf)):
                 raise ValueError("bcf must be finite and non-negative")
-        # Robin coefficient of every boundary face, per group.
-        self._b_owner = boundary_owner
-        self._b_alpha = [np.full(boundary_owner.shape, self.alpha) if bcf is None
-                         else self.alpha * bcf[g, boundary_owner] for g in range(G)]
-        self._b_weight = []
-        # Per-side normal distances: from the face geometry when the assembler
-        # recorded it, else (a hand-built Mesh) half the centroid distance each.
-        geom = mesh.face_normal is not None and mesh.bface_normal is not None
-        cen = np.asarray(mesh.centroid, dtype=float)
-        if geom:
-            dim = cen.shape[1]
-            fnorm = np.asarray(mesh.face_normal, dtype=float).reshape(len(mesh.faces), dim)
-            fcen = np.asarray(mesh.face_center, dtype=float).reshape(len(mesh.faces), dim)
-            dist_owner = np.einsum("fd,fd->f", fnorm, fcen - cen[face_owner])
-            dist_neighbor = np.einsum("fd,fd->f", fnorm, cen[face_neighbor] - fcen)
-        else:
-            dist_owner = dist_neighbor = 0.5 * center_distance
 
-        # ELLPACK adjacency (geometry, shared across groups); moved to device once.
-        nbr, fmap = _build_ell(face_owner, face_neighbor, n)
-        nbr_dev = xp.asarray(nbr.astype(np.int32))
-        fpad = np.where(fmap >= 0, fmap, 0)                    # safe index for padding
-
+        # Geometry (faces, normal distances, ELLPACK adjacency, the least-squares
+        # gradient data) is shared with the transient operators: MeshGrid.
+        self.grid = grid = MeshGrid(mesh, self.alpha, nonorthogonal_correction)
+        self._b_owner = grid.boundary_owner
+        self._b_alpha, self._b_weight = [], []
+        nbr_dev = xp.asarray(grid.nbr.astype(np.int32))
         self.ops = []
-        w_host = []
+        noc = []
         for g in range(G):
-            Dg = D[g]
-            diffusion_owner, diffusion_neighbor = Dg[face_owner], Dg[face_neighbor]
-            # Series resistance of the two half-cells: the harmonic mean of D
-            # weighted by each side's normal distance (equal halves on a
-            # uniform orthogonal mesh give the familiar 2 D_i D_j/(D_i+D_j) A/d).
-            face_w = face_measure / (dist_owner / diffusion_owner
-                                     + dist_neighbor / diffusion_neighbor)
-            # per-slot weights (0 where padded); diag from the same face weights.
-            w_ell = (np.where(fmap >= 0, face_w[fpad], 0.0).astype(dtype)
-                     if face_w.size else np.zeros(fmap.shape, dtype=dtype))
-            w_host.append(w_ell)
-            diag = removal[g] * cell_measure
-            diag = diag + np.bincount(face_owner, weights=face_w, minlength=n)
-            diag = diag + np.bincount(face_neighbor, weights=face_w, minlength=n)
-            boundary_weight = np.zeros(boundary_owner.shape)
-            if self.alpha != 0.0:
-                Db = Dg[boundary_owner]
-                if np.isinf(self.alpha):                 # zero-flux (Dirichlet) limit
-                    boundary_weight = Db * boundary_measure / boundary_distance
-                else:
-                    a = self._b_alpha[g]
-                    boundary_weight = (a * Db * boundary_measure
-                                       / (boundary_distance * a + Db))
-                diag = diag + np.bincount(boundary_owner, weights=boundary_weight, minlength=n)
-            self._b_weight.append(np.asarray(boundary_weight, dtype=float))
+            t = grid.group_terms(D[g], removal[g], None if bcf is None else bcf[g], dtype)
+            self._b_alpha.append(t.boundary_alpha)
+            self._b_weight.append(t.boundary_weight)
             self.ops.append(_MeshGroupOperator(
-                xp, nbr_dev, xp.asarray(w_ell), xp.asarray(diag)))
+                xp, nbr_dev, xp.asarray(t.w_ell), xp.asarray(t.diag)))
+            noc.append(grid.correction_terms(D[g], t.boundary_alpha, t.w_ell))
         self.preconds = [neumann_preconditioner(op.apply, op.inv_diag,
                                                  int(precond_degree))
                          for op in self.ops]
 
         self._nbr = nbr_dev
-        self._noc = None
-        if geom and nonorthogonal_correction and face_owner.size:
-            self._noc = self._nonorthogonal_setup(
-                cen, nbr, fmap, face_owner, fnorm, fcen, dist_owner, dist_neighbor,
-                boundary_owner, D, w_host)
+        self._noc = (None if noc[0] is None else
+                     [tuple(xp.asarray(a.astype(dtype)) for a in terms) for terms in noc])
 
         # Source data, device-resident.
         self.area = xp.asarray(cell_measure)
@@ -820,76 +1047,6 @@ class UnstructuredDiffusionSolver:
                     if np.any(col):
                         self.scat[(gf, gt)] = xp.asarray(col)
 
-    def _nonorthogonal_setup(self, cen, nbr, fmap, face_owner, fnorm, fcen,
-                             dist_owner, dist_neighbor, boundary_owner, D, w_host):
-        """Per-group device arrays for the deferred non-orthogonal correction,
-        or None when the mesh is orthogonal (every centroid line parallel to its
-        face normal), where the correction vanishes identically.
-
-        Gradient: g_c = G0[:, c] phi_c + sum_s Gs[:, s, c] phi[nbr[s, c]], the
-        least-squares fit to the neighbour differences (rows weighted by
-        1/|dx|) plus, for each boundary face, the Robin law applied to the
-        linear reconstruction, alpha (phi_c + g.dx_b) + D g.n = 0 (exact for
-        a linear flux satisfying the boundary condition, and enough to pin the
-        gradient of a corner cell with a single neighbour).
-        Correction: the explicit part of the outward face flux,
-        w (t g_c + (1 - t) g_nbr) . d_tan per slot, with d_tan the component of
-        the centroid line tangential to the face and t the owner's fraction of
-        the normal distance. The ELLPACK layout keeps both a pure gather.
-        """
-        xp, dtype = self.xp, self.dtype
-        n, K = nbr.shape[1], nbr.shape[0]
-        dim = cen.shape[1]
-        valid = fmap >= 0
-        fpad = np.where(valid, fmap, 0)
-        dx = cen[nbr] - cen[None, :, :]                     # (K, n, dim) slot vectors
-        dx[~valid] = 0.0
-        nrm = fnorm[fpad]                                   # (K, n, dim), sign irrelevant
-        dn = np.einsum("knd,knd->kn", nrm, dx)
-        dtan = dx - nrm * dn[..., None]
-        dlen = np.linalg.norm(dx, axis=-1)
-        rel = np.linalg.norm(dtan, axis=-1) / np.where(valid, dlen, 1.0)
-        if not np.any(rel[valid] > 1e-8):
-            return None
-        # Owner-side fraction t of the normal centroid distance for each slot.
-        own_side = face_owner[fpad] == np.arange(n)[None, :]
-        d_self = np.where(own_side, dist_owner[fpad], dist_neighbor[fpad])
-        t = np.where(valid, d_self / np.where(valid, dist_owner[fpad] + dist_neighbor[fpad], 1.0), 0.0)
-        dtan[~valid] = 0.0
-
-        # Interior least-squares rows u_s = dx/|dx|, right-hand side (phi_s - phi_c)/|dx|.
-        inv_len = np.where(valid, 1.0 / np.where(valid, dlen, 1.0), 0.0)
-        u = dx * inv_len[..., None]                         # (K, n, dim)
-        M_int = np.einsum("kni,knj->nij", u, u)
-        mesh = self.mesh
-        bnorm = np.asarray(mesh.bface_normal, dtype=float).reshape(len(mesh.bfaces), dim)
-        bdx = np.asarray(mesh.bface_center, dtype=float).reshape(len(mesh.bfaces), dim) \
-            - cen[boundary_owner]
-        blen = np.linalg.norm(bdx, axis=1)
-        out = []
-        for g in range(self.G):
-            Db = D[g][boundary_owner].astype(float)
-            alpha = self._b_alpha[g]
-            if np.isinf(self.alpha):
-                a_row = bdx / blen[:, None]
-                beta = -1.0 / blen
-            else:
-                s = alpha * blen + Db
-                a_row = (alpha[:, None] * bdx + Db[:, None] * bnorm) / s[:, None]
-                beta = -alpha / s
-            M = M_int.copy()
-            np.add.at(M, boundary_owner, np.einsum("bi,bj->bij", a_row, a_row))
-            bvec = np.zeros((n, dim))
-            np.add.at(bvec, boundary_owner, a_row * beta[:, None])
-            Minv = np.linalg.pinv(M)                        # (n, dim, dim)
-            Gs = np.einsum("nij,knj->ikn", Minv, u * inv_len[..., None])    # (dim, K, n)
-            G0 = -Gs.sum(axis=1) + np.einsum("nij,nj->in", Minv, bvec)     # (dim, n)
-            w = w_host[g].astype(float)
-            corrA = np.einsum("kn,kn,knd->dn", w, t, dtan)                # (dim, n)
-            corrB = np.einsum("kn,kn,knd->dkn", w, 1.0 - t, dtan)         # (dim, K, n)
-            out.append(tuple(xp.asarray(a.astype(dtype)) for a in (G0, Gs, corrA, corrB)))
-        return out
-
     def boundary_leakage(self, g, phi, region_map, n_regions):
         """Leakage through the boundary faces of each region, group ``g``,
         (n_regions,): the Robin term of every boundary face (with ``bcf``)
@@ -905,10 +1062,7 @@ class UnstructuredDiffusionSolver:
 
     def _correction(self, g, phi):
         """Explicit (non-orthogonal) part of the leakage of group g at flux phi."""
-        G0, Gs, corrA, corrB = self._noc[g]
-        nb = self._nbr
-        grad = G0 * phi + (Gs * phi[nb]).sum(axis=1)                  # (dim, n)
-        return (corrA * grad).sum(axis=0) + (corrB * grad[:, nb]).sum(axis=(0, 1))
+        return _mesh_correction(self._noc[g], self._nbr, phi)
 
     def solve(self, tol_k=1e-7, tol_source=1e-8, max_outer=1000,
               inner_rtol_floor=1e-11, anderson_depth=8, flux0=None,

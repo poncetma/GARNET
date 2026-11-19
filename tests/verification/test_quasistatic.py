@@ -529,3 +529,47 @@ def test_residual_trigger_forces_early_iqs_correction():
     np.testing.assert_allclose(result.shape_update_times, [0.002])
     assert result.counters["iqs_shape_solves"] == 1
     assert result.counters["full_diffusion_fallbacks"] == 0
+
+
+def test_adiabatic_point_kinetics_equals_the_space_time_solve_of_a_bare_homogeneous_core():
+    """A uniform absorber ramp in one group cannot change the shape, so the
+    adiabatic march (rho = 1 - k0/k along the path, Lambda = k0/(v nuSf),
+    beta_eff = beta) is the exact semi-discrete solution: the space-time
+    backward-Euler transient agrees to 6e-8 while the power triples. Broken
+    on purpose: Lambda 1 % off misses by 5.9e-3, rho = k/k0 - 1 by 2.7e-2."""
+    from dataclasses import replace
+
+    from garnet import DiffusionEigenSolver, Grid, Kinetics, Material, TransientSolver
+    from garnet.quasistatic import (EffectiveKinetics, adiabatic_point_kinetics,
+                                    integrate_point_kinetics)
+
+    D, SA, NSF, V, BETA, LAM = 1.3, 0.030, 0.035, 2.2e5, 0.0065, 0.08
+    kin = Kinetics(velocities=[V], beta=[BETA], decay=[LAM])
+    grid = Grid(shape=(6, 6, 6), size=(90.0, 90.0, 90.0))
+
+    def mat(sa):
+        return Material(name="1g", diffusion=[D], sigma_a=[sa], nu_sigma_f=[NSF])
+
+    def sa_of(t):
+        return SA - 1.5e-4 * min(t / 0.1, 1.0)
+
+    k0 = DiffusionEigenSolver(grid, [mat(SA)], None, bc="zero-flux", device="cpu").solve(
+        tol_k=1e-12, tol_source=1e-11).k_eff
+    leak = NSF / k0 - SA
+
+    def k_of(sa):
+        return NSF / (sa + leak)
+
+    res = TransientSolver(grid, lambda t: ([mat(sa_of(t))], None), kin, bc="zero-flux",
+                          device="cpu").solve(0.4, 0.01, tol_step=1e-11,
+                                              steady_kwargs=dict(tol_k=1e-12, tol_source=1e-11))
+    p0 = EffectiveKinetics(rho=0.0, generation_time=k0 / (V * NSF), beta=np.array([BETA]),
+                           decay=np.array([LAM]), time_importance=1.0, fission_importance=1.0)
+    pk = adiabatic_point_kinetics(k_of, sa_of, p0, 0.4, 0.01, k0=k0)
+    assert res.power[-1] > 3.0
+    np.testing.assert_allclose(pk.power, res.power, atol=1e-6)
+    off = adiabatic_point_kinetics(k_of, sa_of, replace(p0, generation_time=1.01 * p0.generation_time),
+                                   0.4, 0.01, k0=k0)
+    assert np.abs(off.power - res.power).max() > 1e-3
+    linear = integrate_point_kinetics(lambda t: replace(p0, rho=k_of(sa_of(t)) / k0 - 1.0), 0.4, 0.01)
+    assert np.abs(linear.power - res.power).max() > 1e-3
