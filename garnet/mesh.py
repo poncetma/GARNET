@@ -654,9 +654,13 @@ class _MeshGroupOperator:
         self.diag = diag              # (n,) assembled diagonal
         self.inv_diag = 1.0 / diag    # Jacobi preconditioner
 
-    def apply(self, phi):
+    def apply(self, phi, out=None):
         gathered = phi[self.nbr]                      # (K, n) neighbour flux
-        return self.diag * phi - (self.w_ell * gathered).sum(axis=0)
+        result = self.diag * phi - (self.w_ell * gathered).sum(axis=0)
+        if out is None:
+            return result
+        out[...] = result
+        return out
 
 
 @dataclass
@@ -855,6 +859,25 @@ def _mesh_correction(terms, nbr, phi):
     return (corrA * grad).sum(axis=0) + (corrB * grad[:, nbr]).sum(axis=(0, 1))
 
 
+def _mesh_correction_transpose(terms, nbr, y, xp):
+    """Transpose of :func:`_mesh_correction`: the correction is the face map
+    grad -> sum_d corrA g_c + sum_{d,s} corrB g_nbr after the gradient map
+    phi -> G0 phi_c + sum_s Gs phi_nbr; both transposes gather at the cell and
+    scatter-add to the neighbours (bincount over the ELLPACK slots)."""
+    G0, Gs, corrA, corrB = terms
+    n = y.shape[0]
+    flat = nbr.reshape(-1)
+    # h = Cg^T y: (dim, n)
+    h = corrA * y
+    for d in range(corrB.shape[0]):
+        h[d] = h[d] + xp.bincount(flat, weights=(corrB[d] * y).reshape(-1), minlength=n)
+    # Grad^T h: (n,)
+    out = (G0 * h).sum(axis=0)
+    for d in range(Gs.shape[0]):
+        out = out + xp.bincount(flat, weights=(Gs[d] * h[d]).reshape(-1), minlength=n)
+    return out
+
+
 class MeshGroupOperator:
     """Within-group diffusion operator on a :class:`MeshGrid`, with the
     non-orthogonal correction applied implicitly.
@@ -867,6 +890,9 @@ class MeshGroupOperator:
     cell areas (sources are per unit volume). The correction is linear in the
     flux, so the operator is exact, but it is not symmetric on a non-orthogonal
     mesh (``symmetric`` False): use ``linear_solver="gmres"`` there.
+    ``symmetric_part`` is the TPFA operator alone (symmetric positive
+    definite): the monolithic step's energy-group preconditioner runs its
+    inner CG on it while the outer FGMRES applies the full operator.
     :class:`UnstructuredDiffusionSolver` lags the same correction into the
     source instead; both converge to the same discrete solution.
 
@@ -893,11 +919,28 @@ class MeshGroupOperator:
         self._noc = (None if noc is None
                      else tuple(xp.asarray(a.astype(dtype)) for a in noc))
         self.symmetric = self._noc is None
+        self.symmetric_part = self._tpfa
+        self.shape = tuple(grid.shape)
 
-    def apply(self, phi):
-        out = self._tpfa.apply(phi)
+    def apply(self, phi, out=None):
+        result = self._tpfa.apply(phi)
         if self._noc is not None:
-            out = out + _mesh_correction(self._noc, self._nbr, phi)
+            result = result + _mesh_correction(self._noc, self._nbr, phi)
+        if out is None:
+            return result
+        out[...] = result
+        return out
+
+    def apply_transpose(self, phi, out=None):
+        """A^T phi: the TPFA part is symmetric, the correction transposed
+        exactly (:func:`_mesh_correction_transpose`). The adjoint eigen solve
+        and the monolithic step's adjoint coarse correction use it."""
+        result = self._tpfa.apply(phi)
+        if self._noc is not None:
+            result = result + _mesh_correction_transpose(self._noc, self._nbr, phi, self.xp)
+        if out is None:
+            return result
+        out[...] = result
         return out
 
 
@@ -907,7 +950,8 @@ class MeshDiffusionEigenSolver(DiffusionEigenSolver):
     (``mix_material``, ``mix_weight``: linear cross sections, harmonic D),
     ``xs_update``, ``bcf`` (G, n_cells) boundary coefficients, and the initial
     state of :class:`garnet.transient.TransientSolver`. On a non-orthogonal
-    mesh pass ``linear_solver="gmres"``. The adjoint is not available there.
+    mesh pass ``linear_solver="gmres"``; the adjoint solves with the exact
+    transpose of the operator, correction included.
     For steady solves :class:`UnstructuredDiffusionSolver` is the faster path
     (lagged correction, CG); this class exists so the mesh can run transients.
     """
@@ -922,8 +966,12 @@ class MeshDiffusionEigenSolver(DiffusionEigenSolver):
                              "correction is not symmetric: use linear_solver='gmres'")
 
     def _linear_components(self, g, adjoint):
-        if adjoint and not self.ops[g].symmetric:
-            raise NotImplementedError("adjoint on a non-orthogonal mesh")
+        op = self.ops[g]
+        if adjoint and not op.symmetric:
+            if not hasattr(self, "_transpose_preconds"):
+                self._transpose_preconds = [neumann_preconditioner(
+                    o.apply_transpose, o.inv_diag, self._precond_degree) for o in self.ops]
+            return op.apply_transpose, self._transpose_preconds[g]
         return super()._linear_components(g, adjoint)
 
     def _build_operators(self, grid, diffusion, sigma_t, removal, bc):

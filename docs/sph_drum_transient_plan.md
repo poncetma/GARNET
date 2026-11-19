@@ -51,12 +51,15 @@ below) and must be small against the differences being judged.
 
 **Reference data.** k_SN(θ) and the shapes at the angles the manoeuvre passes:
 - available: the 49 angles 0°–180° (5° and 7.5° grids) plus 8 off-midpoint angles;
-- to add: references every 1° across each manoeuvre window, so that ρ(θ) and
-  the shapes are interpolated far more finely than the 5° SPH tables. About
-  13 min of GPU per angle at refine 32. The spacing actually needed follows
-  from the refine-32 smoothness study (`tools/reference_angle_ripple.py` on
-  the 5° grid, running): if refine-32 `k(θ)` is smooth at 5°, 2.5° windows
-  suffice.
+- **Decision (2026-11-19): no 1° windows.** Refine-32 `k(θ)` between the 5°
+  points deviates from linear interpolation by 7.3 pcm RMS (worst −20 pcm at
+  63.75°). A cubic spline does no better (8.0 pcm RMS), so the residual is
+  the reference's own mesh ripple, not curvature, and finer sampling would only
+  resolve that ripple. Shapes interpolate to 0.17 % pin RMS and 1.7 % worst
+  pin. The reference needs exact solves only where the drums hold or powers
+  are compared: 87.5° and 92.5° (job 255276) added to the 5° grid. Along the
+  ramps ρ(θ) is interpolated linearly between exact points, an uncertainty
+  of about 7 pcm, the reference's own.
 
 **Kinetics parameters.** `TriSNTransportSolver` has no adjoint, so there is no
 S_N importance for β_eff and Λ. Options, in order of preference:
@@ -101,15 +104,17 @@ S_N importance for β_eff and Λ. Options, in order of preference:
   initial eigen solve and of every step (raster and mesh). γ = 1 reproduces
   the plain transient exactly and a static γ holds the eigenstate to 1e-9
   (`tests/verification/test_mesh_transient.py`).
-- **Step settings on the HP-MR (measured 2026-11-19).** The default
-  fixed-point step (Anderson depth 5, no rebalance) stalls on the first step
+- **Step settings on the HP-MR (measured 2026-11-19).** Use
+  `step_solver="monolithic"`: 3.3 s per step on one CPU core for the ramp below,
+  with the inner CG of its preconditioner on the operator's symmetric part.
+  The default fixed-point step (Anderson depth 5, no rebalance) stalls on the first step
   (source change 9e-7, amplitude error 1e-4 after 200 sweeps): near
   criticality the source change understates the amplitude error by about
   1/(1 − k_prompt). Use the HP-MR benchmark settings
   (`hpmr_transient_bench`): `rebalance=True, anderson_depth=1,
   max_sweeps=4000, scatter_subsweeps=6, tol_step=1e-6`. A 90° → 92.5° ramp on
   `local:4:1` then converges in 21 sweeps per step, about 21 s per step on one
-  CPU core.
+  CPU core, six times the monolithic cost.
 - **Tabulated model (done 2026-11-19).** `SphDfTable` (`garnet.equivalence`):
   `state(θ)`, `problem_at(θ(t))`, `kinetics(base, θ0)`;
   `hpmr_sphdf_geometry` gives the HP-MR node geometry at any angle (the mesh
@@ -162,7 +167,7 @@ Amplitudes are chosen to stay below prompt critical.
 | 1 | Add `bcf` (time-dependent) to `TransientSolver`; tests: γ = 1 reproduces the plain transient, a static γ gives the eigen state. **Done**, plus transients on the drum-band mesh (`MeshGrid`) | 1 day |
 | 2 | `problem_at` for a tabulated SPH-DF model: interpolation in θ(t), v/μ speeds, form functions. **Done:** `SphDfTable`; refine-32 tables for `local:4:1` being generated | 1 day |
 | 3 | Kinetics parameters for the reference with the S_N adjoint. **Done:** `sn_effective_kinetics` (β_eff exact, Λ from P_L moments); to run: forward + adjoint refine-32 solves at θ0 of each case | 1 day |
-| 4 | S_N references in the windows of cases A–E (spacing from the refine-32 smoothness study; ~13 GPU-min per angle at refine 32); quasi-static S_N driver. **Driver done:** `adiabatic_point_kinetics` (exact on a homogeneous core) | 1 day |
+| 4 | S_N references at the hold and comparison angles (87.5°, 92.5° added to the refine-32 5° grid; no 1° windows, see above); quasi-static S_N driver. **Driver done:** `adiabatic_point_kinetics` (exact on a homogeneous core) | 1 day |
 | 5 | Quasi-static error itself: for the SPH model, compare the full diffusion transient with its own adiabatic/IQS solution (`quasistatic_transient`). This bounds what the quasi-static S_N reference misses. If it is not small for case B, add a short full `TransientSNSolver` window (isotropic or P2) | 1 day |
 | 6 | Run cases A–E, the comparisons and the attribution; write up in the audit report | 1–2 days |
 
@@ -173,10 +178,9 @@ Amplitudes are chosen to stay below prompt critical.
   transient's conditioning (case D).
 - **Kinetics data (closed 2026-11-19).** `hpmr_kinetics_11g()` reads the
   library's own 11-group speeds and six delayed families (β = 680 pcm).
-- **The SPH model's own adjoint on the mesh.** Step 5 projects the SPH model
-  onto its own adjoint; the mesh operator is non-symmetric on hanging-node
-  meshes and has no adjoint yet. Use raster:8 for step 5, or the 1/v
-  insertion and prompt-k for that model's Λ and β_eff.
+- **The SPH model's own adjoint on the mesh (closed 2026-11-19).**
+  `MeshDiffusionEigenSolver` solves the adjoint with the exact transpose
+  of the operator, so step 5 can project the SPH model on the mesh itself.
 - **Shape lag and S_N anisotropy.** If the quasi-static error (step 5) is
   comparable to the SPH error in the fast cases, the reference for those cases
   must be a full S_N transient. `TransientSNSolver` supports triangles; check

@@ -756,15 +756,15 @@ solver = TransientSolver(grid, table.problem_at(theta),
                          table.kinetics(hpmr_kinetics_11g(), 90.0),   # v/mu at theta0
                          group_operator=MeshGroupOperator,
                          eig_solver=MeshDiffusionEigenSolver, linear_solver="gmres")
-result = solver.solve(t_end=20.0, dt=0.05, tol_step=1e-6, rebalance=True,
-                      anderson_depth=1, max_sweeps=4000, scatter_subsweeps=6)
+result = solver.solve(t_end=20.0, dt=0.05, tol_step=1e-6, step_solver="monolithic")
 ```
 
-The step settings are those of `hpmr_transient_bench`. The default fixed-point
-step (Anderson, no rebalance) stalls on a near-critical core like the HP-MR.
+Monolithic steps are about six times faster than fixed-point steps here. The
+default fixed-point step (Anderson, no rebalance) stalls on a near-critical core
+like the HP-MR; if you use it, take the settings of `hpmr_transient_bench`.
 
 - **What `problem_at(t)` returns.** It may return a fifth element, `bcf` (G, *grid.shape), with the boundary coefficients (boundary discontinuity factors) at that time. `SphDfTable.problem_at` returns them with the materials and the absorber blend.
-- **GMRES on hanging-node meshes.** The mesh operator applies the non-orthogonal correction implicitly. On a mesh with hanging nodes it is not symmetric: use `linear_solver="gmres"` and the default fixed-point steps.
+- **GMRES on hanging-node meshes.** The mesh operator applies the non-orthogonal correction implicitly. On a mesh with hanging nodes it is not symmetric: use `linear_solver="gmres"`. Monolithic steps precondition with the operator's symmetric part.
 - **Kinetics.** `table.kinetics` freezes the SPH speeds v/μ at one angle.
 - **Quasi-static S_N reference.** `sn_effective_kinetics(forward_solver, forward, adjoint_solver, adjoint, kinetics)` gives β_eff and Λ of an S_N state, using an `adjoint=True` solve. `adiabatic_point_kinetics(k_of_angle, theta, parameters0, t_end, dt)` marches the amplitude with ρ(t) = 1 − k0/k(θ(t)).
 

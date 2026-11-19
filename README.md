@@ -7,13 +7,11 @@ results and older reports. The Python package is now `garnet`.
 
 The core solvers support:
 - Cartesian and cylindrical r-z grids, body-fitted triangular meshes, and
-  extruded triangular prisms; unstructured meshes for diffusion, including
-  transients on meshes refined locally around control drums.
+  extruded triangular prisms; unstructured meshes for diffusion.
 - Criticality and adjoint calculations with diffusion, SP1/3/5/7, and SDP1/2/3,
-  and discrete-ordinates (S_N) reference solutions on triangular meshes.
+  and 2D SN reference solutions on triangular meshes.
 - Neutron kinetics, coupled thermal transients, and quasi-static acceleration.
-- SPH correction, including boundary discontinuity factors and tables in
-  control-drum angle, and cross-section readers for Griffin and FEMFFUSION data.
+- SPH correction, including boundary discontinuity factors (hybrid SPH-DF), and cross-section readers for Griffin and FEMFFUSION data.
 
 ## Built for GPU
 
@@ -83,9 +81,9 @@ SPH data, moving control drums, and coupled calculations.
 - [Examples](examples/) and a [GPU walkthrough](notebooks/colab_coupled_transient_gpu_latest.ipynb).
 
 ## Verification and validation
-**GARNET** code is AI generated. For that reason, there is greater emphasis on qualification via verification and validation. Results of major V&V tests are examined with human eyes. 
+**GARNET** code is AI generated. For that reason, there is greater emphasis on V&V and regression testing. Results of major test cases are examined with human eyes. 
 
-More than 1,000 automated test cases cover analytic solutions, spatial and
+More than 1,500 tests cover analytic solutions, spatial and
 temporal convergence, conservation, and published reactor benchmarks. The
 [V&V report](docs/verification_validation.md) maps each core feature to its
 tests, states the acceptance criteria, and records dated CPU results.

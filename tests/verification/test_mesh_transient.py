@@ -14,7 +14,16 @@ and cells of two sizes). Checks:
   (TriGroupOperator) through an absorber step;
 * a static bcf keeps the eigenstate steady, on the mesh and on the raster;
 * bcf = 1 reproduces the transient without bcf exactly;
-* the reported power is the volume-weighted fission integral of the flux.
+* the reported power is the volume-weighted fission integral of the flux;
+* monolithic steps (FGMRES on the full operator, the energy-group
+  preconditioner's inner CG on the operator's symmetric part) equal the
+  fixed-point steps on the hanging-node mesh to 1e-10, where the same
+  monolithic run without the correction differs by 1.7e-3;
+* the operator's transpose is exact (<u, A v> = <A^T u, v> to round-off
+  where the operator's asymmetry is O(10)), the adjoint eigenvalue equals the
+  forward one (an adjoint with only the symmetric part misses by 285 pcm),
+  and monolithic steps with the adjoint coarse correction equal the
+  fixed-point steps.
 
 Broken on purpose (scratch scripts, 2026-11-19): without the non-orthogonal
 correction the eigenvalue misses by 279 pcm; with bcf dropped from the step
@@ -100,19 +109,39 @@ def test_broken_mesh_operator_without_the_correction_misses_k(meshes):
     assert abs(r.k_eff - ref.k_eff) > 1e-3                    # 279 pcm
 
 
-def test_non_orthogonal_mesh_rejects_cg_and_monolithic_steps(meshes):
+def test_non_orthogonal_mesh_rejects_cg(meshes):
     _, qs = meshes
     q = qs[1]
     grid = MeshGrid(q.mesh, q.alpha_boundary)
     with pytest.raises(ValueError, match="gmres"):
         MeshDiffusionEigenSolver(grid, q.materials, q.cell_material, mix_material=q.mix_material,
                                  mix_weight=q.mix_weight, device="cpu")
-    s = TransientSolver(grid, lambda t: (q.materials, q.cell_material, q.mix_material,
-                                         q.mix_weight), KIN,
-                        group_operator=MeshGroupOperator, eig_solver=MeshDiffusionEigenSolver,
-                        device="cpu", linear_solver="gmres")
-    with pytest.raises(ValueError, match="symmetric"):
-        s.solve(0.02, 0.02, step_solver="monolithic", steady_kwargs=STEADY)
+
+
+def _stepped(q, step_solver, correction=True):
+    grid = MeshGrid(q.mesh, q.alpha_boundary, nonorthogonal_correction=correction)
+    mats = list(q.materials)
+    pert = _absorber_step(mats)
+    bcf = _bcf(q.mesh.n_cells)
+    s = TransientSolver(grid, lambda t: (mats if t <= 0 else pert, q.cell_material,
+                                         q.mix_material, q.mix_weight, bcf),
+                        KIN, group_operator=MeshGroupOperator,
+                        eig_solver=MeshDiffusionEigenSolver, device="cpu",
+                        linear_solver="gmres")
+    return s.solve(0.1, 0.02, tol_step=1e-10, step_solver=step_solver, steady_kwargs=STEADY)
+
+
+def test_monolithic_steps_on_the_hanging_node_mesh_equal_the_fixed_point_steps(meshes):
+    _, qs = meshes
+    q = qs[1]
+    fixed = _stepped(q, "fixed-point")
+    mono = _stepped(q, "monolithic")
+    assert fixed.power[-1] < 0.75
+    np.testing.assert_allclose(mono.power, fixed.power, atol=1e-9)
+    # control: the correction matters at this resolution, so the comparison
+    # would see an outer solve that dropped it (1.7e-3)
+    no_correction = _stepped(q, "monolithic", correction=False)
+    assert np.abs(no_correction.power - fixed.power).max() > 1e-4
 
 
 def test_mesh_transient_equals_the_raster_transient(meshes):
@@ -189,3 +218,57 @@ def test_broken_power_without_volume_weights_misses_the_flux_integral(meshes, mo
     record = []
     r = _mesh_transient(q, t_end=0.04, on_step=lambda t, f, p: record.append((t, np.array(f), p)))
     assert np.abs(_flux_integral_ratio(q, record, r.k0) - 1.0).max() > 0.05      # 17 %
+
+
+def test_mesh_operator_transpose_is_exact(meshes):
+    _, qs = meshes
+    q = qs[1]
+    n = q.mesh.n_cells
+    rng = np.random.default_rng(0)
+    op = MeshGroupOperator(np, MeshGrid(q.mesh, q.alpha_boundary), rng.uniform(0.3, 1.5, n),
+                           rng.uniform(0.01, 0.1, n), bcf=rng.uniform(0.3, 2.5, n))
+    u, v = rng.standard_normal(n), rng.standard_normal(n)
+    assert abs(u @ op.apply(v) - op.apply(u) @ v) > 1.0               # really non-symmetric
+    assert u @ op.apply(v) == pytest.approx(op.apply_transpose(u) @ v, rel=1e-12)
+
+
+def _eigen(q, adjoint):
+    grid = MeshGrid(q.mesh, q.alpha_boundary)
+    return MeshDiffusionEigenSolver(grid, q.materials, q.cell_material,
+                                    mix_material=q.mix_material, mix_weight=q.mix_weight,
+                                    device="cpu", linear_solver="gmres",
+                                    bcf=_bcf(q.mesh.n_cells)).solve(**TIGHT, adjoint=adjoint)
+
+
+def test_mesh_adjoint_has_the_forward_eigenvalue(meshes):
+    _, qs = meshes
+    q = qs[1]
+    assert _eigen(q, True).k_eff == pytest.approx(_eigen(q, False).k_eff, abs=1e-9)
+
+
+def test_broken_mesh_adjoint_with_the_symmetric_part_only_misses_k(meshes, monkeypatch):
+    _, qs = meshes
+    q = qs[1]
+    k = _eigen(q, False).k_eff
+    monkeypatch.setattr(MeshGroupOperator, "apply_transpose",
+                        lambda self, phi, out=None: self.symmetric_part.apply(phi, out=out))
+    assert abs(_eigen(q, True).k_eff - k) > 1e-3                      # 285 pcm
+
+
+def test_monolithic_adjoint_coarse_correction_on_the_hanging_node_mesh(meshes):
+    _, qs = meshes
+    q = qs[1]
+    fixed = _stepped(q, "fixed-point")
+    grid = MeshGrid(q.mesh, q.alpha_boundary)
+    mats = list(q.materials)
+    pert = _absorber_step(mats)
+    bcf = _bcf(q.mesh.n_cells)
+    s = TransientSolver(grid, lambda t: (mats if t <= 0 else pert, q.cell_material,
+                                         q.mix_material, q.mix_weight, bcf),
+                        KIN, group_operator=MeshGroupOperator,
+                        eig_solver=MeshDiffusionEigenSolver, device="cpu",
+                        linear_solver="gmres")
+    r = s.solve(0.1, 0.02, tol_step=1e-10, step_solver="monolithic", steady_kwargs=STEADY,
+                multigroup_kwargs={"coarse_correction": True, "rtol": 1e-10})
+    assert r.adjoint_coarse_setups > 0
+    np.testing.assert_allclose(r.power, fixed.power, atol=1e-9)

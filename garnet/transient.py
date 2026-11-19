@@ -1323,10 +1323,10 @@ class TransientSolver:
 
         ops, preconds, fallback_preconds, setup_fallbacks = \
             self._step_operators(fields, time_diagonal, G)
-        if step_solver == "monolithic" and getattr(ops[0], "symmetric", True) is False:
-            raise ValueError("monolithic group preconditioning needs symmetric "
-                             "within-group operators; this geometry's are not "
-                             "(non-orthogonal mesh): use step_solver='fixed-point'")
+        if (step_solver == "monolithic" and getattr(ops[0], "symmetric", True) is False
+                and not hasattr(ops[0], "symmetric_part")):
+            raise ValueError("monolithic steps with non-symmetric group operators need "
+                             "their symmetric_part for the preconditioner")
         operator_rebuilds = 1
         time_coefficient_key = getattr(scheme, "coefficient_key", None)
         workspaces = (pcg_workspaces(ops, phi)

@@ -481,9 +481,19 @@ class EnergyGroupGaussSeidelPreconditioner:
         if (not np.isfinite(self.relaxation)
                 or not 0.0 < self.relaxation < 2.0):
             raise ValueError("energy-sweep relaxation must lie between 0 and 2")
+        # A non-symmetric group operator (the implicit non-orthogonal
+        # correction of a hanging-node mesh) offers its symmetric part: the
+        # inner CG of this preconditioner runs on it, while the outer
+        # flexible Krylov solve applies the full block operator.
+        self.inner_operators = tuple(getattr(op, "symmetric_part", op)
+                                     for op in block.operators)
+        if any(getattr(op, "symmetric", True) is False and not hasattr(op, "symmetric_part")
+               for op in block.operators):
+            raise ValueError("a non-symmetric group operator needs a symmetric_part "
+                             "for the energy-group preconditioner")
         self.group_preconditioners = tuple(neumann_preconditioner(
             op.apply, op.inv_diag, int(precond_degree))
-            for op in block.operators)
+            for op in self.inner_operators)
         templates = [self.xp.zeros(block.cell_shape,
                                    dtype=block.operators[0].inv_diag.dtype)
                      for _ in range(block.groups)]
@@ -526,7 +536,7 @@ class EnergyGroupGaussSeidelPreconditioner:
             group_order = (range(self.block.groups - 1, -1, -1)
                            if reverse else range(self.block.groups))
             for g in group_order:
-                op = self.block.operators[g]
+                op = self.inner_operators[g]
                 q = residual[g].copy()
                 if self.block._group_batch is not None:
                     if self.block.rhs_weight is None:
