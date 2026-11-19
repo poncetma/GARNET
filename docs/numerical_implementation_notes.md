@@ -424,6 +424,74 @@ wedge is the disk minus the opposite wedge, and each piece is intersected
 with the outer and inner circles. The former barycentric sampling was biased
 by −17% to +4% per cell. HP-MR drum worths moved by +6 to +7 pcm.
 
+### Adjoint triangular S_N (2026-11-18)
+
+`TriSNTransportSolver(..., adjoint=True)` solves the adjoint k-eigenproblem.
+With psi~(r, O) = psi+(r, -O), the adjoint equation is a forward-type equation
+with three changes:
+- every group-to-group transfer is transposed, in every Legendre order;
+- the fission spectrum and production are swapped (spectrum nu*Sigma_f,
+  production chi in fissile cells);
+- the total and within-group terms are unchanged.
+
+The kernel depends only on O.O', and the symmetric quadrature maps vacuum
+boundaries to vacuum boundaries. The transform acts on the solver's arrays
+before the operators are factored, so the sweeps, DSA, CMFD and both engines
+are shared with the forward solve.
+
+For the step scheme this is the exact discrete adjoint. The streaming
+matrix of direction O, transposed, is that of -O, since a closed cell's
+outgoing and incoming face terms are equal. The scattering moments are
+symmetric in the quadrature-weighted inner product.
+
+The verification (`tests/verification/test_tri_sn_adjoint.py`) has four parts:
+- **Three groups with P2 moments.** On a three-group, P2, upscattering core
+  with a volume-mixed absorber, k_adj equals k_fwd to 1e-7 pcm for step and
+  SCB alike.
+- **Negative controls.** Omitting the transposition or the swap misses by
+  14 000 pcm; transposing only P0 misses by 312 pcm.
+- **One group.** The problem is self-adjoint: the adjoint scalar flux equals
+  the forward one to 1e-15.
+- **Perturbation reciprocity.** First-order perturbation estimates with the
+  adjoint reproduce the direct change of 1/k to second order (the error falls
+  10x per 10x smaller perturbation) for transfer, upscatter, within-group and
+  nu*Sigma_f perturbations.
+
+`region_partial_currents` refuses an adjoint solver, since its angular flux is
+reversed.
+
+### SPH-DF zones and node models for drum cores (2026-11-18)
+
+`garnet.equivalence` and `garnet.drum_mesh` hold the drum-core equivalence
+method of the SPH audit (report §10.6). It was ported from the HP-MR study
+tools to `HexLattice` and to any raster or triangular mesh.
+
+- **Gauge.** SPH factors scale D and every cross section of a zone, and a
+  boundary factor scales the Robin albedo of its zone's vacuum faces. The
+  triangular face term `8 D a / (h (h a + 2√3 D))` and the unstructured term
+  `a D A / (d a + D)` are both homogeneous of degree one in (D, a). So
+  rescaling all SPH and boundary factors of a group together is a gauge, and
+  the flux-volume normalization only fixes it. The mesh solver's non-orthogonal
+  gradient rows are of degree zero in (D, a) and do not break this.
+- **Feasibility.** A boundary factor going to infinity makes a face zero-flux.
+  A uniform SPH factor cannot raise that limit relative to the zone's average
+  flux. A boundary zone therefore admits a solution only if its zero-flux
+  leakage per unit flux exceeds the reference's.
+  - That fails for a whole boundary hex (which is why the outer layer is split
+    off) and for any boundary zone holding part of the arc (which is why the
+    drums' outer layers carry no absorber).
+  - The upper bound on log γ (+8) flags it. The lower bound is −30: γ → 0 is a
+    reflective face, and an arc-shadowed zone legitimately needs 1e-6.
+- **Transfer by containment.** Zones are defined on node cells. Each reference
+  cell inherits the zone of the node cell containing its centroid (`locate`:
+  k-d tree candidates, then a bounding-box search for large coarse cells). Its
+  absorber fraction inherits the node cell's absorber zone. This replaces the
+  former two-step raster transfer, reproduces it cell for cell on HP-MR, and
+  works for drum-band meshes.
+- **Outer layer of a mesh.** The cells with a vertex on the boundary. The
+  boundary vertices are the end points of the boundary faces, so hanging nodes
+  never mark an interior cell.
+
 ### Exact pin-resolved assembly fractions
 
 `benchmarks.hpmr_assembly.build_hpmr_assembly2d` gives every triangle within

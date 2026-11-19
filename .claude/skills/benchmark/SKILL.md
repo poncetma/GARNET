@@ -5,6 +5,9 @@ description: Benchmarking protocol for garnet solver comparisons (solver variant
 
 # garnet benchmarking protocol
 
+A comparison script is a test: before trusting an agreement, break the
+compared method on purpose and confirm the comparison shows it (verification-tests skill).
+
 Core rule: **never report speed without accuracy, and never report accuracy
 without cost.** A solver comparison that shows only one axis is not a result;
 every table row carries both.

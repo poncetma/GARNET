@@ -1805,6 +1805,63 @@ class HexLattice:
             kinetics=self._kinetics, raster=raster, name=name,
             geometry_line=geo)
 
+    def _material_ids(self):
+        """(materials with the void first, {id(material): index})."""
+        uniq, id_of = [], {}
+        for mat in list(self._sites.values()) + [d["absorber"] for d in self._drums.values()]:
+            if id(mat) not in id_of:
+                id_of[id(mat)] = len(uniq) + 1
+                uniq.append(mat)
+        groups = uniq[0].n_groups
+        void = Material(name="void", diffusion=[1.0] * groups, sigma_a=[0.0] * groups,
+                        nu_sigma_f=[0.0] * groups)
+        return [void] + uniq, id_of
+
+    def drum_specs(self) -> list:
+        """One dict per control drum, for :func:`garnet.drum_mesh.refine_drum_band`
+        and :mod:`garnet.equivalence`: ``site``, ``centre`` (x, y) cm,
+        ``inner``/``outer`` absorber radii, ``arc_az`` (direction of the arc
+        centre, rad, at the drum's current angle), ``arc_half`` (rad) and
+        ``absorber_id`` (index in the built model's material list)."""
+        _, id_of = self._material_ids()
+        out = []
+        for rc, dm in self._drums.items():
+            x, y = hex_site_xy(rc[0], rc[1], self.pitch)
+            out.append(dict(site=rc, centre=(x, y), inner=dm["inner"], outer=dm["outer"],
+                            arc_half=dm["arc_half"],
+                            arc_az=math.atan2(y, x) + math.radians(180.0 + dm["angle_deg"]),
+                            absorber_id=id_of[id(dm["absorber"])]))
+        return out
+
+    def build_mesh(self, levels: int = 1, band_margin: float = 1.5,
+                   absorber: str = "polar"):
+        """The 2-D lattice on an unstructured mesh with the drum band refined.
+
+        The raster of :meth:`build` everywhere, except that every cell whose
+        centroid lies within ``band_margin`` of the band a drum's absorber arc
+        sweeps is split into ``4**levels`` sub-triangles, for all rotations
+        (:func:`garnet.drum_mesh.refine_drum_band`): the drums are resolved at
+        ``refine * 2**levels`` at a fraction of the cells a uniform mesh needs.
+        The arc is volume-mixed at its exact area fraction (``absorber=
+        "polar"``) or painted by centroid (``"centroid"``). Returns a
+        :class:`garnet.drum_mesh.TriMeshProblem` for
+        :class:`garnet.mesh.UnstructuredDiffusionSolver`; the boundary is
+        vacuum. 2-D only, and the lattice needs at least one drum.
+        """
+        from .drum_mesh import refine_drum_band
+        if self._height is not None:
+            raise ValueError("build_mesh is 2-D only; the lattice is extruded")
+        if not self._drums:
+            raise ValueError("build_mesh refines the drum band; place a drum with set_drum()")
+        if self._bc != "vacuum":
+            raise ValueError("build_mesh supports the vacuum lattice boundary only")
+        materials, id_of = self._material_ids()
+        site_material = {rc: id_of[id(mat)] for rc, mat in self._sites.items()}
+        raster = rasterize_hex_sites(site_material, self.pitch, self.refine)
+        return refine_drum_band(raster, materials, self.drum_specs(), levels=levels,
+                                band_margin=band_margin, absorber=absorber,
+                                refine=self.refine)
+
     def run(self, method: str = "diffusion", device: str = "auto", adjoint: bool = False,
             tol_k: float = 1e-6, tol_source: float = 1e-5, samples: int = 8,
             **solve_kw) -> ReactorResult:

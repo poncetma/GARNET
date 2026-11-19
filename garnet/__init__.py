@@ -48,6 +48,9 @@ from .hybrid_tri_sn import HybridTriSNDiffusionSolver
 from .ldfe import ldfe_quadrature_2d, ldfe_sphere, mirror_maps
 from .sn import SNResult, SNTransportSolver, quadrature_2d
 from .tri_sn import TriSNTransportSolver
+from .drum_mesh import TriMeshProblem, refine_drum_band
+from .equivalence import (EquivalenceZones, NodeCells, SphDfNode, drum_core_zones,
+                          inherit_zones)
 from .sph import (SphResult, apply_sph_factors, flux_weighted_homogenize,
                   region_average, sph_correct, sph_correct_monolithic,
                   sph_bcf_correct, sph_get_correct, sph_kinetics)
@@ -169,6 +172,13 @@ __all__ = [
     "sph_correct_monolithic",
     "sph_get_correct",
     "sph_bcf_correct",
+    "EquivalenceZones",
+    "NodeCells",
+    "SphDfNode",
+    "TriMeshProblem",
+    "drum_core_zones",
+    "inherit_zones",
+    "refine_drum_band",
     "SphResult",
     "SNTransportSolver",
     "TriSNTransportSolver",

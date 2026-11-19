@@ -69,7 +69,10 @@ REFINE, METHOD = 16, "sn-p2:4:16"
 # SPH_TEST_STEPS: the reference angles, as the union of the multiples of each step
 # in [0, 180] (default 7.5: the 25-angle set; "5,7.5" adds the 5-degree set)
 STEPS = [float(s) for s in os.environ.get("SPH_TEST_STEPS", "7.5").split(",")]
-GRID = np.unique(np.round(np.concatenate([np.arange(0.0, 180.0 + 1e-9, s) for s in STEPS]), 6))
+# SPH_TEST_EXTRA: further reference angles, e.g. off the table midpoints
+EXTRA = [float(a) for a in os.environ.get("SPH_TEST_EXTRA", "").split(",") if a.strip()]
+GRID = np.unique(np.round(np.concatenate(
+    [np.arange(0.0, 180.0 + 1e-9, s) for s in STEPS] + [np.array(EXTRA)]), 6))
 TOL = 1e-7
 # SPH_VERBOSE=1 prints every SPH-DF iteration; SPH_MAXITER caps the coarse solves
 VERBOSE = os.environ.get("SPH_VERBOSE", "") not in ("", "0")
@@ -133,8 +136,8 @@ cache = rest[2] if len(rest) > 2 and rest[2] else DEFAULT_CACHE
 tables = (rest[3] if len(rest) > 3 and rest[3] else
           os.path.join(cache, "sphdf_tables" + (f"_sec{SECTORS}" if SECTORS else "")
                        + ("o" if OUTER else "") + ("" if DRUM_OUTER else "u")
-                       + ("b" if OUTER_BE else "")
-                       + ("a" if ALIGNED else "")))
+                       + ("b" if OUTER_BE else "") + ("a" if ALIGNED else "")
+                       + ("" if spec == "raster:8" else "_" + spec.replace(":", ""))))
 spacings = ([float(s) for s in rest[4].split(",")] if len(rest) > 4 and rest[4]
             else [15.0, 30.0, 45.0, 90.0])
 PINS = hpmr_pin_layout()

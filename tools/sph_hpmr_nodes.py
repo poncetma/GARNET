@@ -62,9 +62,11 @@ def node_model(spec: str, angle: float, device: str = "auto", pin_xy=None,
                pin_radius=None, per_hex: bool = False, zones_hook=None):
     """dict(solve, solve_full, solve_bcf, W, zones, n_cells) for one drum angle.
 
-    ``solve_bcf`` (raster and smeared nodes only; None for the unstructured
-    local mesh, whose solver has no boundary coefficient) takes boundary
-    discontinuity factors for :func:`garnet.sph.sph_bcf_correct`."""
+    ``solve_bcf(materials, gamma, boundary_regions)`` and ``solve_bcf_full``
+    take boundary discontinuity factors for :func:`garnet.sph.sph_bcf_correct`,
+    on every node kind (the drum-band mesh through
+    :class:`garnet.equivalence.SphDfNode`). ``zones_hook(zones, problem)``
+    rezones the node (e.g. :func:`sector_zoning_hooks`)."""
     kind, *rest = spec.split(":")
     last = {"state": None, "k": 1.0}          # warm start for the next solve
     if kind in ("raster", "smeared"):
@@ -128,8 +130,26 @@ def node_model(spec: str, angle: float, device: str = "auto", pin_xy=None,
         q = hpmr_locally_refined_problem(refine=r, drum_angle_deg=angle,
                                          levels=levels, absorber=mode)
         z = hpmr_mesh_zones(q, per_hex=per_hex)
+        if zones_hook is not None:
+            z = zones_hook(z, q)
         mix = (dict(mix_material=z.mix_region_map, mix_weight=q.mix_weight)
                if z.mix_region_map is not None else {})
+        sph_nodes = {}
+
+        def _sph_node(boundary_regions):
+            from garnet.equivalence import SphDfNode
+            key = tuple(int(b) for b in boundary_regions)
+            if key not in sph_nodes:
+                sph_nodes[key] = SphDfNode.mesh(z, list(key), q, device=device, tol=TIGHT)
+            return sph_nodes[key]
+
+        def solve_bcf_full(materials, gamma, boundary_regions):
+            """Mesh node solve with boundary discontinuity factors: (cell flux,
+            k, boundary leakage (B, G)); garnet.equivalence.SphDfNode."""
+            return _sph_node(boundary_regions).solve_full(materials, gamma)
+
+        def solve_bcf(materials, gamma, boundary_regions):
+            return _sph_node(boundary_regions)(materials, gamma)
 
         def solve_full(materials):
             mats, cells = q.solver_materials(materials, z.region_map, z.mix_region_map)
@@ -325,168 +345,47 @@ def _replace_zones(zones, region, mix, names, material, fuel, site):
                    site=tuple(site))
 
 
-def drum_ring_sectors(zones, problem, n_sectors=8, r_inner=10.25, outer_sectors=False,
-                      aligned=False, outer_arc_to_sector=False):
-    """Split every merged per-hex drum zone ("drum(R, C)", from
-    ``hpmr_assembly_zones(merge_drum=True, per_hex=True)``) into a core zone
-    (node-cell centroids within ``r_inner`` of the drum centre) and
-    ``n_sectors`` ring sectors (the rest of the drum hex). Sector k spans
-    outward azimuth + (k - 1/2, k + 1/2) * 360/n, so sector 0 faces away from
-    the core and sector n/2 faces it. ``aligned=True`` turns them by half a
-    sector, to outward azimuth + (k, k + 1) * 360/n: the sector boundaries then
-    lie on the outward line and every 360/n from it, and the edges of a 90-deg
-    arc (centred on the core-facing line at drum angle 0) cross them at drum
-    angles that are multiples of 360/n -- on the table points for n = 8 and
-    15- or 45-deg tables -- so a sector's absorber content has its kinks there
-    and not between table points.
-
-    ``outer_arc_to_sector=True`` keeps each drum's outer layer one zone of Be
-    only: the absorber fraction of every outer-layer cell (its mix component)
-    goes to the ring sector at the cell's azimuth. No zone with a vacuum face
-    then holds B4C. (A boundary zone that holds part of the arc is smeared
-    uniformly, so it cannot reproduce where the reference leaks, and SPH-DF
-    has no solution at some drum angles; tools/probe_sph_drum_zonings.py.)
-
-    ``outer_sectors=True`` splits each drum's outer boundary layer ("drum(R, C):outer",
-    from :func:`split_boundary_layer`) into the same sectors as well,
-    "drum(R, C):outer:s<k>", keeping only the sectors that hold node cells (the
-    first one reuses the outer zone's number). A single outer zone smears the
-    arc's share of the layer over the whole boundary of the drum hex; with the
-    arc facing out (165-180 deg) the coarse model then cannot leak what the
-    reference does, at any boundary factor."""
-    from garnet.benchmarks.hpmr import PITCH
-    from garnet.hexraster import hex_site_xy
-    from garnet.pin_power import tri_cell_vertices
-    cen = tri_cell_vertices(problem.raster).mean(axis=-2)        # (nr, nc, 2, 2)
-    region = zones.region_map
-    new = region.copy()
-    names, material = list(zones.names), list(zones.material)
-    fuel, site = list(zones.fuel), list(zones.site)
-    dtheta = 2.0 * np.pi / n_sectors
-    arc_cells = []                       # (outer zone, its cells, sector of each cell)
-    first_sector = {}                    # drum site -> zone number of its sector 0
-    for d, n in enumerate(zones.names):
-        if not n.startswith("drum("):
-            continue
-        cx, cy = hex_site_xy(*zones.site[d], PITCH)
-        out_az = np.arctan2(cy, cx)
-        cells = region == d
-        dx, dy = cen[..., 0] - cx, cen[..., 1] - cy
-        r = np.hypot(dx, dy)
-        shift = 0.0 if aligned else dtheta / 2.0
-        k = np.floor(np.mod(np.arctan2(dy, dx) - out_az + shift, 2.0 * np.pi)
-                     / dtheta).astype(int) % n_sectors
-        if n.endswith(":outer"):
-            if outer_arc_to_sector:
-                arc_cells.append((d, cells, k))
-            if outer_sectors:
-                held = sorted(set(k[cells].tolist()))
-                names[d] = f"{n}:s{held[0]}"
-                for s in held[1:]:
-                    new[cells & (k == s)] = len(names)
-                    names.append(f"{n}:s{s}")
-                    material.append(zones.material[d])
-                    fuel.append(False)
-                    site.append(zones.site[d])
-            continue
-        names[d] = f"{n}:core"
-        base = len(names)
-        first_sector[tuple(zones.site[d])] = base
-        for s in range(n_sectors):
-            names.append(f"{n}:s{s}")
-            material.append(zones.material[d])
-            fuel.append(False)
-            site.append(zones.site[d])
-        ring = cells & (r >= r_inner)
-        new[ring] = base + k[ring]
-    mix = zones.mix_region_map
-    if mix is not None:
-        mix = np.where((mix == region) & (new != region), new, mix)
-        for o, cells, k in arc_cells:
-            move = cells & (mix == o)
-            mix = np.where(move, first_sector[tuple(zones.site[o])] + k, mix)
-    return _replace_zones(zones, new, mix, names, material, fuel, site)
-
-
-def transfer_zones(zones, problem, node_problem, node_old, node_zones, node_old_mix=None):
-    """Carry a node-raster rezoning to the zones of a nested (finer) raster.
-
-    ``node_old`` is the node region map before the rezoning and ``node_zones``
-    the rezoned node zones; ``zones`` the fine raster's zones before it (same
-    numbering as ``node_old``). Every fine cell whose node parent was rezoned
-    takes the parent's new zone; with ``node_old_mix`` (the node mix map
-    before the rezoning) the mix component is carried the same way."""
-    parent = locate_parent_cells(problem.raster, node_problem.raster)
-    if np.any(parent < 0):
-        raise ValueError("the reference raster does not nest in the node raster")
-    old_p = np.asarray(node_old).reshape(-1)[parent].reshape(zones.region_map.shape)
-    new_p = np.asarray(node_zones.region_map).reshape(-1)[parent].reshape(zones.region_map.shape)
-    region = zones.region_map
-    changed = new_p != old_p
-    if np.any(changed & (region != old_p)):
-        raise ValueError("fine and node zonings disagree on rezoned cells")
-    new = np.where(changed, new_p, region)
-    mix = zones.mix_region_map
-    if mix is not None:
-        mix = np.where((mix == region) & changed, new, mix)
-        if node_old_mix is not None and node_zones.mix_region_map is not None:
-            old_m = np.asarray(node_old_mix).reshape(-1)[parent].reshape(region.shape)
-            new_m = np.asarray(node_zones.mix_region_map).reshape(-1)[parent].reshape(region.shape)
-            moved = (new_m != old_m) & ~changed
-            mix = np.where(moved & (zones.mix_region_map == old_m), new_m, mix)
-    return _replace_zones(zones, new, mix, node_zones.names, node_zones.material,
-                          node_zones.fuel, node_zones.site)
-
-
 def sector_zoning_hooks(n_sectors=8, r_inner=10.25, outer_sectors=False, aligned=False,
                         drum_outer=True, outer_arc_to_sector=False):
-    """(node hook, reference hook, state) for node_model / pin_reference:
-    per-hex merged drums -> inner/outer split of every hex on the vacuum
-    boundary -> each drum's inner part into a core and ring sectors (and with
-    ``outer_sectors`` its outer layer into sectors too), identical on node and
-    reference. ``state["outer_of"]`` maps every boundary hex's zone (the
-    per-hex numbering: Be reflector 2-13, drums 14-25) to its outer zone, so
-    without ``outer_sectors`` the per-hex reference boundary currents apply unchanged;
-    with it use :func:`boundary_cell_currents`. ``state`` also keeps the node
-    and reference problems ("q", "p"). ``drum_outer=False`` leaves the drum
-    hexes unsplit: their ring sectors reach the vacuum boundary and carry the
-    boundary factors themselves."""
-    from garnet.benchmarks.hpmr import hpmr_assembly_zones
+    """(node hook, reference hook, state) for node_model / pin_reference: the
+    drum sector zonings of :func:`garnet.benchmarks.hpmr.hpmr_drum_sector_zones`
+    (garnet.equivalence) on the node model, raster or drum-band mesh, carried
+    to the nested reference raster by containment (``inherit_zones``).
+
+    The baseline is ``aligned=True, outer_arc_to_sector=True``. ``state`` keeps
+    the node and reference problems ("q", "p"), the node cells ("cells"), the
+    boundary zones ("boundary") and ``outer_of``: {per-hex parent zone (Be
+    reflector 2-13, drums 14-25): its outer zone}, so the per-hex reference
+    boundary currents apply unchanged when no boundary zone is split further.
+    """
+    from garnet.benchmarks.hpmr import DRUM_ABSORBER, hpmr_drum_sector_zones
+    from garnet.equivalence import inherit_zones
+    from garnet.pin_power import tri_cell_centroids
     state = {}
 
     def node_hook(_z, q):
-        zm = hpmr_assembly_zones(q, merge_drum=True, per_hex=True)
-        zsplit, outer, outer_of = split_boundary_layer(zm, q, drums=drum_outer)
-        zs = drum_ring_sectors(zsplit, q, n_sectors, r_inner, outer_sectors=outer_sectors,
-                               aligned=aligned, outer_arc_to_sector=outer_arc_to_sector)
-        state.update(q=q, outer=outer, outer_of=outer_of, node_split=zsplit.region_map,
-                     node_split_mix=zsplit.mix_region_map, node_sectors=zs)
+        zs, cells, bz, outer_of = hpmr_drum_sector_zones(
+            q, n_sectors, r_inner, aligned, outer_sectors=outer_sectors,
+            outer_arc_to_sector=outer_arc_to_sector, drum_outer=drum_outer)
+        state.update(q=q, cells=cells, outer_of=outer_of, boundary=bz, node_zones=zs)
         return zs
 
     def ref_hook(_z, p):
         state["p"] = p
-        zm = hpmr_assembly_zones(p, merge_drum=True, per_hex=True)
-        zsplit = transfer_boundary_layer(zm, p, state["q"], state["outer"], state["outer_of"])
-        return transfer_zones(zsplit, p, state["q"], state["node_split"], state["node_sectors"],
-                              state["node_split_mix"])
+        return inherit_zones(state["node_zones"], state["cells"], tri_cell_centroids(p.raster),
+                             np.asarray(p.active).shape, p.active, p.mix_material,
+                             absorber_ids=[DRUM_ABSORBER])
 
     return node_hook, ref_hook, state
 
 
 def exposed_cells(problem):
-    """(nr, nc, 2) mask of the active cells with at least one vacuum edge."""
-    from garnet.tri_sn import _EDGES
-    act = np.asarray(problem.active, bool)
-    nr, nc = act.shape[:2]
-    I, J = np.meshgrid(np.arange(nr), np.arange(nc), indexing="ij")
-    out = np.zeros_like(act)
-    for t, di, dj, tn, _ in _EDGES:
-        ii, jj = I + di, J + dj
-        inside = (ii >= 0) & (ii < nr) & (jj >= 0) & (jj < nc)
-        nbr = np.zeros((nr, nc), bool)
-        nbr[inside] = act[ii[inside], jj[inside], tn]
-        out[:, :, t] |= act[:, :, t] & ~nbr
-    return out
+    """Mask of the active cells with a vacuum edge, in the problem's cell shape
+    (raster (nr, nc, 2) or drum-band mesh (n_cells,))."""
+    from garnet.equivalence import NodeCells
+    cells = (NodeCells.from_mesh(problem.mesh) if hasattr(problem, "mesh")
+             else NodeCells.from_raster(problem.raster, problem.active))
+    return cells.exposed.reshape(cells.shape)
 
 
 def boundary_cell_currents(refine, angle, method, device, cache, node_problem, ref_raster,
@@ -507,10 +406,17 @@ def boundary_cell_currents(refine, angle, method, device, cache, node_problem, r
     cells = np.flatnonzero(exp)
     ids = np.zeros(exp.size, int)
     ids[cells] = np.arange(1, cells.size + 1)
-    parent = locate_parent_cells(ref_raster, node_problem.raster)
-    if np.any(parent < 0):
-        raise ValueError("the reference raster does not nest in the node raster")
-    fine = ids[parent].reshape(np.asarray(ref_raster.material_map).shape)
+    from garnet.equivalence import NodeCells, locate
+    from garnet.pin_power import tri_cell_centroids
+    node_cells = (NodeCells.from_mesh(node_problem.mesh) if hasattr(node_problem, "mesh")
+                  else NodeCells.from_raster(node_problem.raster, node_problem.active))
+    act = (np.asarray(ref_raster.material_map) > 0).reshape(-1)
+    parent = np.full(act.size, -1)
+    parent[act] = locate(tri_cell_centroids(ref_raster).reshape(-1, 2)[act], node_cells)
+    if np.any(act & (parent < 0)):
+        raise ValueError("the reference raster does not nest in the node cells")
+    fine = np.where(parent >= 0, ids[np.maximum(parent, 0)], 0).reshape(
+        np.asarray(ref_raster.material_map).shape)
     cur = load_or_solve_currents(refine, angle, method, device, cache, region_map=fine, tag=tag)
     stray = [b for b in cur["boundaries"] if b == 0 and np.any(cur["boundaries"][b])]
     if stray:

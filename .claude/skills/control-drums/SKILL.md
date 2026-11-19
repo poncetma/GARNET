@@ -30,6 +30,7 @@ then exact on any mesh, and the blend changes continuously as the drum turns.
 |---|---|
 | any hex core | `HexLattice.set_drum(rc, body, absorber, inner_radius, outer_radius, arc_deg, angle_deg)` (always volume-mixed) |
 | HP-MR raster | `build_hpmr2d(..., absorber="polar")`, `build_hpmr3d(..., absorber="polar")` |
+| any hex core, drum band refined | `HexLattice.build_mesh(levels, absorber="polar")` (`garnet.drum_mesh.refine_drum_band`) |
 | HP-MR, drums locally refined | `hpmr_locally_refined_problem(..., absorber="polar")` |
 
 The alternatives cost accuracy that tables cannot recover:
@@ -79,11 +80,14 @@ Read it as follows:
 - A coarser base does not compensate: refine 3 with the band x4 (6,210 cells)
   gave 48 pcm.
 
-The local refinement and the assembly zone map are written for HP-MR (its
-site lists and drum geometry) and in 2-D. For another drum core, port them to
-`HexLattice` first, or use a uniform `refine` that meets the cell size.
+For any `HexLattice` core, `build_mesh(levels=...)` does the same (2-D,
+vacuum boundary; `levels=0` reproduces the raster exactly), and
+`garnet.equivalence.drum_core_zones` gives its equivalence zones (§4).
 
 ## 3. Check every drum model before quoting it
+
+When you write any of these checks as a test, break it on purpose first and
+confirm it fails (see the verification-tests skill).
 
 1. **Absorber area**: the sum of `mix_weight * cell area` equals
    `n_drums * (arc_deg/2 in radians) * (R_out**2 - R_in**2)` to round-off.
@@ -118,7 +122,11 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
    twice in P0, and GARNET's removal then loses the gain unless the
    absorption is made net (`net_absorption`; on HP-MR the drum worth moves by
    about 430 pcm at refine 4).
-2. **Zones** (baseline since 2026-11-18): `sector_zoning_hooks(8, aligned=True, outer_arc_to_sector=True)` in `tools/sph_hpmr_nodes.py`; in `tools/assess_sph_df_tables.py` set `SPH_DRUM_SECTORS=8 SPH_OUTER_BE=1 SPH_SECTOR_ALIGN=1`.
+2. **Zones** (baseline since 2026-11-18), in `garnet.equivalence`:
+   - **Any `HexLattice` core:** `drum_core_zones(lattice, model, n_sectors=8)` on its `build()` raster or `build_mesh()` drum-band mesh. It returns the zones, the node cells, the boundary zones and the drum specs.
+   - **HP-MR:** `garnet.benchmarks.hpmr.hpmr_drum_sector_zones`; in the study tools, `sector_zoning_hooks(8, aligned=True, outer_arc_to_sector=True)`, or `SPH_DRUM_SECTORS=8 SPH_OUTER_BE=1 SPH_SECTOR_ALIGN=1` for `tools/assess_sph_df_tables.py`.
+   - **Reference zones:** `inherit_zones` carries the node zones to a nested reference by containment; it is exact when the reference refines the node mesh by an integer factor.
+   - **Node solve:** `SphDfNode.raster` or `SphDfNode.mesh` is the solve that `sph_bcf_correct` iterates.
    - **Fuel and Be hexes:** one zone per fuel assembly and per Be reflector hex.
    - **Inner/outer split:** every hex on the vacuum boundary is split into an inner and an outer zone (the first row of node cells).
    - **Drum hexes, inside:** each drum is one merged hex whose inner part becomes a core (within 10.25 cm of the drum centre) and 8 ring sectors fixed in space. The sector boundaries lie on the drum's outward line and every 45° from it, so the arc edges cross them at drum angles that are multiples of 45°. The arc moves through the sectors, so their absorber content changes continuously with angle.
@@ -141,14 +149,26 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
    - **Reference currents** must come from the S_N problem of the method (`load_or_solve_currents` builds it). Never use the problem returned by `pin_reference`, which carries transport-corrected homogenization data.
    - **Do not use flux-volume SPH alone** with a vacuum boundary: +400 to +770 pcm.
    - **Avoid fixed-k SPH** (`normalization="none"`): it reproduces `k` by distorting the fuel factors through the fuel–reflector interface (0.55–0.75; 0.06–20 with smeared drums).
-4. **Node model**: drums resolved and volume-mixed as in §1–2. Factors on
-   coarse drum cells absorb the drum discretization error, which then does
-   not interpolate in angle.
+4. **Node model**: drums resolved and volume-mixed as in §1–2, on a uniform
+   raster (HP-MR: refine 8, 1.9 cm) or a drum-band mesh (`build_mesh`).
+   Factors on coarse drum cells absorb the drum discretization error, which
+   then does not interpolate in angle.
+   - **With SPH-DF, a finer drum band adds no accuracy.** On HP-MR with 5° tables,
+     `local:4:1:polar` (7,116 cells, band 1.9 cm) and `local:4:2:polar` (14,460,
+     band 0.97 cm) match raster:8 (21,120 cells) to 5.1 pcm and 0.02 % pin RMS at
+     all 20 test angles: the interpolation in angle dominates.
+   - **Default node with SPH-DF: the locally refined drum band**
+     (`build_mesh(levels=1)` on a refine-4 core, HP-MR `local:4:1:polar`).
+     Its benefit is performance: the same accuracy at a third of the cells.
+     Use it by default, above all for transients and 3-D cores. Keep a uniform
+     raster only as a cross-check.
 5. **Tables in drum angle**: zone cross sections, SPH factors (`apply_sph_factors`), boundary factors and per-group form functions (`pin_footprints` or `mesh_pin_footprints`, `group_form_functions`, `reconstruct_group_form_functions`), linearly interpolated. Tool: `tools/assess_sph_df_tables.py` (`generate`, `evaluate`, `attribute`).
    - **Use a 5° table with the sector zoning.** With the 1.9 cm node mesh and SPH-DF on the HP-MR, interpolating to the midpoints between table points kept `k` within 38 pcm, assemblies within 0.28 %, pin RMS 0.22 % and the worst pin within 2.0 %.
    - **Coarser tables lose accuracy quickly:** 10° gives 121 pcm and 1.0 % pin RMS, 15° gives 171 pcm and 1.2 %, 30° gives 670 pcm and 4.7 %.
    - **The coarse-table error is the drum sectors' cross sections.** The arc fills a 45° sector within 45° of rotation and the constants go from Be to near-black, so linear interpolation over-predicts the absorption between table points. Fuel, reflector and boundary factors interpolate essentially exactly.
    - **What did not help:** interpolating μΣ instead of μ and Σ, and a self-shielding rebuild of the sector constants.
+   - **Judge interpolation errors against the reference's own non-linearity** in angle (`tools/reference_angle_ripple.py`). On HP-MR, between 5° table points, the SPH-DF `k` error correlates at −0.95 with the refine-16 reference's own interpolation residual. The off-midpoint worst pins (3–5 %) match the reference's own residual as well.
+   - **Refine-16 S_N is too coarse for absolute accuracy.** Against refine 32 its `k` is 5–178 pcm low, the worth is 162 pcm high, and assembly powers are off by up to 2.7 % (`tools/compare_reference_refinement.py`). Its `k(θ)` also carries a mesh ripple of ±15–25 pcm. Generate production tables against refine 32 or finer, or against an arc-conforming mesh.
    - **Validate the spacing for each new core** against references at the table midpoints, and use `attribute` to see which class of quantity carries the error.
 6. **Construction check**: at every table angle the reconstruction reproduces
    the reference pin rates to round-off; anything else is a bug.

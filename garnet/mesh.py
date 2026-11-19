@@ -673,6 +673,15 @@ class UnstructuredDiffusionSolver:
                      structured solvers.
     nonorthogonal_correction : apply the deferred non-orthogonal correction
                      (default True; only active when the mesh is non-orthogonal).
+    bcf            : optional (G, n_cells) boundary coefficients: the Robin
+                     coefficient of every boundary face is ``alpha_boundary``
+                     times the value of its owner cell, per group (as the
+                     triangular solvers' ``bcf``). These are the boundary
+                     discontinuity factors of :func:`garnet.sph.sph_bcf_correct`;
+                     the face term ``a D A / (d a + D)`` is homogeneous of degree
+                     one in (D, a), so a per-group rescaling of SPH factors and
+                     boundary coefficients together is a gauge.
+                     :meth:`boundary_leakage` tallies the leakage per region.
 
     Face flux. For a face with unit normal n and centre x_f between cells i and
     j, let d_i = n.(x_f - x_i), d_j = n.(x_j - x_f) be the normal distances and
@@ -700,7 +709,7 @@ class UnstructuredDiffusionSolver:
     def __init__(self, mesh: Mesh, materials, cell_material,
                  alpha_boundary=_VACUUM_ALPHA, device="auto",
                  precond_degree=0, dtype=np.float64, linear_solver="cg",
-                 nonorthogonal_correction=True):
+                 nonorthogonal_correction=True, bcf=None):
         self.xp = xp = get_backend(device)
         self.device = device_name(xp)
         self.dtype = dtype
@@ -726,6 +735,17 @@ class UnstructuredDiffusionSolver:
         boundary_owner = np.array([b[0] for b in mesh.bfaces], dtype=np.int64)
         boundary_measure = np.array([b[1] for b in mesh.bfaces], dtype=dtype)
         boundary_distance = np.array([b[2] for b in mesh.bfaces], dtype=dtype)
+        if bcf is not None:
+            bcf = np.asarray(bcf, dtype=float)
+            if bcf.shape != (G, n):
+                raise ValueError(f"bcf must be (G, n_cells) = {(G, n)}, got {bcf.shape}")
+            if np.any(bcf < 0) or not np.all(np.isfinite(bcf)):
+                raise ValueError("bcf must be finite and non-negative")
+        # Robin coefficient of every boundary face, per group.
+        self._b_owner = boundary_owner
+        self._b_alpha = [np.full(boundary_owner.shape, self.alpha) if bcf is None
+                         else self.alpha * bcf[g, boundary_owner] for g in range(G)]
+        self._b_weight = []
         # Per-side normal distances: from the face geometry when the assembler
         # recorded it, else (a hand-built Mesh) half the centroid distance each.
         geom = mesh.face_normal is not None and mesh.bface_normal is not None
@@ -761,14 +781,17 @@ class UnstructuredDiffusionSolver:
             diag = removal[g] * cell_measure
             diag = diag + np.bincount(face_owner, weights=face_w, minlength=n)
             diag = diag + np.bincount(face_neighbor, weights=face_w, minlength=n)
+            boundary_weight = np.zeros(boundary_owner.shape)
             if self.alpha != 0.0:
                 Db = Dg[boundary_owner]
                 if np.isinf(self.alpha):                 # zero-flux (Dirichlet) limit
                     boundary_weight = Db * boundary_measure / boundary_distance
                 else:
-                    boundary_weight = (self.alpha * Db * boundary_measure
-                                       / (boundary_distance * self.alpha + Db))
+                    a = self._b_alpha[g]
+                    boundary_weight = (a * Db * boundary_measure
+                                       / (boundary_distance * a + Db))
                 diag = diag + np.bincount(boundary_owner, weights=boundary_weight, minlength=n)
+            self._b_weight.append(np.asarray(boundary_weight, dtype=float))
             self.ops.append(_MeshGroupOperator(
                 xp, nbr_dev, xp.asarray(w_ell), xp.asarray(diag)))
         self.preconds = [neumann_preconditioner(op.apply, op.inv_diag,
@@ -843,16 +866,16 @@ class UnstructuredDiffusionSolver:
         bdx = np.asarray(mesh.bface_center, dtype=float).reshape(len(mesh.bfaces), dim) \
             - cen[boundary_owner]
         blen = np.linalg.norm(bdx, axis=1)
-        alpha = self.alpha
         out = []
         for g in range(self.G):
             Db = D[g][boundary_owner].astype(float)
-            if np.isinf(alpha):
+            alpha = self._b_alpha[g]
+            if np.isinf(self.alpha):
                 a_row = bdx / blen[:, None]
                 beta = -1.0 / blen
             else:
                 s = alpha * blen + Db
-                a_row = (alpha * bdx + Db[:, None] * bnorm) / s[:, None]
+                a_row = (alpha[:, None] * bdx + Db[:, None] * bnorm) / s[:, None]
                 beta = -alpha / s
             M = M_int.copy()
             np.add.at(M, boundary_owner, np.einsum("bi,bj->bij", a_row, a_row))
@@ -866,6 +889,19 @@ class UnstructuredDiffusionSolver:
             corrB = np.einsum("kn,kn,knd->dkn", w, 1.0 - t, dtan)         # (dim, K, n)
             out.append(tuple(xp.asarray(a.astype(dtype)) for a in (G0, Gs, corrA, corrB)))
         return out
+
+    def boundary_leakage(self, g, phi, region_map, n_regions):
+        """Leakage through the boundary faces of each region, group ``g``,
+        (n_regions,): the Robin term of every boundary face (with ``bcf``)
+        times its owner cell's flux. Boundary faces carry no non-orthogonal
+        correction, so this is the solver's own boundary current; the coarse
+        counterpart of the reference outgoing current for boundary
+        discontinuity factors (:func:`garnet.sph.sph_bcf_correct`)."""
+        phi = np.asarray(asnumpy(phi), dtype=float).reshape(-1)
+        reg = np.asarray(region_map).reshape(-1)
+        own = self._b_owner
+        return np.bincount(reg[own], weights=self._b_weight[g] * phi[own],
+                           minlength=int(n_regions)).astype(float)
 
     def _correction(self, g, phi):
         """Explicit (non-orthogonal) part of the leakage of group g at flux phi."""

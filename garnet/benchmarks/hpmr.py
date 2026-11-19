@@ -40,6 +40,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..backend import asnumpy
+from ..drum_mesh import TriMeshProblem, refine_drum_band
+from ..equivalence import EquivalenceZones
 from ..hexraster import (TriRaster, cell_sites, hex_site_xy, point_sites,
                          rasterize_hex_sites)
 from ..materials import Kinetics, Material
@@ -360,49 +362,30 @@ def _smear_drums(materials):
 
 
 @dataclass
-class HpmrMeshProblem:
-    """A 2-D HP-MR on an unstructured (locally refined) triangular mesh.
-
-    cell_material is the base material of each cell; with the volume-mixed
-    absorber, drum cells carry ``mix_material = DRUM_ABSORBER`` and the exact
-    arc area fraction ``mix_weight`` (else -1 / 0). The unstructured solver
-    takes one material per cell, so :meth:`solver_materials` expands every
-    mixed cell into its own blended material by the raster solvers' rules.
+class HpmrMeshProblem(TriMeshProblem):
+    """A 2-D HP-MR on an unstructured (locally refined) triangular mesh: a
+    :class:`garnet.drum_mesh.TriMeshProblem` that also records the drum
+    angles. cell_material is the base material of each cell; with the
+    volume-mixed absorber, drum cells carry ``mix_material = DRUM_ABSORBER`` and
+    the exact arc area fraction ``mix_weight`` (else -1 / 0). The unstructured
+    solver takes one material per cell, so :meth:`solver_materials` expands
+    every mixed cell into its own blended material by the raster solvers'
+    rules.
     """
 
-    mesh: object
-    cell_material: np.ndarray
-    materials: list
-    alpha_boundary: float
-    mix_material: np.ndarray | None
-    mix_weight: np.ndarray | None
-    drum_angle_deg: np.ndarray
-    refine: int
-    levels: int
-
-    def solver_materials(self, materials=None, cell_material=None, mix_material=None):
-        """(materials, cell_material) for UnstructuredDiffusionSolver; pass zone
-        materials and zone maps to solve a homogenized model on this mesh."""
-        from ..blend import per_cell_blended_materials
-        mats = self.materials if materials is None else list(materials)
-        cm = self.cell_material if cell_material is None else cell_material
-        mm = self.mix_material if mix_material is None else mix_material
-        if mm is None:
-            return mats, np.asarray(cm)
-        return per_cell_blended_materials(mats, cm, mm, self.mix_weight)
+    drum_angle_deg: np.ndarray = None
 
 
-def _split_triangle(V, levels):
-    """Midpoint subdivision, ``levels`` times: 4**levels sub-triangles."""
-    tris = [tuple(np.asarray(v, dtype=float) for v in V)]
-    for _ in range(levels):
-        nxt = []
-        for T in tris:
-            M = [(T[i] + T[(i + 1) % 3]) / 2 for i in range(3)]
-            nxt += [(T[0], M[0], M[2]), (M[0], T[1], M[1]),
-                    (M[2], M[1], T[2]), (M[0], M[1], M[2])]
-        tris = nxt
-    return tris
+def hpmr_drum_specs(drum_angle_deg) -> list:
+    """Drum specs of the 2-D HP-MR for :func:`garnet.drum_mesh.refine_drum_band`
+    and :mod:`garnet.equivalence`: centre, absorber radii, arc direction and
+    half-angle, absorber material, hex site."""
+    angles = np.broadcast_to(np.asarray(drum_angle_deg, dtype=float), (len(_DRUM_SITES),))
+    drum_xy, arc_az = _drum_geometry(angles)
+    return [dict(centre=(float(x), float(y)), inner=DRUM_ABSORBER_INNER, outer=DRUM_RADIUS,
+                 arc_az=float(az), arc_half=math.radians(DRUM_ARC_HALF_DEG),
+                 absorber_id=DRUM_ABSORBER, site=tuple(rc))
+            for (x, y), az, rc in zip(drum_xy, arc_az, _DRUM_SITES)]
 
 
 def hpmr_locally_refined_problem(refine: int = 3, drum_angle_deg=0.0, levels: int = 1,
@@ -415,86 +398,23 @@ def hpmr_locally_refined_problem(refine: int = 3, drum_angle_deg=0.0, levels: in
     [DRUM_ABSORBER_INNER - band_margin, DRUM_RADIUS + band_margin] of a drum)
     is split into 4**levels sub-triangles, so the drums are resolved at
     refine * 2**levels for any rotation. Coarse-to-fine interfaces are hanging
-    nodes, handled conservatively by :func:`garnet.mesh.assemble_mesh`.
+    nodes, handled conservatively by :func:`garnet.mesh.assemble_mesh`. The
+    HP-MR case of :func:`garnet.drum_mesh.refine_drum_band`.
 
     absorber : "polar" (default) volume-mixes the exact arc area fraction into
         every drum cell (:func:`absorber_fraction_map`'s geometry), smooth in
         drum angle; "centroid" paints a cell B4C when its centroid is in the
         arc (the staircase of :func:`hpmr_locally_refined_mesh`).
     """
-    from ..mesh import assemble_mesh
-    from ..model import annular_sector_fraction
-
-    if absorber not in ("polar", "centroid"):
-        raise ValueError(f"absorber must be 'polar' or 'centroid', got {absorber!r}")
     angles = np.broadcast_to(np.asarray(drum_angle_deg, dtype=float),
                              (len(_DRUM_SITES),))
     mats = _placeholder_materials() if materials is None else list(materials)
     raster = hpmr_raster(refine, angles, paint_absorber=False)   # drums = DRUM_BE
-    mm = raster.material_map
-    drum_xy, arc_az = _drum_geometry(angles)
-    drum_xy = np.asarray(drum_xy)
-    arc_half = math.radians(DRUM_ARC_HALF_DEG)
-    lo, hi = DRUM_ABSORBER_INNER - band_margin, DRUM_RADIUS + band_margin
-
-    def nearest_drum(cc):
-        d2 = (drum_xy[:, 0] - cc[0]) ** 2 + (drum_xy[:, 1] - cc[1]) ** 2
-        d = int(d2.argmin())
-        return d, math.sqrt(d2[d])
-
-    def in_arc(cc):
-        d, rr = nearest_drum(cc)
-        if DRUM_ABSORBER_INNER < rr <= DRUM_RADIUS:
-            dphi = (math.atan2(cc[1] - drum_xy[d, 1], cc[0] - drum_xy[d, 0])
-                    - arc_az[d] + math.pi) % (2 * math.pi) - math.pi
-            return abs(dphi) <= arc_half
-        return False
-
-    node_at, coords = {}, []
-
-    def node(p):
-        k = (round(float(p[0]), 6), round(float(p[1]), 6))
-        i = node_at.get(k)
-        if i is None:
-            i = len(coords); node_at[k] = i; coords.append([float(p[0]), float(p[1])])
-        return i
-
-    cells, cmat, mix_w = [], [], []
-    ni, nj, _ = mm.shape
-    for a in range(ni):
-        for b in range(nj):
-            for t in (0, 1):
-                if mm[a, b, t] == 0:
-                    continue
-                V = raster.cell_vertices(a, b, t)
-                base = int(mm[a, b, t])
-                rmin = nearest_drum(V.mean(0))[1]
-                split = levels if lo <= rmin <= hi else 0
-                for tri in _split_triangle(V, split):
-                    cells.append(tuple(node(p) for p in tri))
-                    cc = np.mean(tri, 0)
-                    if base != DRUM_BE:
-                        cmat.append(base); mix_w.append(0.0)
-                    elif absorber == "centroid":
-                        cmat.append(DRUM_ABSORBER if in_arc(cc) else DRUM_BE)
-                        mix_w.append(0.0)
-                    else:
-                        d, _ = nearest_drum(cc)
-                        cmat.append(DRUM_BE)
-                        mix_w.append(annular_sector_fraction(
-                            np.asarray(tri), drum_xy[d], DRUM_ABSORBER_INNER,
-                            DRUM_RADIUS, arc_az[d], arc_half))
-
-    mesh = assemble_mesh(np.array(coords), cells, cmat)
-    cmat = np.array(cmat, dtype=np.int64)
-    mix_material = mix_weight = None
-    if absorber == "polar":
-        mix_weight = np.array(mix_w)
-        mix_material = np.where(mix_weight > 0.0, DRUM_ABSORBER, -1).astype(np.int64)
-    return HpmrMeshProblem(mesh=mesh, cell_material=cmat, materials=mats,
-                           alpha_boundary=0.5, mix_material=mix_material,
-                           mix_weight=mix_weight, drum_angle_deg=np.array(angles),
-                           refine=int(refine), levels=int(levels))
+    q = refine_drum_band(raster, mats, hpmr_drum_specs(angles), levels=levels,
+                         band_margin=band_margin, absorber=absorber, refine=refine,
+                         drum_cell=lambda m: m == DRUM_BE)
+    return HpmrMeshProblem(**{f: getattr(q, f) for f in q.__dataclass_fields__},
+                           drum_angle_deg=np.array(angles))
 
 
 def hpmr_locally_refined_mesh(refine: int = 3, drum_angle_deg=0.0,
@@ -613,29 +533,10 @@ def build_hpmr2d(refine: int = 4, drum_angle_deg=0.0,
                        raster=raster)
 
 
-@dataclass
-class HpmrZones:
-    """Homogenization / SPH zones of a 2-D HP-MR raster.
-
-    region_map     : (nr, nc, 2) zone index of every cell.
-    mix_region_map : (nr, nc, 2) zone of the volume-mixed absorber partner
-                     (polar absorber), -1 elsewhere; None for a raster
-                     without mixing. Pass it as ``mix_region_map`` to
-                     :func:`garnet.sph.flux_weighted_homogenize`, and as the
-                     solver's ``mix_material`` when the zone materials are the
-                     solver's materials list.
-    names          : zone names.
-    material       : (Z,) base material index of each zone.
-    fuel           : (Z,) True for the fuel-assembly zones.
-    site           : (Z,) hex site (R, C) of each fuel zone, None otherwise.
-    """
-
-    region_map: np.ndarray
-    mix_region_map: np.ndarray | None
-    names: tuple
-    material: np.ndarray
-    fuel: np.ndarray
-    site: tuple
+# Homogenization / SPH zones of an HP-MR raster or mesh: the generic
+# :class:`garnet.equivalence.EquivalenceZones` (region_map, mix_region_map,
+# names, material, fuel, site).
+HpmrZones = EquivalenceZones
 
 
 def _site_lookup(sites, rows, cols):
@@ -759,6 +660,37 @@ def hpmr_mesh_zones(problem, merge_drum: bool = False, per_hex: bool = False) ->
     rows, cols = point_sites(np.asarray(problem.mesh.centroid)[:, :2], PITCH)
     return _zones_from_sites(rows, cols, problem.cell_material, problem.mix_material,
                              merge_drum, per_hex)
+
+
+def hpmr_drum_sector_zones(problem, n_sectors: int = 8, r_inner: float = 10.25,
+                           aligned: bool = True, **options):
+    """Baseline SPH-DF zones of a 2-D HP-MR node model (raster from
+    :func:`build_hpmr2d` or drum-band mesh from
+    :func:`hpmr_locally_refined_problem`): per-hex zones, every boundary hex
+    split inner/outer, each drum a core and ``n_sectors`` ring sectors with an
+    absorber-free outer layer (:mod:`garnet.equivalence`).
+
+    options pass through to :func:`garnet.equivalence.drum_ring_sectors`
+    (``outer_arc_to_sector`` default True, ``outer_sectors``); ``drum_outer=
+    False`` splits only the Be hexes, leaving the drum sectors on the boundary.
+    Returns (zones, NodeCells, boundary zones, {zone: outer zone}).
+    """
+    from ..equivalence import (NodeCells, boundary_zones, drum_ring_sectors,
+                               split_boundary_layer)
+    if hasattr(problem, "mesh"):
+        cells = NodeCells.from_mesh(problem.mesh)
+        base = hpmr_mesh_zones(problem, merge_drum=True, per_hex=True)
+    else:
+        cells = NodeCells.from_raster(problem.raster, problem.active)
+        base = hpmr_assembly_zones(problem, merge_drum=True, per_hex=True)
+    drum_outer = options.pop("drum_outer", True)
+    split = [i for i, n in enumerate(base.names)
+             if n.startswith("be_reflector") or (drum_outer and n.startswith("drum"))]
+    zs, outer_of = split_boundary_layer(base, cells, split=split)
+    options.setdefault("outer_arc_to_sector", True)
+    zs = drum_ring_sectors(zs, cells, hpmr_drum_specs(problem.drum_angle_deg), outer_of,
+                           n_sectors=n_sectors, r_inner=r_inner, aligned=aligned, **options)
+    return zs, cells, boundary_zones(zs, cells), outer_of
 
 
 def hpmr_transport_mask(problem: HpmrProblem, region: str = "drum") -> np.ndarray:

@@ -190,6 +190,26 @@ class TriSNTransportSolver:
                     accelerates the scalar flux with D = 1/(3(Sigma_t -
                     Sigma_s1,gg)), and CMFD rescales the higher moments with
                     the scalar flux.
+    adjoint       : solve the adjoint k-eigenproblem instead (same k). The
+                    adjoint angular flux is psi+(r, O) = psit(r, -O), where
+                    psit solves a forward problem with every group-to-group
+                    transfer transposed, Sigma_s,l(g -> g') -> Sigma_s,l(g' -> g)
+                    in every Legendre order (the kernel depends on O.O' only),
+                    the fission spectrum and production swapped (spectrum
+                    nu*Sigma_f, production chi in the fissile cells), and the
+                    total and within-group terms unchanged; vacuum boundaries
+                    map to vacuum since the quadrature is symmetric. ``flux``
+                    is then the adjoint scalar flux (and the odd moments of
+                    psit are those of psi+ with the sign flipped). For the
+                    step scheme this is the exact discrete adjoint: the step
+                    streaming matrix of direction O, transposed, is that of -O
+                    (the outgoing and incoming face terms of a closed cell are
+                    equal), and the scattering moments are symmetric in the
+                    quadrature-weighted inner product. In one group the
+                    problem is self-adjoint: the adjoint scalar flux equals
+                    the forward one. Bilinear weights such as
+                    <phi+, nu*Sigma_f phi> use the scalar fluxes for any
+                    isotropic operator (fission, isotropic scattering).
     """
 
     ACCELERATIONS = ("dsa", "dsa-gmres", "gmres", "si")
@@ -203,7 +223,8 @@ class TriSNTransportSolver:
                  lu_cache: str = "all",
                  dsa_rtol: float = 1e-4, dsa_maxiter: int = 100,
                  cmfd_solver: str = "lu", sigma_t_shift=None,
-                 graphs: bool = True, scattering_order: int = 0):
+                 graphs: bool = True, scattering_order: int = 0,
+                 adjoint: bool = False):
         if len(grid.shape) not in (3, 4) or grid.shape[2] != 2:
             raise ValueError("tri-S_N grid shape must be (nr, nc, 2) or "
                              "(nr, nc, 2, nz) for extruded prisms")
@@ -332,6 +353,9 @@ class TriSNTransportSolver:
         self.M = self.mu.size
         self._setup_anisotropy(int(scattering_order), mats, mmap, mix_material,
                                mix_weight)
+        self.adjoint = bool(adjoint)
+        if self.adjoint:
+            self._make_adjoint()
         self._cell = np.arange(self.N).reshape(grid.shape)
         self._act_flat = self.active.reshape(-1)
         self._dsa_fac = [None] * self.G                      # lazy DSA LU per group
@@ -353,6 +377,21 @@ class TriSNTransportSolver:
             self._solvers = [[None] * self.M for _ in range(self.G)]
             self._lu_resident = None
             self._prefactor([])
+
+    # ---- adjoint ------------------------------------------------------------
+    def _make_adjoint(self):
+        """Turn the data into the adjoint problem's (see ``adjoint`` in the class
+        docstring): every group-to-group transfer transposed, in every Legendre
+        order, and the fission spectrum and production swapped. The total and
+        the within-group terms are unchanged, so the streaming-collision
+        operators, DSA and CMFD need nothing else."""
+        G = self.G
+        self.scatter = [[self.scatter[gt][gf] for gt in range(G)] for gf in range(G)]
+        if self._aniso:
+            self._scat_l = [[[sl[gt][gf] for gt in range(G)] for gf in range(G)]
+                            for sl in self._scat_l]
+        fissile = np.any(self.nsf > 0.0, axis=0)
+        self.nsf, self.chi = np.where(fissile[None], self.chi, 0.0), self.nsf.copy()
 
     # ---- anisotropic scattering ---------------------------------------------
     def _setup_anisotropy(self, order, mats, mmap, mix_material, mix_weight):
@@ -1521,6 +1560,9 @@ class TriSNTransportSolver:
         height and unit source normalization of ``result.flux``. Levels engine
         only (the LU engine keeps no angular-flux buffer).
         """
+        if self.adjoint:
+            raise NotImplementedError("region_partial_currents is a forward tally; the "
+                                      "adjoint solve carries the reversed angular flux")
         if self.engine != "levels":
             raise NotImplementedError("region_partial_currents needs engine='levels'")
         xp, G = self.xp, self.G

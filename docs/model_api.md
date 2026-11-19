@@ -649,6 +649,91 @@ absorber. This reproduces `garnet.benchmarks.build_hpmr2d`'s polar drum model
 exactly; see `examples/hpmr_hexlattice.py`, which builds the full HP-MR
 microreactor — 55 assemblies and 12 drums — and sweeps the worth curve.
 
+### Refining the drum band (`build_mesh`)
+
+A 1 cm absorber arc needs drum cells of about 2 cm or less before the model is
+smooth in drum angle, but the rest of the core does not. `build_mesh` keeps the
+raster of `build()` everywhere and splits every cell in the band the arcs sweep
+into `4**levels` sub-triangles, for all rotations at once:
+
+```python
+problem = lat.build_mesh(levels=1)            # drums at refine * 2, rest at refine
+mats, cells = problem.solver_materials()      # per-cell blend of the volume-mixed arc
+result = garnet.UnstructuredDiffusionSolver(problem.mesh, mats, cells).solve()
+```
+
+It returns a `garnet.TriMeshProblem` for `UnstructuredDiffusionSolver`. Its
+coarse-to-fine interfaces are conservative hanging nodes. The arc stays
+volume-mixed at its exact area fraction (`absorber="centroid"` paints whole
+cells instead), and `levels=0` reproduces the raster solve exactly. The mesh is
+2-D, vacuum-bounded and needs at least one drum. `refine_drum_band` is the
+underlying function for any raster and list of drum specs
+(`lat.drum_specs()`); `garnet.benchmarks.hpmr.hpmr_locally_refined_problem`
+is the HP-MR case.
+
+### Equivalence zones and SPH-DF for drum cores
+
+Assembly-level SPH on a vacuum-bounded drum core reproduces `k` and every
+zone's rate at every drum angle with **SPH plus boundary discontinuity
+factors** (`sph_bcf_correct`, Labouré et al. 2019) on the zones of
+`garnet.equivalence`:
+
+- one zone per hex site;
+- every non-fuel hex on the vacuum boundary split into an inner zone and an
+  outer zone, the outer one being the first row of node cells;
+- each drum hex a core plus `n` ring sectors fixed in space;
+- each drum's outer layer kept free of absorber.
+
+The arc moves through the sectors as the drum turns, so the zone constants
+change continuously with angle. No boundary zone holds absorber, which is what
+keeps SPH-DF solvable at every angle.
+
+```python
+from garnet import (SphDfNode, drum_core_zones, flux_weighted_homogenize,
+                    inherit_zones, sph_bcf_correct)
+from garnet.pin_power import tri_cell_centroids
+
+node_model = lat.build()                     # or lat.build_mesh(levels=1)
+zones, cells, boundary, drums = drum_core_zones(lat, node_model, n_sectors=8)
+
+# Reference: a nested finer raster (refine an integer multiple), e.g. an S_N solve.
+fine = lat_fine.build()
+ref_zones = inherit_zones(zones, cells, tri_cell_centroids(fine.raster),
+                          fine.active.shape, fine.active, fine.mix_material,
+                          absorber_ids=[d["absorber_id"] for d in drums])
+hm, ref_flux, ref_vol = flux_weighted_homogenize(
+    ref.flux_numpy, fine.materials, fine.material_map, ref_zones.region_map,
+    cell_volume=fine.grid.cell_volume, mix_material=fine.mix_material,
+    mix_weight=fine.mix_weight, mix_region_map=ref_zones.mix_region_map)
+# J_ref: (B, G) reference outgoing current of each boundary zone, e.g.
+# garnet.equivalence.reference_boundary_currents(sn_solver, sn_result, ref_zones, boundary)
+
+node = SphDfNode.raster(zones, boundary, node_model.grid, node_model.active,
+                        node_model.mix_weight, node_model.mask_bc)
+# or SphDfNode.mesh(zones, boundary, problem) for a drum-band mesh
+out = sph_bcf_correct(hm, ref_flux, J_ref, node, region_volume=ref_vol)
+# out.corrected_materials, out.factors (SPH), out.bcf (boundary factors per zone, group)
+```
+
+- **Containment transfer.** `inherit_zones` gives every reference cell the zone
+  of the node cell that contains it. It is exact when the reference refines
+  the node mesh by an integer factor (a multiple of `2**levels` for a
+  drum-band mesh).
+- **Two node solvers.** `SphDfNode` wraps `TriDiffusionEigenSolver` (raster) or
+  `UnstructuredDiffusionSolver` (mesh), both with per-cell boundary
+  coefficients `bcf`. It returns the zone fluxes, `k` and each boundary zone's
+  leakage. `UnstructuredDiffusionSolver.boundary_leakage` is the mesh tally.
+- **Tables in drum angle.** Interpolate the zone constants, SPH factors,
+  boundary factors and per-group form functions linearly. With 8 sectors and
+  the 5° tables of the HP-MR study, `k` stayed within 38 pcm and pin RMS within
+  0.4 % between table points.
+- **Coarser tables lose accuracy quickly** (15°: 171 pcm, 30°: 670 pcm). The
+  sector constants go from reflector to near-black within one sector of
+  rotation.
+
+The method, its feasibility conditions and the HP-MR measurements are in
+`docs/qa/sph_audit_2026-11-13.md` §10.6 and the control-drums skill.
+
 ---
 
 ## Worked example: the TWIGL benchmark (validated against literature)

@@ -184,6 +184,7 @@ The main geometry operations are:
 | `extrude(height, nz, boundary=...)` | Turn the 2-D mesh into `nz` prism layers |
 | `add_axial_region(material, z=(lo, hi), replace=...)` | Override selected layers |
 | `set_drum(...)` | Add a rotating annular absorber arc |
+| `build_mesh(levels=...)` | 2-D unstructured mesh with the drum band refined `4**levels` times (`TriMeshProblem`) |
 | `build(name=...)` | Rasterize once and return a reusable reactor (`samples` is ignored) |
 
 Each hex contains `6 × refine²` triangles. Increase `refine` until important
@@ -217,7 +218,11 @@ drum_state = lattice.build(samples=8)
 ```
 
 An angle of 0° points the absorber toward the core centre, taken as the lattice
-origin (site `(0, 0)`); 180° points it outward. The absorber area fraction of
+origin (site `(0, 0)`); 180° points it outward. For drum cells finer than the
+rest of the core, `lattice.build_mesh(levels=1)` refines only the band the arcs
+sweep. For assembly-level SPH of a drum core (zones, SPH with boundary
+discontinuity factors, tables in drum angle) see `garnet.equivalence` and the
+model API guide. The absorber area fraction of
 each triangle is computed exactly; `samples` is accepted for compatibility and
 ignored.
 
