@@ -42,7 +42,7 @@ import numpy as np
 
 from .backend import asnumpy, device_name, get_backend, synchronize
 from .grid import Grid
-from .linalg import (get_linear_solver,
+from .linalg import (clip_roundoff_negatives, get_linear_solver,
                      mixed_precision_preconditioner, neumann_preconditioner,
                      pcg, pcg_workspaces, mix_source_history as _anderson_mix)
 from .materials import Kinetics
@@ -2994,8 +2994,24 @@ class TransientSNSolver:
         nsf = ctx["nsf_h"]
         ph = [asnumpy(p).ravel().copy() for p in phi]
         Sv = asnumpy(S).ravel().copy()
+        if (getattr(eng, "cmfd_two_level", 0) > 1
+                and hasattr(eng, "t_cmfd_two_level_solve")):
+            t_g = time.perf_counter()
+            out, its = eng.t_cmfd_two_level_solve(facs, ph, S, ctx)
+            self._gmres_seconds = time.perf_counter() - t_g
+            events = getattr(self, "_cmfd_events", None)
+            if events is not None:
+                # "source-only": the coarse flux had a negative entry, so the
+                # transport flux is kept and only the fission source updated
+                tag = ("stalled" if out is None else "ok" if isinstance(out, tuple)
+                       else "source-only")
+                ev = (tag, its)
+                if tag == "source-only":
+                    ev = ev + (f"min X/max X {getattr(eng, 't_cmfd_xmin', float('nan')):.2e}",)
+                events.append(ev)
+            return out
         if all(hasattr(f, "matrix") for f in facs):
-            return self._cmfd_krylov(facs, ph, S, ctx)
+            return self._cmfd_krylov(facs, ph, S, ctx, eng)
         w_tot = sum(ctx["w_fis_h"])
         fixed_total = float(sum(np.sum(ctx["dsrc_h"][g]
                                        + ctx["theta"][g] * ctx["phi_old_h"][g])
@@ -3032,7 +3048,7 @@ class TransientSNSolver:
             events.append(("ok", it + 1))
         return xp.asarray(Sv.reshape(asnumpy(S).shape))
 
-    def _cmfd_krylov(self, facs, ph, S, ctx):
+    def _cmfd_krylov(self, facs, ph, S, ctx, eng=None):
         """The coarse step solved as ONE linear system over all groups,
 
             A_g phi_g - sum_g' s(g' -> g) phi_g' - w_fis,g nuSf.phi / k0
@@ -3092,11 +3108,12 @@ class TransientSNSolver:
             if events is not None:
                 events.append(("stalled" if info != 0 else "negative", counter[0]))
             return None
+        neg = not clip_roundoff_negatives(X)     # round-off negatives zeroed
         if events is not None:
-            events.append(("ok", counter[0]))
+            events.append(("source-only" if neg else "ok", counter[0]))
         xp = self.xp
         S_out = xp.asarray(S_new.reshape(asnumpy(S).shape))
-        if np.any(X < 0.0):                    # keep the transport flux
+        if neg:                                # keep the transport flux
             return S_out
         # the coarse scalar flux replaces the transport iterate (the steady
         # CMFD does the same): with the fission source alone, the next sweep's
@@ -3482,7 +3499,8 @@ class TransientSNSolver:
                 ev = ""
                 if self._cmfd_events:
                     kinds = [e[0] for e in self._cmfd_events]
-                    ev = (f", CMFD {kinds.count('ok')} ok / {kinds.count('stalled')} stalled"
+                    ev = (f", CMFD {kinds.count('ok')} ok / {kinds.count('source-only')} "
+                          f"source-only / {kinds.count('stalled')} stalled"
                           f" / {kinds.count('negative')} negative, last {self._cmfd_events[-1]}")
                 print(f"  t = {t:8.4f} s   P/P0 = {power[-1]:.6f}   ({sweep} sweeps, "
                       f"{time.perf_counter() - step_t0:.1f} s{ev})", flush=True)

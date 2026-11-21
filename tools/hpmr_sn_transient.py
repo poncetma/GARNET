@@ -106,6 +106,7 @@ def main(case, refine=32, t_end=None, dt=None, device="gpu", mode="rebalance"):
                                scheme="scb", scattering_order=order,
                                step_acceleration=os.environ.get("SN_STEP_ACCEL", "auto"),
                                cmfd_aggregate=int(os.environ.get("SN_CMFD_AGG", "0")),
+                               cmfd_two_level=int(os.environ.get("SN_CMFD_2L", "0")),
                                on_step=on_step)
     kw = (dict(rebalance=True, anderson_depth=1) if mode == "rebalance" else {})
     in_place = os.environ.get("SN_UPDATE_IN_PLACE", "1") != "0"

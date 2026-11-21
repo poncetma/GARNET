@@ -248,8 +248,18 @@ if mode == "generate":
         flux, k, _ = node["solve_bcf_full"](out.corrected_materials, out.bcf, bregs)
         table, _ = fission_energy_xs(out.corrected_materials)
         phi_p = footprint_flux(node["W"], flux)
-        form = group_form_functions(ref["rate"], zone_of_pin, table, phi_p)
-        back = reconstruct_group_form_functions(form, zone_of_pin, table, phi_p)
+        # fission productions of the reference and the node solve, so the form
+        # functions are free of the node flux normalization (pin_power doc)
+        avg, _, _ = node["solve_bcf"](out.corrected_materials, out.bcf, bregs)
+        nz = len(ref["rvol"])
+        ref_prod = float(sum((np.asarray(m.nu_sigma_f) * ref["rflux"][z] * ref["rvol"][z]).sum()
+                             for z, m in enumerate(ref["hm"][:nz])))
+        node_prod = float(sum((np.asarray(m.nu_sigma_f) * avg[z] * ref["rvol"][z]).sum()
+                              for z, m in enumerate(out.corrected_materials[:nz])))
+        form = group_form_functions(ref["rate"], zone_of_pin, table, phi_p,
+                                    reference_production=ref_prod, coarse_production=node_prod)
+        back = reconstruct_group_form_functions(form, zone_of_pin, table,
+                                                phi_p * (ref_prod / node_prod))
         exact = float(np.abs(back / ref["rate"].sum(axis=1) - 1).max())
         names = list(ref["zones"].names)
         np.savez(os.path.join(tables, f"sphdf_{angle:g}.npz"), angle=angle, k_ref=ref["k"],

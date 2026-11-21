@@ -5,6 +5,12 @@ HP-MR core they are generated from.
   and the node raster integrate the flux over the same geometry;
 * the reconstruction reproduces the reference pin rates at the generation
   state by construction;
+* with the reference and coarse fission productions passed, the form
+  functions are free of the coarse flux normalization: the reconstructed
+  pin-power sum over the coarse production equals the reference's for any
+  scale of the generating flux. Broken on purpose (productions not passed)
+  it follows the generating scale (factor 3.7 here; on the HP-MR tables a
+  4.7 % drift between 180 and 90 deg);
 * the pin-resolved core places every pin inside its own assembly zone with
   the right fuel-compact area.
 """
@@ -140,3 +146,33 @@ def test_blend_materials_follows_the_two_material_rules():
     assert blend_materials(pins[:3], [0.0, 1.0, 0.0]) is pins[1]
     with pytest.raises(ValueError, match="fractions"):
         blend_materials(pins[:2], [0.6, 0.6])
+
+
+def _pin_sum_over_production(scale, normalized):
+    rng = np.random.default_rng(11)
+    n_pins, G, Z = 30, 3, 5
+    zone = rng.integers(0, Z, n_pins)
+    kappa = rng.uniform(0.01, 0.2, (Z, G))
+    phi = rng.uniform(0.5, 2.0, (n_pins, G))                 # coarse pin fluxes
+    rate = rng.uniform(0.1, 1.0, (n_pins, G))                # reference pin rates
+    prod_ref, prod_coarse = 7.3, 2.1                         # at a common scale
+    kw = (dict(reference_production=prod_ref, coarse_production=scale * prod_coarse)
+          if normalized else {})
+    f = group_form_functions(rate, zone, kappa, scale * phi, **kw)
+    later = 0.4                                              # any later flux level
+    rec = reconstruct_group_form_functions(f, zone, kappa, later * phi)
+    return rec.sum() / (later * prod_coarse), rate.sum() / prod_ref
+
+
+def test_form_functions_are_free_of_the_coarse_flux_normalization():
+    for scale in (1.0, 3.7, 0.05):
+        got, want = _pin_sum_over_production(scale, normalized=True)
+        assert got == pytest.approx(want, rel=1e-12)
+
+
+def test_broken_form_functions_carry_the_generating_flux_scale():
+    got, want = _pin_sum_over_production(3.7, normalized=False)
+    assert got / want == pytest.approx(7.3 / (3.7 * 2.1), rel=1e-12)   # not 1
+    with pytest.raises(ValueError, match="both"):
+        group_form_functions(np.ones((2, 1)), [0, 0], np.ones((1, 1)), np.ones((2, 1)),
+                             reference_production=1.0)

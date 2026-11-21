@@ -272,8 +272,19 @@ def footprint_flux(footprints, flux):
     return np.asarray(footprints @ f.reshape(G, -1).T)
 
 
-def group_form_functions(reference_pin_rate, zone_of_pin, kappa_fission, pin_flux):
+def group_form_functions(reference_pin_rate, zone_of_pin, kappa_fission, pin_flux, *,
+                         reference_production=None, coarse_production=None):
     """Per-pin, per-group form functions, Kumar et al. 2026 Eq. (4).
+
+    The coarse flux is an eigenvector at its own normalization, unrelated to
+    the reference's, so the bare ratio carries an arbitrary overall factor.
+    It is invisible in normalized pin shapes but not in absolute pin powers:
+    tables built at several drum angles then carry a different factor at each
+    angle (HP-MR: 4.7 % between 180 and 90 deg in the pin-power sum over the
+    fission production). Pass the total fission production of the reference
+    and of the coarse solve, nu*Sigma_f*phi summed over the volume in any
+    common units; the coarse flux is then scaled to the reference production
+    first, and the form functions are free of the normalization.
 
     reference_pin_rate : (n_pins, G) reference kappa*Sigma_f*phi integrated over
                          each pin, from the full-core reference of the state.
@@ -286,8 +297,14 @@ def group_form_functions(reference_pin_rate, zone_of_pin, kappa_fission, pin_flu
     Returns f with shape (n_pins, G); 0 where the coarse rate vanishes.
     """
     rate = np.asarray(reference_pin_rate, dtype=float)
-    denom = np.asarray(kappa_fission, dtype=float)[np.asarray(zone_of_pin)] \
-        * np.asarray(pin_flux, dtype=float)
+    pin_flux = np.asarray(pin_flux, dtype=float)
+    if (reference_production is None) != (coarse_production is None):
+        raise ValueError("pass both reference_production and coarse_production, or neither")
+    if reference_production is not None:
+        if not (coarse_production > 0.0 and reference_production > 0.0):
+            raise ValueError("fission productions must be positive")
+        pin_flux = pin_flux * (float(reference_production) / float(coarse_production))
+    denom = np.asarray(kappa_fission, dtype=float)[np.asarray(zone_of_pin)] * pin_flux
     return np.divide(rate, denom, out=np.zeros_like(rate), where=denom > 0.0)
 
 

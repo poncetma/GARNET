@@ -157,6 +157,22 @@ class FGMRESWorkspace:
             raise ValueError("FGMRES basis workspace is incompatible")
 
 
+def clip_roundoff_negatives(X, rel=1e-10):
+    """Zero the round-off negatives of a group-wise flux X (G, N), in place.
+
+    A Krylov coarse solve converged to rtol leaves entries of order
+    -1e-16..-1e-12 of the group maximum where the flux is near zero; those are
+    not a negative flux. Returns True when no entry is below -rel times its
+    group maximum (all negatives were round-off and are now zero), False when a
+    genuinely negative entry remains (X is then left unchanged)."""
+    X = np.asarray(X)
+    scale = np.maximum(np.max(X, axis=1, keepdims=True), 0.0)
+    if np.any(X < -rel * scale):
+        return False
+    np.maximum(X, 0.0, out=X)
+    return True
+
+
 def pcg_workspaces(operators, templates, *, fallback=False):
     """Build one compatible :class:`PCGWorkspace` per energy group."""
     if len(operators) != len(templates):

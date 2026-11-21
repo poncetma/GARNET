@@ -59,6 +59,15 @@ _DATA = {
                      s1=_ONE(0.042432), st=[0.32640]),
     "Ub-aniso": dict(nu=[2.70], sf=[0.065280], sc=[0.013056], s0=_ONE(0.248064),
                      s1=_ONE(0.212160), st=[0.32640]),
+    # Table 16, U-D2O reactor, c = 1.02, isotropic (nu from k_inf = 1.133333)
+    "UD2O": dict(nu=[1.70], sf=[0.054628], sc=[0.027314], s0=_ONE(0.464338),
+                 st=[0.54628]),
+    # Table 28, U-D2O (b) and (c), P1 (set (a) has an unreadable Sigma_s1 in the
+    # scanned report); nu reproduces the tabulated k_inf 1.227391 / 1.130933
+    "UD2Ob-aniso": dict(nu=[1.841086], sf=[0.054628], sc=[0.027314], s0=_ONE(0.464338),
+                        s1=_ONE(0.112982569), st=[0.54628]),
+    "UD2Oc-aniso": dict(nu=[1.6964], sf=[0.054628], sc=[0.027314], s0=_ONE(0.464338),
+                        s1=_ONE(-0.27850447), st=[0.54628]),
     # Tables 39/40 (isotropic) and 52/53 (P1), research reactor (a)
     "URRa": dict(nu=[2.50, 2.50], sf=[0.0010484, 0.050632], sc=[0.0010046, 0.025788],
                  s0=np.array([[0.62568, 0.029227], [0.0, 2.44383]]),
@@ -79,7 +88,7 @@ class SoodProblem:
     identifier: str
     material: str
     order: int              # Legendre order of the scattering data
-    geometry: str           # "slab" (rc = half-thickness) or "cylinder" (radius)
+    geometry: str           # "slab" (rc = half-thickness), "cylinder" or "sphere" (radius)
     rc: float
     flux_positions: tuple = ()      # r / rc of the tabulated scalar fluxes
     flux: tuple = ()                # per group (fast first), normalized to the
@@ -94,6 +103,13 @@ PROBLEMS = {p.number: p for p in (
     SoodProblem(35, "PUb-1-2-SL", "PUb-aniso", 2, "slab", 0.78396),
     SoodProblem(36, "Ua-1-1-CY", "Ua-aniso", 1, "cylinder", 5.514296811),
     SoodProblem(37, "Ub-1-1-CY", "Ub-aniso", 1, "cylinder", 6.940205668),
+    SoodProblem(14, "Ua-1-0-SP", "Ua", 0, "sphere", 7.428998,
+                (0.25, 0.5, 0.75, 1.0),
+                ((0.93244907, 0.74553332, 0.48095413, 0.17177706),)),
+    SoodProblem(24, "UD2O-1-0-SP", "UD2O", 0, "sphere", 22.017156),
+    SoodProblem(41, "UD2Ob-1-1-SP", "UD2Ob-aniso", 1, "sphere", 18.30563081),
+    SoodProblem(43, "UD2Oc-1-1-SP", "UD2Oc-aniso", 1, "sphere", 18.30563081),
+    SoodProblem(55, "URRa-2-0-SP", "URRa", 0, "sphere", 16.049836),
     SoodProblem(54, "URRa-2-0-SL", "URRa", 0, "slab", 7.566853,
                 (0.241394, 0.502905, 0.744300, 1.0),
                 ((0.943363, 0.761973, 0.504012, 0.147598),

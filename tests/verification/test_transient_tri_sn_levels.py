@@ -33,6 +33,12 @@ assumes the time source integrates to theta * phi_old):
   P0 / P2) in 6-8 sweeps per step instead of 15-19. Broken (the coarse
   operator fitted to a sweep without the time source) the step does not
   converge (amplitude error 2.5e-3 / 2.2e-3 after 200 sweeps);
+* round-off negatives in the coarse flux (-1e-14 of the maximum injected into
+  every GMRES solution) are zeroed and the coarse flux is still prolonged.
+  Broken (the old any-negative rule) every coarse step falls back to the
+  fission source alone ("source-only"), which on the refine-32 HP-MR with
+  b = 8 two-level took 21 instead of 3 sweeps per step; a genuinely negative
+  entry (-1e-6) is not clipped;
 
 The CUDA-graph path of the same sweeps is checked in test_gpu_paths.py.
 """
@@ -231,3 +237,54 @@ def test_broken_cmfd_without_the_time_source_does_not_converge(monkeypatch):
     monkeypatch.setattr(TriSNTransportSolver, "t_cmfd_factor", without_time_source)
     with pytest.raises(RuntimeError, match="did not converge"):
         _accelerated(0, step_acceleration="cmfd")
+
+
+def _with_roundoff_negatives(monkeypatch):
+    """Every coarse GMRES solution gets one entry of -1e-14 of its maximum,
+    as Krylov round-off leaves where the flux is near zero."""
+    import scipy.sparse.linalg as spla
+    gmres = spla.gmres
+
+    def noisy(*a, **k):
+        x, info = gmres(*a, **k)
+        x = x.copy()
+        x[int(np.argmin(x))] = -1e-14 * float(np.max(x))
+        return x, info
+
+    monkeypatch.setattr(spla, "gmres", noisy)
+
+
+def _last_step_events(**kw):
+    s = TransientSNSolver(GRID, _step, KIN, bc="vacuum", engine_cls=TriSNTransportSolver,
+                          n_polar=2, n_azi=8, scheme="scb", engine="levels",
+                          scattering_order=2, step_acceleration="cmfd")
+    r = s.solve(0.02, 0.01, tol_step=1e-10, steady_kwargs=STEADY)
+    return r, [e[0] for e in s._cmfd_events]
+
+
+def test_cmfd_prolongs_through_roundoff_negatives(monkeypatch):
+    """Coarse fluxes with round-off negatives are still prolonged into the
+    transport iterate (event "ok"): on the refine-32 HP-MR the source-only
+    fallback they used to trigger cost 21 instead of 3 sweeps per step. This
+    small core converges either way, so the event tags are what is checked."""
+    clean, _ = _last_step_events()
+    _with_roundoff_negatives(monkeypatch)
+    r, kinds = _last_step_events()
+    np.testing.assert_allclose(r.power, clean.power, rtol=0, atol=1e-10)
+    assert kinds and set(kinds) == {"ok"}
+
+
+def test_broken_roundoff_negatives_fall_back_to_the_source(monkeypatch):
+    import garnet.transient as tr
+    _with_roundoff_negatives(monkeypatch)
+    monkeypatch.setattr(tr, "clip_roundoff_negatives", lambda X: not np.any(X < 0.0))
+    _, kinds = _last_step_events()
+    assert "source-only" in kinds and "ok" not in kinds
+
+
+def test_genuine_negative_coarse_flux_is_not_clipped():
+    from garnet.linalg import clip_roundoff_negatives
+    X = np.array([[1.0, 0.5, -1e-13], [2.0, 1.0, 0.0]])
+    assert clip_roundoff_negatives(X) and X.min() == 0.0
+    Y = np.array([[1.0, 0.5, -1e-6], [2.0, 1.0, 0.0]])
+    assert not clip_roundoff_negatives(Y) and Y[0, 2] == -1e-6

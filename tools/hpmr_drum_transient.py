@@ -646,6 +646,45 @@ def compare_full(case="D", refine=32, dt=0.005, mode="anderson"):
                (lambda tn: ref.pins_at(theta(tn))) if smooth else None)
 
 
+def rescale_forms(out_dir, table_step):
+    """Apply the form-function renormalization (form_scale of each table
+    entry, written by the renormalization of 2026-11-21) to stored SPH-DF
+    runs made with the raw form functions: pin powers, the pin-sum power and
+    the adiabatic shape norm all scale with the interpolated form scale at
+    theta(t). The raw values are kept as <key>_raw; runs already corrected
+    are skipped."""
+    sc = np.loadtxt(os.path.join(CACHE, TABLES, "form_scale.txt"))
+    keep = np.abs(sc[:, 0] / table_step - np.round(sc[:, 0] / table_step)) < 1e-9
+    A, S = sc[keep, 0], sc[keep, 1]
+
+    def scale(theta):
+        return np.interp(theta, A, S)
+
+    for f in sorted(os.listdir(out_dir)):
+        if not (f.endswith(".npz") and "_" in f):
+            continue
+        path = os.path.join(out_dir, f)
+        d = dict(np.load(path))
+        if bool(d.get("form_scale_corrected", False)) or "P_pin" not in d:
+            continue
+        th, th_rec = d["theta"], np.interp(d["rec_t"], d["times"], d["theta"])
+        s0 = scale(th[0])
+        for k in ("P_pin", "pins", "adiabatic_power", "adiabatic_power_frozen", "pins_static"):
+            if k in d:
+                d[k + "_raw"] = d[k].copy()
+        d["P_pin"] = d["P_pin"] * scale(th) / s0
+        d["pins"] = d["pins"] * scale(th_rec)[:, None]
+        for k in ("adiabatic_power", "adiabatic_power_frozen"):
+            if k in d:
+                d[k] = d[k] * scale(th) / s0
+        if "pins_static" in d:
+            d["pins_static"] = d["pins_static"] * scale(d["angles"])[:, None]
+        d["form_scale_corrected"] = True
+        np.savez(path, **d)
+        print(f"{f}: P_pin(end) {d['P_pin_raw'][-1]:.5f} -> {d['P_pin'][-1]:.5f} "
+              f"(scale {scale(th[-1]) / s0:.5f})")
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     if mode == "run":
@@ -659,6 +698,8 @@ if __name__ == "__main__":
     elif mode == "compare_full":
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         compare_full(*(sys.argv[2:3] or ["D"]))
+    elif mode == "rescale_forms":
+        rescale_forms(sys.argv[2], float(sys.argv[3]))
     elif mode == "report":
         report(sys.argv[2].split(",") if len(sys.argv) > 2 else sorted(CASES))
     else:

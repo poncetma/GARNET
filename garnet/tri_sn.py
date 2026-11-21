@@ -252,7 +252,7 @@ class TriSNTransportSolver:
                  cmfd_solver: str = "lu", sigma_t_shift=None,
                  graphs: bool = True, scattering_order: int = 0,
                  adjoint: bool = False, cmfd_aggregate: int = 0,
-                 cmfd_split_material: bool = False):
+                 cmfd_split_material: bool = False, cmfd_two_level: int = 0):
         if len(grid.shape) not in (3, 4) or grid.shape[2] != 2:
             raise ValueError("tri-S_N grid shape must be (nr, nc, 2) or "
                              "(nr, nc, 2, nz) for extruded prisms")
@@ -342,6 +342,10 @@ class TriSNTransportSolver:
         # rhombus blocks of one material; 0 keeps one coarse cell per triangle
         self.cmfd_aggregate = int(cmfd_aggregate)
         self.cmfd_split_material = bool(cmfd_split_material)
+        # transient CMFD on the triangles, its GMRES preconditioned by a
+        # two-grid cycle with b x b rhombus aggregates (t_cmfd_preconditioner);
+        # 0 keeps the per-group LU block preconditioner
+        self.cmfd_two_level = int(cmfd_two_level)
         self._mmap0 = np.asarray(mmap).reshape(-1).copy()
         self._agg = None
         if require_fissile and not np.any(self.nsf):
@@ -2199,7 +2203,7 @@ class TriSNTransportSolver:
         t2 = time.perf_counter()
         A = self._cmfd_matrix(g, p, J6)
         t3 = time.perf_counter()
-        solve = factorized(A.tocsc())
+        solve = None if self.cmfd_two_level > 1 else factorized(A.tocsc())
         t4 = time.perf_counter()
         for k, v in (("sweep", t1 - t0), ("currents", t2 - t1), ("assembly", t3 - t2),
                      ("factorization", t4 - t3)):
@@ -2208,15 +2212,18 @@ class TriSNTransportSolver:
         # so the driver can solve the coupled multigroup step with GMRES
         return CoarseGroupFactor(solve, A)
 
-    def _cmfd_aggregation(self):
+    def _cmfd_aggregation(self, b=None):
         """Coarse cells for the aggregated transient CMFD, built once: b x b
         rhombus blocks (2 b^2 triangles) split by material and into connected
         pieces; the coarse faces as sparse sums over the fine edges between
         two aggregates (and onto the vacuum boundary); coarse centroids."""
-        if self._agg is not None:
-            return self._agg
+        b = self.cmfd_aggregate if b is None else int(b)
+        cache = getattr(self, "_agg_by_b", {})
+        self._agg_by_b = cache
+        if b in cache:
+            return cache[b]
         from scipy.sparse.csgraph import connected_components
-        b, N, nr, nc = self.cmfd_aggregate, self.N, self.nr, self.nc
+        N, nr, nc = self.N, self.nr, self.nc
         cell, act = self._cell, self._act_flat
         ii, jj, _ = np.meshgrid(np.arange(nr), np.arange(nc), np.arange(2), indexing="ij")
         block = ((ii // b) * ((nc + b - 1) // b) + (jj // b)).reshape(-1)
@@ -2271,10 +2278,10 @@ class TriSNTransportSolver:
         cC = np.stack([np.bincount(agg[act], weights=cen[act, i], minlength=NC)
                        for i in (0, 1)], axis=1) / count[:, None]
         C, D = pairs // NC, pairs % NC
-        self._agg = dict(agg=agg, NC=NC, count=count, C=C, D=D, Fint=Fint, Fbnd=Fbnd,
-                         n_edges=np.asarray(Fint.sum(axis=1)).ravel(),
-                         dist=np.linalg.norm(cC[C] - cC[D], axis=1))
-        return self._agg
+        cache[b] = dict(agg=agg, NC=NC, count=count, C=C, D=D, Fint=Fint, Fbnd=Fbnd,
+                        n_edges=np.asarray(Fint.sum(axis=1)).ravel(),
+                        dist=np.linalg.norm(cC[C] - cC[D], axis=1))
+        return cache[b]
 
     def t_cmfd_coarse(self, S, phi, ctx):
         """One CMFD step on aggregated coarse cells (``cmfd_aggregate`` = b):
@@ -2374,6 +2381,108 @@ class TriSNTransportSolver:
             X[g, act] = P[g][act] * ratio[ag]
         S_new = sum(nsf[g] * X[g] for g in range(G)) / k0
         return xp.asarray(S_new.reshape(asnumpy(S).shape)), X
+
+    def t_cmfd_two_level_solve(self, facs, ph, S, ctx):
+        """The transient CMFD step on the triangles solved by GMRES on the
+        backend, preconditioned by a two-grid cycle (``cmfd_two_level`` = b):
+        damped Jacobi smoothing on the triangle system, and a correction on
+        b x b aggregates by Galerkin projection with flux-shaped prolongation
+        (each triangle's share of its aggregate follows the current flux
+        ``ph``); the aggregated multigroup system is factorized once on the
+        host. Products, smoothing and Krylov vectors stay on the device; only
+        the aggregated correction (G x NC values) crosses to the host LU.
+        Returns ((fission source, fine flux (G, N)) or None, iterations)."""
+        from .linalg import clip_roundoff_negatives, gmres
+        xp = self.xp
+        if xp is np:
+            spm = sp
+        else:
+            import cupyx.scipy.sparse as spm
+        a = self._cmfd_aggregation(self.cmfd_two_level)
+        agg, NC = a["agg"], a["NC"]
+        cells = np.flatnonzero(self._act_flat)
+        G, N = len(facs), facs[0].matrix.shape[0]
+        nsf, w_fis, sc, k0 = ctx["nsf_h"], ctx["w_fis_h"], ctx["scatter_h"], ctx["k0"]
+        tiny = 1e-300
+        # flux-shaped piecewise-constant prolongation P_g (N x NC), host
+        Pg, Pv = [], []
+        for g in range(G):
+            mean = np.bincount(agg[cells], weights=ph[g][cells], minlength=NC) / a["count"]
+            v = ph[g][cells] / np.maximum(mean[agg[cells]], tiny)
+            Pv.append(v)
+            Pg.append(sp.csr_matrix((v, (cells, agg[cells])), shape=(N, NC)))
+        rows, cols, vals = [], [], []
+        for g in range(G):
+            Ac = (Pg[g].T @ facs[g].matrix @ Pg[g]).tocoo()
+            rows.append(g * NC + Ac.row)
+            cols.append(g * NC + Ac.col)
+            vals.append(Ac.data)
+            for gp in range(G):
+                d = -w_fis[g][cells] * nsf[gp][cells] / k0
+                s_ = sc[gp][g]
+                if gp != g and s_ is not None:
+                    d = d - s_[cells]
+                if not np.any(d):
+                    continue
+                rows.append(g * NC + np.arange(NC))
+                cols.append(gp * NC + np.arange(NC))
+                vals.append(np.bincount(agg[cells], weights=Pv[g] * d * Pv[gp], minlength=NC))
+        lu = splu(sp.csr_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+                                shape=(G * NC, G * NC)).tocsc())
+        # device copies
+        A_d = [spm.csr_matrix(f.matrix) for f in facs]
+        P_d = [spm.csr_matrix(m_) for m_ in Pg]
+        PT_d = [spm.csr_matrix(m_.T.tocsr()) for m_ in Pg]
+        dinv = xp.asarray(np.concatenate([1.0 / f.matrix.diagonal() for f in facs]))
+        nsf_d = [xp.asarray(x) for x in nsf]
+        wf_d = [xp.asarray(x) for x in w_fis]
+        sc_d = [[None if (gf == g or sc[gf][g] is None) else xp.asarray(sc[gf][g])
+                 for g in range(G)] for gf in range(G)]
+        b = xp.asarray(np.concatenate([ctx["dsrc_h"][g] + ctx["theta"][g] * ctx["phi_old_h"][g]
+                                       for g in range(G)]))
+        omega = 0.7
+
+        def matvec(x):
+            X = x.reshape(G, N)
+            F = nsf_d[0] * X[0]
+            for g in range(1, G):
+                F = F + nsf_d[g] * X[g]
+            F = F / k0
+            out = xp.empty_like(X)
+            for g in range(G):
+                y = A_d[g] @ X[g] - wf_d[g] * F
+                for gf in range(G):
+                    if sc_d[gf][g] is not None:
+                        y = y - sc_d[gf][g] * X[gf]
+                out[g] = y
+            return out.reshape(-1)
+
+        def precond(r):
+            z = omega * dinv * r
+            rr = (r - matvec(z)).reshape(G, N)
+            rc = xp.concatenate([PT_d[g] @ rr[g] for g in range(G)])
+            ec = xp.asarray(lu.solve(asnumpy(rc))).reshape(G, NC)
+            z = z + xp.concatenate([P_d[g] @ ec[g] for g in range(G)])
+            return z + omega * dinv * (r - matvec(z))
+
+        x0 = xp.asarray(np.concatenate(ph))
+        x, its = gmres(matvec, b, x0, dinv, xp, rtol=ctx["coarse_rtol"], maxiter=400,
+                       precond=precond, restart=40, raise_on_fail=False)
+        res = float(xp.linalg.norm(b - matvec(x)))
+        if not res <= 10.0 * ctx["coarse_rtol"] * float(xp.linalg.norm(b)):
+            return None, its
+        X = asnumpy(x).reshape(G, N)
+        S_new = sum(nsf[g] * X[g] for g in range(G)) / k0
+        if not np.all(np.isfinite(S_new)) or np.any(S_new < 0.0):
+            return None, its
+        S_out = xp.asarray(S_new.reshape(asnumpy(S).shape))
+        # most negative coarse flux relative to its group maximum (diagnostic:
+        # a negative entry sends back the source alone, see _cmfd_step)
+        self.t_cmfd_xmin = float(min(X[g].min() / max(X[g].max(), tiny) for g in range(G)))
+        # round-off negatives (min X / max X ~ -1e-15 .. -1e-12) are zeroed and
+        # the coarse flux is still prolonged: falling back to the source alone
+        # for them cost 21 instead of 3 sweeps per step (refine 32, b = 8)
+        return ((S_out, X) if clip_roundoff_negatives(X) else S_out), its
 
     def t_can_update(self):
         """Whether ``t_update_materials`` applies (the 2-D levels engine)."""
