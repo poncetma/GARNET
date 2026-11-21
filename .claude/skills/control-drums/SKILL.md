@@ -188,8 +188,21 @@ The workflow of Kumar et al. 2026, implemented on branch SPH-dev:
      max_sweeps=4000, scatter_subsweeps=6`; their defaults stall near
      criticality.
    - **Reference:** quasi-static S_N, with `sn_effective_kinetics` (forward and
-     `adjoint=True` solves) and `adiabatic_point_kinetics`. Plan and status:
-     `docs/sph_drum_transient_plan.md`.
+     `adjoint=True` solves) and β_eff, Λ moving with the angle under the FIXED
+     weight φ0† (frozen at θ0 they cost up to 0.56 % in power, mostly via Λ).
+     `tools/hpmr_drum_transient.py` (`run`, `compare`); results in the audit
+     report §10.8 and `docs/sph_drum_transient_plan.md`. It is valid for
+     $0.2–0.3 moves and for insertions down to about −$1.6. Past that the
+     flux is precursor-driven, and near prompt critical the stable mode departs
+     from the static shape: there a full S_N transient is needed.
+   - **What limits accuracy:** shapes hold (pin RMS ≤ 0.17 %, worst assembly
+     ≤ 0.18 %), and with the exact k(θ) the SPH-DF kinetics reproduce the S_N
+     P(t) within 0.3 %. The power error is the static reactivity between
+     table points: linear interpolation of the cross sections makes k sag
+     10–20 pcm below the chord near 90° on 5° tables, and a $0.25 manoeuvre
+     held for seconds turns that into 3–12 % of power. Check ρ(θ) between
+     table points before trusting P(t) to 1 %; refine the table in the
+     operating window if needed.
    - **Kinetics data:** `hpmr_kinetics_11g()`, the library's own (β = 680 pcm).
 
 Transport effects concentrated in the drums can also be handled by the hybrid

@@ -238,9 +238,15 @@ def _anderson(hist, xp=np):
     return mix_source_history(hist, hist[-1][1], xp, copy_raw=True)
 
 
-def _cmfd_power(facs, nsf, chi, scatter, phi0, k0, xp=np):
+def _cmfd_power(facs, nsf, chi, scatter, phi0, k0, xp=np, group_order=None):
     """Anderson-accelerated power iteration on an assembled CMFD eigenproblem,
     shared by the Cartesian and triangular solvers (everything flat, (N,)).
+
+    ``group_order`` is the Gauss-Seidel order of the group solves (default
+    0..G-1, fast to thermal). An adjoint problem, whose transfers run thermal to
+    fast, needs the reverse: in the forward order its power iteration couples
+    the groups through old iterates only and takes 13x the passes on a
+    three-group test core (hours of host LU solves at HP-MR refine 32).
 
     facs[g] solves the group-g drift-corrected diffusion system; scatter[gf][g]
     is the flat group-transfer field or None. With ``xp=cupy`` the inputs are
@@ -264,16 +270,17 @@ def _cmfd_power(facs, nsf, chi, scatter, phi0, k0, xp=np):
     tn = total0
     hist = []
     prev_err = np.inf
+    order = list(range(G)) if group_order is None else list(group_order)
     for _ in range(500):
         fiss_in = fiss
         fs = fiss / k
         phi_new = [None] * G
-        for g in range(G):
+        for g in order:
             q = chi[g] * fs
             for gf in range(G):
                 s = scatter[gf][g]
                 if gf != g and s is not None:
-                    q = q + s * (phi_new[gf] if gf < g else phi[gf])
+                    q = q + s * (phi[gf] if phi_new[gf] is None else phi_new[gf])
             phi_new[g] = facs[g](q)
         fiss_new = sum(nsf[g] * phi_new[g] for g in range(G))
         tn = float(fiss_new.sum())

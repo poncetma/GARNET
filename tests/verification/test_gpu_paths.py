@@ -11,7 +11,13 @@ executes them. Each test compares the GPU result with an independent path:
 * PCG with CUDA-graph capture against the same solve without capture: same
   iterate, same iteration count, one capture reused by a second solve;
 * GMRES with two-pass classical Gram-Schmidt (CGS2) on the device against
-  modified Gram-Schmidt on the host, across restarts.
+  modified Gram-Schmidt on the host, across restarts;
+* the transient triangular S_N on the level-scheduled sweep with CUDA graphs
+  (tests/verification/test_transient_tri_sn_levels.py) against the CPU LU
+  engine (5 steps of a nu*Sigma_f step, 2.8e-13), and its P2 steady state
+  held (2.6e-12). Broken on purpose (no synchronization before a new graph's
+  warm-up on its non-blocking stream) the seeded angular flux is overwritten
+  by the warm-up and P(t) misses by 3e-3 -- a race, seen in every run.
 
 The module skips without CuPy or a CUDA device.
 """
@@ -145,3 +151,32 @@ def test_gpu_gmres_cgs2_matches_host_mgs(cuda):
     np.testing.assert_allclose(cp.asnumpy(device), host, rtol=1e-9)
     np.testing.assert_allclose(A @ cp.asnumpy(device), b, rtol=0,
                                atol=1e-10 * np.linalg.norm(b))
+
+
+def _tri_sn_transients():
+    from garnet import TransientSNSolver
+    from garnet.tri_sn import TriSNTransportSolver
+    from tests.verification.test_transient_tri_sn_levels import (BASE, GRID, KIN, MMAP,
+                                                                 STEADY, _step)
+
+    def run(problem, engine, device, order=0):
+        s = TransientSNSolver(GRID, problem, KIN, bc="vacuum", engine_cls=TriSNTransportSolver,
+                              n_polar=2, n_azi=8, scheme="scb", engine=engine,
+                              scattering_order=order, device=device, step_acceleration="none")
+        return s.solve(0.05, 0.01, tol_step=1e-10, steady_kwargs=STEADY)
+
+    return (run(_step, "lu", "cpu"), run(_step, "levels", "gpu"),
+            run(lambda t: (BASE, MMAP), "levels", "gpu", order=2))
+
+
+def test_gpu_tri_sn_transient_with_graphs_matches_the_cpu_lu_engine(cuda):
+    lu, gpu, hold = _tri_sn_transients()
+    np.testing.assert_allclose(gpu.power, lu.power, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(hold.power, 1.0, rtol=0, atol=1e-10)
+
+
+def test_gpu_broken_graph_capture_without_sync_misses_the_cpu(cuda, monkeypatch):
+    from garnet.tri_sn import TriSNTransportSolver
+    monkeypatch.setattr(TriSNTransportSolver, "_sync_before_capture", lambda self: None)
+    lu, gpu, _ = _tri_sn_transients()
+    assert np.abs(gpu.power - lu.power).max() > 1e-6

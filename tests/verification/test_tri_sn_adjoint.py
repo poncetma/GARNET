@@ -26,6 +26,12 @@ production swapped, at reversed direction. Checks:
   (Sigma_t + eps/v, central difference: the exact first-order Lambda):
   step 1.2e-4, while the scalar-flux (P0) Lambda misses by 4.1 %. Broken on
   purpose (adjoint odd moments not sign-flipped) Lambda misses by 8.5 %.
+* cost: the adjoint sweeps the groups thermal to fast (its transfers are
+  transposed), in the outer loop and in the CMFD power iteration, so it
+  needs about the forward's CMFD passes per outer (7.3 against 6.3). Broken on
+  purpose (the CMFD power in the forward order) it takes 50 passes per outer
+  (84 with the outer loop also in the forward order); at HP-MR refine 32 those
+  host LU solves ran for hours.
 """
 
 import functools
@@ -244,3 +250,39 @@ def test_generation_time_from_moments_matches_the_inverse_velocity_insertion():
     exact = rf.k_eff * (1.0 / k_up - 1.0 / k_down) / (2.0 * eps)
     assert p.generation_time == pytest.approx(exact, rel=1e-3)          # 1.2e-4
     assert abs(p0.generation_time / exact - 1.0) > 1e-2                 # 4.1 %: moments matter
+
+
+def _cmfd_passes(adjoint, monkeypatch=None):
+    """(k, CMFD power passes per outer) on the three-group core."""
+    grid, mmap, mix_m, mix_w, active = _geometry()
+    s = TriSNTransportSolver(grid, [_fuel(), REFL, ABS], mmap, active=active, n_polar=2,
+                             n_azi=8, scheme="scb", scattering_order=2, mix_material=mix_m,
+                             mix_weight=mix_w, adjoint=adjoint)
+    calls = [0]
+    make = s._make_cmfd_solver
+
+    def counted(A):
+        f = make(A)
+
+        def solve(b):
+            calls[0] += 1
+            return f(b)
+        return solve
+
+    s._make_cmfd_solver = counted
+    r = s.solve(**TIGHT)
+    return r.k_eff, calls[0] / (r.outer_iterations * s.G)
+
+
+def test_adjoint_cmfd_power_sweeps_groups_thermal_to_fast(monkeypatch):
+    kf, fwd = _cmfd_passes(False)
+    ka, adj = _cmfd_passes(True)
+    assert ka == pytest.approx(kf, abs=1e-11)
+    assert adj < 1.5 * fwd                                  # 7.3 against 6.3
+    import garnet.tri_sn as tri_sn
+    power = tri_sn._cmfd_power
+    monkeypatch.setattr(tri_sn, "_cmfd_power",
+                        lambda *a, group_order=None, **kw: power(*a, **kw))
+    kb, broken = _cmfd_passes(True)
+    assert kb == pytest.approx(kf, abs=1e-10)               # same answer, ...
+    assert broken > 5 * fwd                                 # ... 50 passes per outer

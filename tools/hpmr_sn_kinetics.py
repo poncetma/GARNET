@@ -75,6 +75,8 @@ for a in angles:
             f"({' '.join(f'{b * 1e5:.1f}' for b in par.beta)}), Lambda {par.generation_time:.4e} s "
             f"(scalar-flux {p0.generation_time:.4e})")
     print(line + f" [{time.perf_counter() - t0:.0f} s]", flush=True)
+    path = os.path.join(cache, f"{method_tag(method)}_r{refine}_a{a:g}_kinetics.npz")
+    np.savez(path, **out)                      # before the (slower) insertion check
     if insertion:
         # One-sided (+eps, +2 eps) and Richardson: subtracting eps/v would turn
         # the net (n,2n) absorption of Be into a negative removal.
@@ -89,4 +91,4 @@ for a in angles:
         print(f"angle {a:g}: 1/v insertion Lambda {exact:.4e} s (one-sided {rf.k_eff * d[0]:.4e}); "
               f"moments {par.generation_time / exact - 1:+.2e}, scalar-flux "
               f"{p0.generation_time / exact - 1:+.2e} [{time.perf_counter() - t0:.0f} s]", flush=True)
-    np.savez(os.path.join(cache, f"{method_tag(method)}_r{refine}_a{a:g}_kinetics.npz"), **out)
+        np.savez(path, **out)

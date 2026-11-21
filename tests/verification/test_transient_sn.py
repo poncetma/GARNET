@@ -250,18 +250,16 @@ def test_tri_transient_vacuum_leaks_and_stays_steady():
     assert np.allclose(res.power, 1.0, atol=1e-8), np.max(np.abs(res.power - 1))
 
 
-def test_tri_transient_rejects_levels_engine():
-    """The level-scheduled sweep carries one shared cell source per ordinate, so a
-    per-ordinate time source needs wider level tables (Phase 3b): refuse clearly
-    rather than silently dropping the time source."""
-    from garnet.tri import TriGrid
+def test_tri_transient_levels_engine_is_2d_only():
+    """The level-scheduled transient (per-ordinate time source, P_L, in-place
+    updates; tests/verification/test_transient_tri_sn_levels.py) is 2-D only:
+    on extruded prisms refuse clearly rather than drop the time source."""
     from garnet.tri_sn import TriSNTransportSolver
 
-    solver = TransientSNSolver(TriGrid(shape=(8, 8, 2), side=3.0),
-                               lambda t: ([TRI_MAT], None), KIN, bc="vacuum",
-                               engine_cls=TriSNTransportSolver, engine="levels",
-                               **TRI_QUAD)
-    with pytest.raises(NotImplementedError, match="engine='lu'"):
+    solver = TransientSNSolver(tri_grid(is3d=True), lambda t: ([TRI_MAT], None), KIN,
+                               bc="vacuum", engine_cls=TriSNTransportSolver,
+                               engine="levels", **TRI_QUAD)
+    with pytest.raises(NotImplementedError, match="2-D only"):
         solver.solve(t_end=0.02, dt=0.02)
 
 

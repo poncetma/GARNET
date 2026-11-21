@@ -1,0 +1,76 @@
+theta0 90: k 1.0687292 (transient k0 1.0687292), adjoint k 1.0687292, beta_eff 700.7 pcm, Lambda 8.0096e-05 s, projected rho +1.33e-05 pcm
+static solves at 101 angles: 1008 s
+case A: rho(end) +175.7 pcm ($+0.251), P(end) full 4.44644, adiabatic 4.44364 (amplitude only 4.42323), solver power 4.43440
+  power: max |adiabatic/full - 1| 0.063 % at t = 20 s; energy -0.041 %; amplitude-only max 0.522 %
+  beta_eff, Lambda frozen at theta0: max 0.150 %, energy -0.120 %; Lambda(theta) moves -0.000 to +0.062 %, projected rho - (1 - k0/k) max 1.22e-05 pcm
+  shape lag, pin RMS: max 0.008 % at t = 20 s, end 0.008 %
+  shape lag, worst pin: max 0.027 % at t = 19.98 s, end 0.027 %
+  shape lag, worst assembly: max 0.008 % at t = 20 s, end 0.008 %
+
+theta0 90: k 1.0687292 (transient k0 1.0687292), adjoint k 1.0687292, beta_eff 700.7 pcm, Lambda 8.0096e-05 s, projected rho +1.33e-05 pcm
+static solves at 41 angles: 541 s
+case B: rho(end) +175.7 pcm ($+0.251), P(end) full 1.62118, adiabatic 1.62095 (amplitude only 1.61350), solver power 1.61679
+  power: max |adiabatic/full - 1| 0.015 % at t = 2 s; energy -0.010 %; amplitude-only max 0.474 %
+  beta_eff, Lambda frozen at theta0: max 0.089 %, energy -0.080 %; Lambda(theta) moves -0.000 to +0.062 %, projected rho - (1 - k0/k) max 1.22e-05 pcm
+  shape lag, pin RMS: max 0.006 % at t = 2 s, end 0.006 %
+  shape lag, worst pin: max 0.021 % at t = 2 s, end 0.021 %
+  shape lag, worst assembly: max 0.008 % at t = 0.2 s, end 0.004 %
+
+theta0 90: k 1.0687292 (transient k0 1.0687292), adjoint k 1.0687292, beta_eff 700.7 pcm, Lambda 8.0096e-05 s, projected rho +1.33e-05 pcm
+static solves at 101 angles: 1012 s
+case C: rho(end) +0.0 pcm ($+0.000), P(end) full 0.99448, adiabatic 0.99446 (amplitude only 0.99446), solver power 0.99448
+  power: max |adiabatic/full - 1| 0.009 % at t = 4.59 s; energy -0.005 %; amplitude-only max 0.468 %
+  beta_eff, Lambda frozen at theta0: max 0.562 %, energy +0.111 %; Lambda(theta) moves -0.559 to +0.062 %, projected rho - (1 - k0/k) max 2.38e-05 pcm
+  shape lag, pin RMS: max 0.008 % at t = 1.45 s, end 0.005 %
+  shape lag, worst pin: max 0.023 % at t = 0.75 s, end 0.017 %
+  shape lag, worst assembly: max 0.010 % at t = 1.44 s, end 0.005 %
+
+theta0 40: k 1.0298218 (transient k0 1.0298218), adjoint k 1.0298218, beta_eff 706.8 pcm, Lambda 7.7065e-05 s, projected rho +5.43e-05 pcm
+static solves at 101 angles: 1323 s
+case E: rho(end) +623.9 pcm ($+0.883), P(end) full 98402.94325, adiabatic 90520.92284 (amplitude only 88246.65577), solver power 97424.52374
+  power: max |adiabatic/full - 1| 8.010 % at t = 5 s; energy -7.212 %; amplitude-only max 10.321 %
+  beta_eff, Lambda frozen at theta0: max 10.614 %, energy -9.524 %; Lambda(theta) moves -1.189 to -0.000 %, projected rho - (1 - k0/k) max 5.10e-05 pcm
+  shape lag, pin RMS: max 0.030 % at t = 4.9 s, end 0.030 %
+  shape lag, worst pin: max 0.097 % at t = 4.74 s, end 0.097 %
+  shape lag, worst assembly: max 0.036 % at t = 4.65 s, end 0.036 %
+
+theta0 180: k 1.1127416 (transient k0 1.1127416), adjoint k 1.1127416, beta_eff 694.1 pcm, Lambda 9.1047e-05 s, projected rho +6.12e-07 pcm
+static solves at 401 angles: 4539 s
+case D: rho(end) -9331.5 pcm ($-13.445), P(end) full 0.02474, adiabatic 0.02638 (amplitude only 0.03013), solver power 0.02798
+  power: max |adiabatic/full - 1| 6.614 % at t = 1.97 s; energy +1.131 %; amplitude-only max 23.631 %
+  beta_eff, Lambda frozen at theta0: max 14.574 %, energy +4.777 %; Lambda(theta) moves -7.880 to -0.000 %, projected rho - (1 - k0/k) max 1.75e-04 pcm
+  shape lag, pin RMS: max 4.893 % at t = 2.01 s, end 4.805 %
+  shape lag, worst pin: max 10.214 % at t = 1.915 s, end 9.942 %
+  shape lag, worst assembly: max 6.363 % at t = 2.005 s, end 6.239 %
+
+case E2 (base): theta 43.75 -> 46.25 deg, t_end 5 s, dt 0.01 s, tables sphdf_tables_sec8ba_local41polar_r32, device gpu
+theta0 43.75: k 1.0321296 (transient k0 1.0321296), adjoint k 1.0321296, beta_eff 706.4 pcm, Lambda 7.7211e-05 s, projected rho +4.28e-05 pcm
+static solves at 101 angles: 1143 s
+case E2: rho(end) +158.5 pcm ($+0.224), P(end) full 1.79526, adiabatic 1.79490 (amplitude only 1.78368), solver power 1.79084
+  power: max |adiabatic/full - 1| 0.020 % at t = 5 s; energy -0.013 %; amplitude-only max 0.645 %
+  beta_eff, Lambda frozen at theta0: max 0.268 %, energy +0.115 %; Lambda(theta) moves -0.282 to -0.000 %, projected rho - (1 - k0/k) max 4.76e-05 pcm
+  shape lag, pin RMS: max 0.008 % at t = 5 s, end 0.008 %
+  shape lag, worst pin: max 0.029 % at t = 5 s, end 0.029 %
+  shape lag, worst assembly: max 0.008 % at t = 5 s, end 0.008 %
+
+case B (base): theta 90 -> 92.5 deg, t_end 2 s, dt 0.0025 s, tables sphdf_tables_sec8ba_local41polar_r32, device gpu
+theta0 90: k 1.0687292 (transient k0 1.0687292), adjoint k 1.0687292, beta_eff 700.7 pcm, Lambda 8.0096e-05 s, projected rho +1.33e-05 pcm
+static solves at 81 angles: 774 s
+case B: rho(end) +175.7 pcm ($+0.251), P(end) full 1.62103, adiabatic 1.61959 (amplitude only 1.61215), solver power 1.61664
+  power: max |adiabatic/full - 1| 0.089 % at t = 2 s; energy -0.080 %; amplitude-only max 0.548 %
+  shape lag, pin RMS: max 0.006 % at t = 2 s, end 0.006 %
+  shape lag, worst pin: max 0.021 % at t = 2 s, end 0.021 %
+  shape lag, worst assembly: max 0.008 % at t = 0.2 s, end 0.004 %
+
+255357.log:full transient: 500 steps, 1332 s, P(end) 1.790836, FGMRES applications per step 19.3
+255331.log:full transient: 800 steps, 1244 s, P(end) 1.616644, FGMRES applications per step 14.5
+255337.log:full transient: 1000 steps, 2189 s, P(end) 4.444704, FGMRES applications per step 18.7
+255336.log:full transient: 400 steps, 756 s, P(end) 1.617829, FGMRES applications per step 17.0
+255330.log:full transient: 400 steps, 916 s, P(end) 1.616793, FGMRES applications per step 17.0
+255338.log:full transient: 800 steps, 1731 s, P(end) 0.027979, FGMRES applications per step 17.2
+255332.log:full transient: 600 steps, 1838 s, P(end) 0.994479, FGMRES applications per step 23.7
+255335.log:full transient: 400 steps, 799 s, P(end) 1.616737, FGMRES applications per step 17.7
+255339.log:full transient: 800 steps, 1855 s, P(end) 0.028190, FGMRES applications per step 18.2
+255334.log:full transient: 800 steps, 1722 s, P(end) 0.027980, FGMRES applications per step 17.5
+255333.log:full transient: 500 steps, 1506 s, P(end) 97424.523735, FGMRES applications per step 23.7
+255329.log:full transient: 1000 steps, 1790 s, P(end) 4.434399, FGMRES applications per step 18.6

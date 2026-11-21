@@ -2908,12 +2908,15 @@ class TransientSNSolver:
     def __init__(self, grid: Grid, problem_at, kinetics: Kinetics,
                  engine_cls=SNTransportSolver, bc: str = "vacuum",
                  device: str = "cpu", dtype=np.float64,
-                 step_acceleration: str = "auto", **engine_kwargs):
+                 step_acceleration: str = "auto", on_step=None, **engine_kwargs):
         _require_global_kinetics(kinetics, "TransientSNSolver")
         if step_acceleration not in self.STEP_ACCELERATIONS:
             raise ValueError(f"step_acceleration must be one of "
                              f"{self.STEP_ACCELERATIONS}")
         self.step_acceleration = step_acceleration
+        # optional callable (t, flux, power) after each accepted step (and at
+        # t = 0 with the normalized steady flux), as in TransientSolver
+        self.on_step = on_step
         self.grid = grid
         self.problem_at = problem_at
         self.kinetics = kinetics
@@ -2925,10 +2928,26 @@ class TransientSNSolver:
         self.device = device_name(self.xp)
         self.dtype = np.dtype(dtype)
 
-    def _engine(self, mats, mmap, **extra):
+    @staticmethod
+    def _problem(spec):
+        """``problem_at(t)`` -> (materials, material_map, mix_material,
+        mix_weight): a 2-tuple, or a 4-tuple with the volume blend of the
+        mixed cells (e.g. a rotating drum's absorber arc)."""
+        spec = tuple(spec)
+        if len(spec) == 2:
+            return spec + (None, None)
+        if len(spec) == 4:
+            return spec
+        raise ValueError("problem_at must return (materials, material_map) or "
+                         "(materials, material_map, mix_material, mix_weight)")
+
+    def _engine(self, prob, **extra):
+        mats, mmap, mix_material, mix_weight = prob
+        mix = ({} if mix_material is None
+               else dict(mix_material=mix_material, mix_weight=mix_weight))
         return self.engine_cls(self.grid, mats, mmap, bc=self.bc,
                                device=self.device_arg, **self.engine_kwargs,
-                               **extra)
+                               **mix, **extra)
 
     def _cmfd_step(self, eng, S, phi, ctx):
         """One CMFD acceleration of the within-step fission fixed point.
@@ -2950,6 +2969,13 @@ class TransientSNSolver:
 
         Returns the accelerated fission source, or None to fall back."""
         xp, G = self.xp, ctx["G"]
+        if getattr(eng, "cmfd_aggregate", 0) > 1 and hasattr(eng, "t_cmfd_coarse"):
+            out = eng.t_cmfd_coarse(S, phi, ctx)
+            events = getattr(self, "_cmfd_events", None)
+            if events is not None:
+                events.append(("ok", "aggregated") if out is not None
+                              else ("negative", "aggregated"))
+            return out
         facs = []
         for g in range(G):
             qext = ctx["w_fis"][g] * S + ctx["dsrc"][g]
@@ -2968,12 +2994,15 @@ class TransientSNSolver:
         nsf = ctx["nsf_h"]
         ph = [asnumpy(p).ravel().copy() for p in phi]
         Sv = asnumpy(S).ravel().copy()
+        if all(hasattr(f, "matrix") for f in facs):
+            return self._cmfd_krylov(facs, ph, S, ctx)
         w_tot = sum(ctx["w_fis_h"])
         fixed_total = float(sum(np.sum(ctx["dsrc_h"][g]
                                        + ctx["theta"][g] * ctx["phi_old_h"][g])
                                 for g in range(G)))
         hist = []
-        for _ in range(200):
+        events = getattr(self, "_cmfd_events", None)
+        for it in range(200):
             for g in range(G):
                 q = (ctx["w_fis_h"][g] * Sv + ctx["dsrc_h"][g]
                      + ctx["theta"][g] * ctx["phi_old_h"][g])
@@ -2984,6 +3013,8 @@ class TransientSNSolver:
                 ph[g] = facs[g](q)
             S_new = sum(nsf[g] * ph[g] for g in range(G)) / ctx["k0"]
             if not np.all(np.isfinite(S_new)) or np.any(S_new < 0.0):
+                if events is not None:
+                    events.append(("negative", it + 1))
                 return None
             d = np.linalg.norm(S_new - Sv) / max(np.linalg.norm(S_new), 1e-300)
             amplitude = _amplitude_error(fixed_total,
@@ -2994,16 +3025,108 @@ class TransientSNSolver:
             if d < ctx["tol"] and amplitude < ctx["tol"]:
                 break
         else:
+            if events is not None:
+                events.append(("stalled", f"{d:.1e}/{amplitude:.1e}"))
             return None
+        if events is not None:
+            events.append(("ok", it + 1))
         return xp.asarray(Sv.reshape(asnumpy(S).shape))
+
+    def _cmfd_krylov(self, facs, ph, S, ctx):
+        """The coarse step solved as ONE linear system over all groups,
+
+            A_g phi_g - sum_g' s(g' -> g) phi_g' - w_fis,g nuSf.phi / k0
+                = delayed_g + theta_g phi_old,g,
+
+        by GMRES, preconditioned with one downscatter pass of the groups' LU
+        back-solves (exact for the downscatter part; Krylov resolves fission
+        and upscatter). The fixed point on the fission source used otherwise
+        contracts like k_prompt and stalls near criticality (HP-MR: 200 passes
+        left an amplitude error larger than the transport iterate's). As in
+        OpenSN, an unconverged coarse solve is skipped, not applied."""
+        from scipy.sparse.linalg import LinearOperator, gmres
+        G, N = len(facs), facs[0].matrix.shape[0]
+        nsf, w_fis, sc = ctx["nsf_h"], ctx["w_fis_h"], ctx["scatter_h"]
+        k0 = ctx["k0"]
+        b = np.concatenate([ctx["dsrc_h"][g] + ctx["theta"][g] * ctx["phi_old_h"][g]
+                            for g in range(G)])
+
+        def matvec(x):
+            X = x.reshape(G, N)
+            F = sum(nsf[g] * X[g] for g in range(G)) / k0
+            out = np.empty_like(X)
+            for g in range(G):
+                y = facs[g].matrix @ X[g] - w_fis[g] * F
+                for gf in range(G):
+                    s = sc[gf][g]
+                    if gf != g and s is not None:
+                        y = y - s * X[gf]
+                out[g] = y
+            return out.ravel()
+
+        def precondition(r):
+            R = r.reshape(G, N)
+            Y = np.empty_like(R)
+            for g in range(G):
+                q = R[g].copy()
+                for gf in range(g):
+                    s = sc[gf][g]
+                    if s is not None:
+                        q = q + s * Y[gf]
+                Y[g] = facs[g](q)
+            return Y.ravel()
+
+        op = LinearOperator((G * N, G * N), matvec=matvec, dtype=float)
+        pc = LinearOperator((G * N, G * N), matvec=precondition, dtype=float)
+        counter = [0]
+        t_gmres = time.perf_counter()
+        x, info = gmres(op, b, x0=np.concatenate(ph), M=pc, rtol=ctx["coarse_rtol"],
+                        restart=40, maxiter=10,
+                        callback=lambda _: counter.__setitem__(0, counter[0] + 1),
+                        callback_type="pr_norm")
+        self._gmres_seconds = time.perf_counter() - t_gmres
+        events = getattr(self, "_cmfd_events", None)
+        X = x.reshape(G, N)
+        S_new = sum(nsf[g] * X[g] for g in range(G)) / k0
+        if info != 0 or not np.all(np.isfinite(S_new)) or np.any(S_new < 0.0):
+            if events is not None:
+                events.append(("stalled" if info != 0 else "negative", counter[0]))
+            return None
+        if events is not None:
+            events.append(("ok", counter[0]))
+        xp = self.xp
+        S_out = xp.asarray(S_new.reshape(asnumpy(S).shape))
+        if np.any(X < 0.0):                    # keep the transport flux
+            return S_out
+        # the coarse scalar flux replaces the transport iterate (the steady
+        # CMFD does the same): with the fission source alone, the next sweep's
+        # scattering sources come from the stale flux, which in a scattering-
+        # dominated core (HP-MR Be, YH) undoes the correction (amplitude error
+        # 5e-5 -> 0.12 after each coarse step)
+        return S_out, X
 
     def solve(self, t_end: float, dt: float, tol_step: float = 1e-6,
               max_sweeps: int = 200, anderson_depth: int = 5,
               steady_kwargs: dict | None = None,
               time_scheme: str = "backward-euler", time_weight: float | None = None,
-              verbose: bool = False) -> TransientResult:
+              verbose: int = 0, rebalance: bool = False,
+              update_in_place: bool = True) -> TransientResult:
         """March from the steady S_N state at t=0 to t_end with fixed step dt
         (see :meth:`TransientSolver.solve` for the shared parameters).
+
+        verbose : 1 prints one line per step (power, sweeps, wall time, CMFD
+            outcomes); 2 also one line per within-step sweep and CMFD step.
+        rebalance : enforce whole-core neutron balance on every iterate of the
+            within-step fixed point, as :meth:`TransientSolver.solve` does
+            (the flux, angular flux and engine-held moments are rescaled by
+            the balance factor). Near criticality the plain iteration
+            contracts like the prompt multiplication factor and its source
+            change understates the amplitude error. Use with
+            ``anderson_depth=1``.
+        update_in_place : when ``problem_at`` changes, update an engine that
+            offers ``t_update_materials`` (the 2-D level-scheduled tri engine)
+            instead of rebuilding it -- for a moving control the rebuild redoes
+            the sweep schedule and corner geometry every step.
 
         time_weight : the theta-method weight w on the end-of-step operator --
             w = 1 (default) is backward Euler, w = 1/2 Crank-Nicolson. Written
@@ -3048,8 +3171,8 @@ class TransientSNSolver:
         t0 = time.perf_counter()
 
         # --- initial condition: steady S_N state, critically adjusted --------
-        mats, mmap = self.problem_at(0.0)
-        eng = self._engine(mats, mmap)
+        prob = self._problem(self.problem_at(0.0))
+        eng = self._engine(prob)
         G = eng.G
         if kin.velocities.shape[-1] != G:
             raise ValueError("kinetics.velocities must have one entry per group")
@@ -3118,15 +3241,22 @@ class TransientSNSolver:
         # (tri/prism) need Sigma_t + theta baked in at construction; the Cartesian
         # sweep takes the shifted cross section per call and reuses this instance.
         if getattr(self.engine_cls, "T_SHIFT_AT_CONSTRUCTION", False):
-            eng = self._engine(mats, mmap, sigma_t_shift=theta)
+            eng = self._engine(prob, sigma_t_shift=theta)
             ss, nsf, chi, scatter = load_fields(eng)
         eng.t_setup(theta)
 
+        def rescale(factor):
+            for g in range(G):
+                phi[g] = phi[g] * factor
+                psi[g] = psi[g] * factor
+            if hasattr(eng, "t_scale"):
+                eng.t_scale(state, factor)
+
         scale = 1.0 / total_power(S)                     # P(0) = 1
-        for g in range(G):
-            phi[g] = phi[g] * scale
-            psi[g] = psi[g] * scale
+        rescale(scale)
         S = S * scale
+        if self.on_step is not None:
+            self.on_step(0.0, phi, 1.0)
         C = [(beta[i] / lam[i]) * S for i in range(kin.n_families)]  # equilibrium
 
         # Analytic BDF precursor substitution (see garnet/timescheme.py): with
@@ -3163,7 +3293,7 @@ class TransientSNSolver:
             return [chi[g] * dsum for g in range(G)]
 
         w_fis = fission_weights(bcoef_sum)
-        last = (mats, mmap)
+        last = prob
 
         # Carried fields Psi (angular and its scalar integral), seeded from the
         # steady state; the scheme owns how they advance. One scheme instance
@@ -3186,18 +3316,23 @@ class TransientSNSolver:
 
         for n in range(1, n_steps + 1):
             t = n * dt
-            mats, mmap = self.problem_at(t)
-            if mats is not last[0] or mmap is not last[1]:
-                inner_total += eng._sweep_count - sweeps0
-                shift = (dict(sigma_t_shift=theta)
-                         if getattr(self.engine_cls,
-                                    "T_SHIFT_AT_CONSTRUCTION", False) else {})
-                eng = self._engine(mats, mmap, **shift)
+            step_t0 = time.perf_counter()
+            self._cmfd_events = []
+            prob = self._problem(self.problem_at(t))
+            if any(a is not b for a, b in zip(prob, last)):
+                if update_in_place and getattr(eng, "t_can_update", lambda: False)():
+                    eng.t_update_materials(*prob)
+                else:
+                    inner_total += eng._sweep_count - sweeps0
+                    shift = (dict(sigma_t_shift=theta)
+                             if getattr(self.engine_cls,
+                                        "T_SHIFT_AT_CONSTRUCTION", False) else {})
+                    eng = self._engine(prob, **shift)
+                    eng.t_setup(theta)
+                    sweeps0 = eng._sweep_count
                 ss, nsf, chi, scatter = load_fields(eng)
-                eng.t_setup(theta)
                 w_fis = fission_weights(bcoef_sum)
-                sweeps0 = eng._sweep_count
-                last = (mats, mmap)
+                last = prob
 
             # A multistep scheme raises a0 once it leaves its bootstrap step;
             # the shift, the DSA/CMFD factors and the precursor coefficients
@@ -3209,7 +3344,7 @@ class TransientSNSolver:
                 bcoef_sum = bcoef_sum_at(n)
                 if getattr(self.engine_cls, "T_SHIFT_AT_CONSTRUCTION", False):
                     inner_total += eng._sweep_count - sweeps0
-                    eng = self._engine(mats, mmap, sigma_t_shift=theta)
+                    eng = self._engine(prob, sigma_t_shift=theta)
                     ss, nsf, chi, scatter = load_fields(eng)
                     sweeps0 = eng._sweep_count
                 eng.t_setup(theta)
@@ -3250,6 +3385,7 @@ class TransientSNSolver:
             change_prev = np.inf
             hist: list = []
             for sweep in range(1, max_sweeps + 1):
+                sweep_t0 = time.perf_counter()
                 rtol = (rtol_floor if sweep == 1
                         else min(1e-6, max(1e-3 * change, rtol_floor)))
                 phi_new = [None] * G
@@ -3268,9 +3404,20 @@ class TransientSNSolver:
                 G_S = fission_source(phi_new) / k0
                 delta = G_S - S
                 change = float(xp.sqrt(xp.sum(delta * delta) / xp.sum(G_S**2)))
-                amplitude = _amplitude_error(fixed_total,
-                                             float(xp.sum(w_tot * delta)))
+                w_delta = float(xp.sum(w_tot * delta))
+                amplitude = _amplitude_error(fixed_total, w_delta)
                 phi, psi = phi_new, psi_new
+                denom = fixed_total - w_delta
+                if rebalance and fixed_total > 0.0 and denom > 0.0:
+                    # whole-core balance pins the amplitude (TransientSolver)
+                    f = min(max(fixed_total / denom, 0.5), 2.0)
+                    G_S = G_S * f
+                    rescale(f)
+                    delta = G_S - S
+                if verbose and verbose > 1:
+                    print(f"    sweep {sweep:3d}: change {change:.2e}, amplitude "
+                          f"{amplitude:.2e} [{time.perf_counter() - sweep_t0:.1f} s]",
+                          flush=True)
                 if change < tol_step and amplitude < tol_step:
                     S = G_S
                     break
@@ -3278,7 +3425,24 @@ class TransientSNSolver:
                     # The coarse solve collapses the slow fission modes; on
                     # fallback (non-finite/negative flux or a stalled coarse
                     # fixed point) the plain Anderson iterate is used instead.
+                    cmfd_t0 = time.perf_counter()
+                    # coarse accuracy well below the current transport change
+                    ctx["coarse_rtol"] = max(1e-12, min(1e-6, 1e-3 * change))
                     S_c = self._cmfd_step(eng, G_S, phi, ctx)
+                    if verbose and verbose > 1 and self._cmfd_events:
+                        tm = getattr(eng, "t_cmfd_times", {})
+                        parts = ", ".join(f"{k} {v:.1f}" for k, v in tm.items())
+                        print(f"      CMFD {self._cmfd_events[-1]} "
+                              f"[{time.perf_counter() - cmfd_t0:.1f} s: {parts}, gmres "
+                              f"{getattr(self, '_gmres_seconds', 0.0):.1f}]", flush=True)
+                        if tm:
+                            tm.clear()
+                    if isinstance(S_c, tuple):
+                        S_c, X = S_c
+                        new_phi = [xp.asarray(X[g].reshape(phi[g].shape)) for g in range(G)]
+                        if hasattr(eng, "t_prolong"):
+                            eng.t_prolong(state, phi, new_phi)
+                        phi = new_phi
                     if S_c is not None:
                         S = S_c
                         hist = []      # stale pairs: the map just changed
@@ -3311,8 +3475,17 @@ class TransientSNSolver:
             times.append(t)
             power.append(total_power(S))
             step_its.append(sweep)
-            if verbose and (n % max(1, n_steps // 20) == 0 or n == n_steps):
-                print(f"  t = {t:8.4f} s   P/P0 = {power[-1]:.5f}   ({sweep} sweeps)")
+            if self.on_step is not None:
+                self.on_step(t, phi, power[-1])
+            if verbose:
+                synchronize(xp)
+                ev = ""
+                if self._cmfd_events:
+                    kinds = [e[0] for e in self._cmfd_events]
+                    ev = (f", CMFD {kinds.count('ok')} ok / {kinds.count('stalled')} stalled"
+                          f" / {kinds.count('negative')} negative, last {self._cmfd_events[-1]}")
+                print(f"  t = {t:8.4f} s   P/P0 = {power[-1]:.6f}   ({sweep} sweeps, "
+                      f"{time.perf_counter() - step_t0:.1f} s{ev})", flush=True)
 
         inner_total += eng._sweep_count - sweeps0
         synchronize(xp)
