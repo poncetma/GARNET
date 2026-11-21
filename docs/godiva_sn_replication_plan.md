@@ -1,6 +1,39 @@
 # Plan: the GeN-Foam Godiva S_N case in GARNET (neutronics only)
 
-Status: items 0 and 1 done 2026-11-21 (reader `garnet/genfoam.py`, 1D spherical S_N `garnet/sphere_sn.py`, study `tools/godiva_1d.py`); items 2-5 (3D) not started.
+Status: items 0 and 1 done 2026-11-21 (reader `garnet/genfoam.py`, 1D spherical S_N `garnet/sphere_sn.py`, study `tools/godiva_1d.py`). Items 2–4 done 2026-11-21:
+- user ordinate sets, `quadrature=`, `octant_quadrature`, `read_quadrature_set`;
+- 3D P_L on prisms, both engines, with CMFD and DSA (`tests/verification/test_tri_sn_3d_anisotropic.py`);
+- `sphere_on_prisms`, blend and staircase.
+
+Item 5 (GPU runs, `tools/godiva_3d.py`) is waiting for a decision on the axial discretization, below.
+
+## 3D findings (2026-11-21)
+
+- **GeN-Foam's quadrature sets are not P2-exact.** The Gram error of the real harmonics up to l = 2:
+
+  | Set | Gram error, l ≤ 2 |
+  |---|---|
+  | Default, 32 directions | 4.4e-2 (diagonal 0.2) |
+  | 128 directions | 3.7e-3 |
+  | Chebyshev–Legendre S8 | 2.3e-4 |
+  | GARNET product 4 × 16 | exact to round-off up to l = 3 |
+  | GARNET product 8 × 16 | exact to round-off up to l = 4 |
+
+  By the addition theorem the moment source equals the direction-pair source of GeN-Foam on any set. GARNET therefore accepts such a set with `quadrature_check="warn"` and solves the same discrete scattering operator.
+- **The prism SCB is first order in z.** In-plane it splits each triangle into three corners; the axial caps are upwinded (step).
+  - **Sood problem 14** (exactly critical sphere, one group, R = 7.43 cm), blend surface, 4 × 16 set:
+
+    | Cells across | 8 | 12 | 16 | 24 | 32 |
+    |---|---|---|---|---|---|
+    | k − 1 (pcm) | −7861 | −5192 | −3811 | −2506 | −1847 |
+
+    Error × cells stays near −60,000.
+  - **Staircase surface:** −4578 / −3134 / −2330 pcm at 16 / 24 / 32 cells.
+  - **Refining dz alone** at h = 1.24 cm: −5192 → −3749 → −2956 pcm. The error is first order in dz and accounts for about 60 % of the total at the default dz = h √3/2.
+  - **Options:**
+    - (a) extrapolate a first-order mesh sequence, with an uncertainty of about 100 pcm;
+    - (b) a 6-corner SCB prism (3 in-plane × 2 axial corners, with internal axial corner faces), second order in z, 6 × 6 corner blocks. About 1–2 days. Recommended for a k comparable to the 1D reference.
+- **GPU memory:** the levels engine caches every group's SCB tables, 72 B per (direction, corner cell). For 23 groups and 128 directions that is about 37 GB at h = 0.35 cm and over 100 GB at 0.25 cm. Per-group eviction is needed below about 0.3 cm.
 
 ## 1D results (2026-11-21)
 

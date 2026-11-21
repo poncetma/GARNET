@@ -1,0 +1,37 @@
+23 groups, P0-P5 in the file, GeN-Foam uses P2; sum chi = 1.00000009, beta = 637.3 pcm
+  mesh   25 shells S64: k = 0.9943183 (5.0 s)
+  mesh   50 shells S64: k = 0.9943055 (1.2 s)
+  mesh  100 shells S64: k = 0.9943021 (1.2 s)
+  mesh  200 shells S64: k = 0.9943012 (2.1 s)
+  mesh  400 shells S64: k = 0.9943009 (3.8 s)
+  angle S8   200 shells: k = 0.9967140
+  angle S16  200 shells: k = 0.9949300
+  angle S32  200 shells: k = 0.9944323
+  angle S64  200 shells: k = 0.9943012
+  angle S128 200 shells: k = 0.9942676
+  P0                                     S64 200 shells: k = 1.1016677
+  P1                                     S64 200 shells: k = 0.9894865
+  P2                                     S64 200 shells: k = 0.9943012
+  P3                                     S64 200 shells: k = 0.9942721
+  P5                                     S64 200 shells: k = 0.9942773
+  P0 transport-corrected (out-scatter)   S64 200 shells: k = 0.9976185
+  P0 transport-corrected (diagonal)      S64 200 shells: k = 0.9983193
+
+| Quantity | k | vs k = 1 (pcm) | vs GeN-Foam 0.980106 (pcm) |
+|---|---|---|---|
+| P2, converged (mesh + angle extrapolated) | 0.994256 | -574 | +1415 |
+| P2, S64, 200 shells | 0.994301 | -570 | +1420 |
+
+mesh error at 200 shells: +0.03 pcm; angular error at S64: +4.48 pcm
+
+| Scattering | k (S64, 200 shells) | vs P2 (pcm) |
+|---|---|---|
+| P0 | 1.101668 | +10737 |
+| P1 | 0.989486 | -481 |
+| P2 | 0.994301 | +0 |
+| P3 | 0.994272 | -3 |
+| P5 | 0.994277 | -2 |
+| P0 transport-corrected (out-scatter) | 0.997619 | +332 |
+| P0 transport-corrected (diagonal) | 0.998319 | +402 |
+
+written <OUT_DIR>/godiva_1d.json

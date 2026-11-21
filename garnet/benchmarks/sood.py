@@ -157,11 +157,89 @@ def cell_vertices(shape, side):
                                              side=side, origin=(1, 1)))
 
 
+def sphere_on_prisms(radius: float, side: float, dz: float | None = None,
+                     treatment: str = "blend", n_gauss: int = 32):
+    """A sphere of ``radius`` on extruded triangular prisms of side ``side`` and
+    height ``dz`` (default: the triangle's height, side sqrt(3)/2).
+
+    The covered volume of every prism is the z-integral, by ``n_gauss``-point
+    Gauss-Legendre inside each layer, of the exact triangle-disk areas of the
+    disk of radius sqrt(R^2 - z^2) (``annular_sector_fraction``, closed form).
+    The residual quadrature error (kinks where the disk edge crosses a
+    triangle vertex) is removed by scaling the partial prisms' fractions to
+    the exact sphere volume.
+
+    treatment:
+      "blend": every prism the sphere touches is active, partial ones mixed
+        with void at their covered fraction. Mass exact; smeared surface.
+      "staircase": the N most-covered prisms are full fuel, N = the sphere
+        volume / prism volume (mass preserved to one prism); others excised.
+
+    Returns SimpleNamespace(grid, covered (grid.shape), active, mix_weight
+    (void weight 1 - covered on partial prisms, 0 elsewhere), centre (x, y, z),
+    volume_exact, volume_model).
+    """
+    if treatment not in ("blend", "staircase"):
+        raise ValueError("treatment must be 'blend' or 'staircase'")
+    from ..model import annular_sector_fraction
+    h = float(side)
+    dz = h * SQ3 / 2.0 if dz is None else float(dz)
+    n = int(np.ceil(4.0 * (radius + h) / (h * SQ3))) + 1
+    nz = int(np.ceil(2.0 * radius / dz)) + 2
+    grid = TriGrid(shape=(n, n, 2, nz), side=h, height=nz * dz)
+    V = cell_vertices(grid.shape, h).reshape(-1, 3, 2)
+    centre_xy = 0.5 * n * (np.array([0.0, h]) + np.array([h * SQ3 / 2.0, h / 2.0]))
+    zc = 0.5 * nz * dz
+    cen = V.mean(axis=1)
+    reach = np.sqrt(((V - cen[:, None, :]) ** 2).sum(axis=2)).max(axis=1)
+    d = np.hypot(cen[:, 0] - centre_xy[0], cen[:, 1] - centre_xy[1])
+    x, wq = np.polynomial.legendre.leggauss(n_gauss)
+    covered = np.zeros((n * n * 2, nz))
+    for k in range(nz):
+        z0 = k * dz - zc
+        for xq, wk in zip(x, wq):
+            z = z0 + 0.5 * dz * (xq + 1.0)
+            r2 = radius * radius - z * z
+            if r2 <= 0.0:
+                continue
+            r = np.sqrt(r2)
+            frac = (d + reach <= r).astype(float)
+            for c in np.flatnonzero((d - reach < r) & (d + reach > r)):
+                frac[c] = annular_sector_fraction(V[c], centre_xy, 0.0, r, 0.0, np.pi)
+            covered[:, k] += 0.5 * wk * frac
+    covered = np.clip(covered, 0.0, 1.0).reshape(n, n, 2, nz)
+    vol_exact = 4.0 / 3.0 * np.pi * radius ** 3
+    # the residual quadrature error sits in the partial prisms: rescale those
+    full = covered >= 1.0 - 1e-12
+    part = (covered > 1e-12) & ~full
+    deficit = vol_exact / grid.cell_volume - full.sum()
+    covered[part] *= deficit / covered[part].sum()
+    if covered.max() > 1.0 + 1e-12:
+        raise RuntimeError("volume rescaling pushed a partial prism above full cover")
+    if treatment == "blend":
+        active = covered > 1e-12
+        mix_weight = np.where(active & (covered < 1.0 - 1e-12), 1.0 - covered, 0.0)
+        vol_model = float(covered.sum() * grid.cell_volume)
+    else:
+        n_full = int(round(vol_exact / grid.cell_volume))
+        order = np.argsort(-covered, axis=None, kind="stable")
+        active = np.zeros(covered.size, bool)
+        active[order[:n_full]] = True
+        active = active.reshape(covered.shape)
+        mix_weight = np.zeros(covered.shape)
+        vol_model = n_full * grid.cell_volume
+    return SimpleNamespace(grid=grid, covered=covered, active=active,
+                           mix_weight=mix_weight,
+                           centre=(centre_xy[0], centre_xy[1], zc),
+                           volume_exact=vol_exact, volume_model=vol_model)
+
+
 def build_sood_problem(number: int, cells: int):
     """Solver inputs for a problem at mesh resolution ``cells``: the number of
-    cell layers across the slab's full thickness, or across the cylinder's
-    diameter (triangle side h = 2 rc / (cells sqrt(3)/2) for the slab, 2 rc /
-    cells for the cylinder).
+    cell layers across the slab's full thickness, or across the cylinder's or
+    sphere's diameter (triangle side h = 2 rc / (cells sqrt(3)/2) for the slab,
+    2 rc / cells for the cylinder and the sphere; spheres on prisms of height
+    h sqrt(3)/2, see ``sphere_on_prisms``).
 
     Returns SimpleNamespace(problem, grid, materials, material_map, active,
     mix_material, mix_weight, bc, engine, scattering_order, fuel_columns,
@@ -185,6 +263,15 @@ def build_sood_problem(number: int, cells: int):
                                scattering_order=p.order, fuel_columns=cells,
                                column_x=(np.arange(cells) + 0.5) * h * width,
                                centre_x=p.rc)
+    if p.geometry == "sphere":
+        sph = sphere_on_prisms(p.rc, 2.0 * p.rc / cells)
+        mix_material = np.where(sph.mix_weight > 0.0, 1, -1)
+        return SimpleNamespace(problem=p, grid=sph.grid, materials=[fuel, _void(G)],
+                               material_map=np.zeros(sph.grid.shape, int),
+                               active=sph.active, mix_material=mix_material,
+                               mix_weight=sph.mix_weight, bc="vacuum", engine="levels",
+                               scattering_order=p.order, fuel_columns=None,
+                               column_x=None, centre_x=None)
     if p.geometry != "cylinder":
         raise ValueError(p.geometry)
     from ..pin_power import cell_footprints

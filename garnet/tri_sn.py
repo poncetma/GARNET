@@ -178,6 +178,24 @@ def _inv3(A, xp):
     return out
 
 
+def _check_user_quadrature(q):
+    """Validate a user 3-D ordinate set (see ``quadrature``)."""
+    mu, eta, xi, w = (np.asarray(a, dtype=float).reshape(-1) for a in q)
+    if not (mu.size == eta.size == xi.size == w.size) or mu.size < 2:
+        raise ValueError("quadrature needs equal-length mu, eta, xi, w")
+    if np.max(np.abs(mu * mu + eta * eta + xi * xi - 1.0)) > 1e-10:
+        raise ValueError("quadrature directions must be unit vectors")
+    if np.any(w <= 0.0):
+        raise ValueError("quadrature weights must be positive")
+    if np.any(np.abs(xi) < 1e-12):
+        raise ValueError("quadrature directions with xi = 0 do not stream axially")
+    pts = np.round(np.stack([mu, eta, xi], 1), 12)
+    neg = {tuple(p) for p in np.round(-np.stack([mu, eta, xi], 1), 12)}
+    if any(tuple(p) not in neg for p in pts):
+        raise ValueError("quadrature must be closed under Omega -> -Omega")
+    return mu, eta, xi, w / w.sum()
+
+
 class TriSNTransportSolver:
     """S_N transport k-eigenvalue solver on a triangular mesh.
 
@@ -190,6 +208,17 @@ class TriSNTransportSolver:
                     outside it are excised; active cells facing them see the
                     ``bc`` boundary law. Defaults to all-active.
     n_polar, n_azi: product-quadrature sizes (n_azi a multiple of 4).
+    quadrature    : 3-D only: a user ordinate set (mu, eta, xi, w) in place of
+                    the product set, e.g. :func:`garnet.sn.octant_quadrature`
+                    or :func:`garnet.genfoam.read_quadrature_set`. Unit
+                    directions, positive weights (normalized to 1), closed
+                    under Omega -> -Omega, no xi = 0.
+    quadrature_check : with anisotropic scattering, a set that does not
+                    integrate the P_L harmonics exactly is refused ("raise",
+                    default) or accepted with a warning ("warn"). The moment
+                    source sum_k R_lk(O) R_lk(O') equals P_l(O.O') for any two
+                    directions, so the discrete operator is then that of a
+                    direction-pair code (GeN-Foam) on the same set.
     bc            : "vacuum" (default) or "periodic" (torus / infinite medium).
     scheme        : spatial differencing. "step" (default) -- upwind, robustly
                     non-negative, first-order. "scb" -- simple corner balance, a
@@ -252,7 +281,8 @@ class TriSNTransportSolver:
                  cmfd_solver: str = "lu", sigma_t_shift=None,
                  graphs: bool = True, scattering_order: int = 0,
                  adjoint: bool = False, cmfd_aggregate: int = 0,
-                 cmfd_split_material: bool = False, cmfd_two_level: int = 0):
+                 cmfd_split_material: bool = False, cmfd_two_level: int = 0,
+                 quadrature=None, quadrature_check: str = "raise"):
         if len(grid.shape) not in (3, 4) or grid.shape[2] != 2:
             raise ValueError("tri-S_N grid shape must be (nr, nc, 2) or "
                              "(nr, nc, 2, nz) for extruded prisms")
@@ -351,7 +381,14 @@ class TriSNTransportSolver:
         if require_fissile and not np.any(self.nsf):
             raise ValueError("no fissile material: k-eigenvalue is undefined")
 
-        if self.is3d:
+        if quadrature_check not in ("raise", "warn"):
+            raise ValueError("quadrature_check must be 'raise' or 'warn'")
+        self.quadrature_check = quadrature_check
+        if quadrature is not None:
+            if not self.is3d:
+                raise ValueError("a user quadrature (mu, eta, xi, w) needs extruded prisms")
+            self.mu, self.eta, self.xi, self.w = _check_user_quadrature(quadrature)
+        elif self.is3d:
             self.mu, self.eta, self.xi, self.w = quadrature_3d(n_polar, n_azi)
         else:
             self.mu, self.eta, self.w = quadrature_2d(n_polar, n_azi)
@@ -451,9 +488,6 @@ class TriSNTransportSolver:
         self._aniso = order > 0
         if not self._aniso:
             return
-        if self.is3d:
-            raise NotImplementedError("anisotropic scattering is implemented for "
-                                      "2-D triangular meshes only")
         if self.acceleration not in ("dsa", "si"):
             raise ValueError("anisotropic scattering supports acceleration 'dsa' "
                              f"or 'si', got {self.acceleration!r}")
@@ -461,14 +495,19 @@ class TriSNTransportSolver:
 
         G, N, L = self.G, self.N, order
         # basis: real harmonics R_lk, Schmidt semi-normalized (addition theorem
-        # P_l(O.O') = sum_k R_lk(O) R_lk(O')), polar axis z, kept when even in
-        # the z cosine (l + k even), l = 1..L. The scalar flux is moment 0.
-        xi = np.sqrt(np.maximum(0.0, 1.0 - self.mu ** 2 - self.eta ** 2))
+        # P_l(O.O') = sum_k R_lk(O) R_lk(O')), polar axis z, l = 1..L. In 2-D
+        # only those even in the z cosine (l + k even) survive the folded
+        # hemisphere; prisms carry all (l, k) with the signed z cosine. The
+        # scalar flux is moment 0.
+        if self.is3d:
+            xi = np.asarray(self.xi, float)
+        else:
+            xi = np.sqrt(np.maximum(0.0, 1.0 - self.mu ** 2 - self.eta ** 2))
         az = np.arctan2(self.eta, self.mu)
         rows, ls = [], []
         for l in range(1, L + 1):
             for k in range(0, l + 1):
-                if (l + k) % 2:
+                if not self.is3d and (l + k) % 2:
                     continue
                 plk = lpmv(k, l, xi)
                 if k == 0:
@@ -483,11 +522,16 @@ class TriSNTransportSolver:
         self._mom_l = np.array(ls)
         gram = (R * self.w) @ R.T
         want = np.diag(1.0 / (2.0 * self._mom_l + 1.0))
-        if np.abs(gram - want).max() > 1e-8:
-            raise ValueError(f"the ({len(self.w)}-direction) quadrature does not "
-                             f"integrate the P{L} harmonics exactly (error "
-                             f"{np.abs(gram - want).max():.1e}); use more polar or "
-                             "azimuthal directions")
+        self.quadrature_gram_error = float(np.abs(gram - want).max())
+        if self.quadrature_gram_error > 1e-8:
+            msg = (f"the ({len(self.w)}-direction) quadrature does not integrate the "
+                   f"P{L} harmonics exactly (error {self.quadrature_gram_error:.1e})")
+            if self.quadrature_check == "raise":
+                raise ValueError(msg + "; use more polar or azimuthal directions, or "
+                                 "quadrature_check='warn'")
+            import warnings
+            warnings.warn(msg + ": the scattering source is that of a direction-pair "
+                          "code on this set", stacklevel=3)
         self._R = R
         self._Rw = R * self.w                             # moments  = Rw @ psi
         self._Rc = (R * (2.0 * self._mom_l[:, None] + 1.0)).T   # source = Rc @ S
@@ -582,7 +626,7 @@ class TriSNTransportSolver:
         if self.scheme == "step":
             for m in range(self.M):
                 q = src if ang is None else src + ang[m]
-                psi = self._lu(g, m)(np.where(self._act_flat, q * self.area, 0.0))
+                psi = self._lu(g, m)(np.where(self._act_flat, q * self._measure, 0.0))
                 phi += self.w[m] * psi
                 mom += self._Rw[:, m][:, None] * psi[None, :]
             return phi, mom
@@ -590,7 +634,7 @@ class TriSNTransportSolver:
         ac = d["ac"]
         for m in range(self.M):
             q = src if ang is None else src + ang[m]
-            psi = self._lu(g, m)(np.repeat(q[ac] * (self.area / 3.0), 3))
+            psi = self._lu(g, m)(np.repeat(q[ac] * (self._measure / 3.0), 3))
             cell_psi = psi.reshape(-1, 3).mean(1)
             phi[ac] += self.w[m] * cell_psi
             mom[:, ac] += self._Rw[:, m][:, None] * cell_psi[None, :]
@@ -1016,6 +1060,8 @@ class TriSNTransportSolver:
             wvec=xp.asarray(self.w),
             work=[_StepWork(xp.zeros((n, max_inflow_faces)), xp.zeros(n), xp.zeros(n))
                   for n in (b - a for a, b in spans)])
+        if self._aniso:                                # per-(ordinate, cell) source
+            self._bufs["rhs_ang"] = xp.zeros(M * N)
 
     def _setup_levels_scb_tables_3d(self, direction_indices, cell_indices, spans):
         """SCB per-level tables for the prism levels engine: the corner external
@@ -1067,6 +1113,8 @@ class TriSNTransportSolver:
                   for n in (b - a for a, b in spans)])
         self._ac_dev = xp.asarray(ac)
         self._bufs["phiN"] = xp.zeros(N)
+        if self._aniso:                                # per-(ordinate, cell) source
+            self._bufs["rhs_ang"] = xp.zeros(M * K)
 
     def _sweep_3d(self, g, src_flat):
         """One isotropic-source sweep on the prism mesh: phi = sum_m w_m psi_m,
@@ -2907,7 +2955,8 @@ class TriSNTransportSolver:
         h, dz = self.h, self.dz
         st = np.maximum(self.st[g].reshape(-1), 1e-12)
         ss = self.ss_self[g].reshape(-1)
-        Dv = 1.0 / (3.0 * st)                            # length N, by flat id
+        # anisotropic within-group scattering: the P1 diffusion coefficient
+        Dv = 1.0 / (3.0 * (self._dsa_sigma[g] if self._aniso else st))
         kf = 4.0 / (h * h)
         alpha = face_alpha("vacuum")
         cell, act = self._cell, self.active             # (nr, nc, 2, nz)
@@ -3146,7 +3195,7 @@ class TriSNTransportSolver:
             yield (cell, act, nbr, nbr_act, (0.0, 0.0, float(dk)), Lv_ax,
                    lambda Ds, Dn: harmonic_mean(Ds, Dn) / dz, dz)
 
-    def _sweep_currents_3d(self, g, src_flat):
+    def _sweep_currents_3d(self, g, src_flat, ang=None):
         """Prism sweep that also folds the per-face net current density
         J = sum_m w_m (Omega.n_hat) psi_upwind (upwind = source cell on outflow,
         neighbour on inflow), one array per directed face of _faces_3d, so the
@@ -3154,12 +3203,18 @@ class TriSNTransportSolver:
         point is the transport solution."""
         M, N = self.M, self.N
         if self.engine == "levels":
-            phi, psi = self._sweep_levels(g, src_flat)
+            if ang is not None:                       # P_L: per-ordinate source
+                phi, _ = self._sweep_aniso_dev(g, self.xp.asarray(src_flat),
+                                               self.xp.asarray(ang))
+                phi, psi = asnumpy(phi).copy(), self._bufs["psi"]
+            else:
+                phi, psi = self._sweep_levels(g, src_flat)
             psi_mn = asnumpy(psi).reshape(M, N)
         else:
             self._sweep_count += 1
-            rhs = np.where(self._act_flat, src_flat * self.vol, 0.0)
-            psi_mn = np.stack([self._lu(g, m)(rhs) for m in range(M)])
+            psi_mn = np.stack([self._lu(g, m)(np.where(
+                self._act_flat, (src_flat if ang is None else src_flat + ang[m]) * self.vol,
+                0.0)) for m in range(M)])
             phi = (self.w[:, None] * psi_mn).sum(0)
         currents = []
         for (src, src_act, nbr, nbr_act, (nx, ny, nz_), Lv, beta, hd) \
@@ -3177,7 +3232,7 @@ class TriSNTransportSolver:
             currents.append(J)
         return phi, currents
 
-    def _sweep_currents_scb_3d(self, g, src_flat):
+    def _sweep_currents_scb_3d(self, g, src_flat, ang=None):
         """CMFD currents for the SCB prism scheme, in the same _faces_3d
         per-cell-face convention as _sweep_currents_3d. The transport current
         density across a lateral cell edge is the mean of its two corner
@@ -3189,13 +3244,18 @@ class TriSNTransportSolver:
         d = self._scb
         ac, K = d["ac"], d["K"]
         if self.engine == "levels":
-            phi, psi = self._sweep_levels(g, src_flat)
+            if ang is not None:                       # P_L: per-ordinate source
+                phi, _ = self._sweep_aniso_dev(g, self.xp.asarray(src_flat),
+                                               self.xp.asarray(ang))
+                phi, psi = asnumpy(phi).copy(), self._bufs["psi"]
+            else:
+                phi, psi = self._sweep_levels(g, src_flat)
             psi3 = asnumpy(psi).reshape(M, K, 3)
         else:
             self._sweep_count += 1
-            base = np.repeat(src_flat[ac] * (self.vol / 3.0), 3)
-            psi3 = np.stack([self._lu(g, m)(base).reshape(K, 3)
-                             for m in range(M)])
+            psi3 = np.stack([self._lu(g, m)(np.repeat(
+                (src_flat if ang is None else src_flat + ang[m])[ac] * (self.vol / 3.0), 3)
+            ).reshape(K, 3) for m in range(M)])
             phi = np.zeros(N)
             phi[ac] = (self.w[:, None] * psi3.mean(2)).sum(0)
         psi_flat = psi3.reshape(M, 3 * K)                    # (M, 3K)
@@ -3462,7 +3522,14 @@ class TriSNTransportSolver:
                     for gf in range(G):
                         if gf != g and scat[gf][g] is not None:
                             q = q + scat[gf][g] * phi_new[gf]
-                    if aniso:
+                    if aniso and self.is3d:
+                        ang = self._expand(self._moment_source(g, mom_new,
+                                                               exclude_self=False))
+                        cur_fn = (self._sweep_currents_scb_3d if self.scheme == "scb"
+                                  else self._sweep_currents_3d)
+                        ps, cur = cur_fn(g, ss[g] * phi_new[g] + q, ang)
+                        facs[g] = self._cmfd_factor_3d(g, ps, cur)
+                    elif aniso:
                         ang = self._expand(self._moment_source(g, mom_new,
                                                                exclude_self=False))
                         ps, J6, _ = self._sweep_currents_aniso(

@@ -1,0 +1,14 @@
+case B: full S_N transient refine 32, dt 0.005 s, to t = 2 s (theta 90 -> 92.5 deg), P(end) 1.67680
+           SPH-DF full, 5 deg tables: P max -3.645 % at t = 0.085 s, end -3.578 %, energy -2.890 %
+                                      shape pin RMS: max 0.195 % at t = 0.08 s, end 0.103 %
+                                      shape worst pin: max 1.836 % at t = 0.08 s, end 0.925 %
+                                      shape worst assembly: max 0.192 % at t = 0.08 s, end 0.115 %
+         SPH-DF full, 2.5 deg tables: P max -3.220 % at t = 0.085 s, end -0.177 %, energy -0.276 %
+                                      shape pin RMS: max 0.189 % at t = 0.08 s, end 0.000 %
+                                      shape worst pin: max 1.917 % at t = 0.08 s, end 0.002 %
+                                      shape worst assembly: max 0.181 % at t = 0.08 s, end 0.000 %
+          quasi-static S_N, linear k: P max +0.448 % at t = 0.15 s, end -0.013 %, energy -0.004 %
+           quasi-static S_N, cubic k: P max -2.647 % at t = 0.085 s, end -0.278 %, energy -0.307 %
+                                      shape pin RMS: max 0.090 % at t = 0.18 s, end 0.006 %
+                                      shape worst pin: max 1.195 % at t = 0.18 s, end 0.021 %
+                                      shape worst assembly: max 0.072 % at t = 0.18 s, end 0.004 %

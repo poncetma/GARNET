@@ -2,10 +2,10 @@
 case A: theta 90 -> 92.5 deg; S_N beta_eff 699.6 pcm, Lambda 8.1526e-05 s; SPH-DF beta_eff 700.7 pcm, Lambda 8.0096e-05 s
   S_N Lambda(theta)/Lambda(theta0) on the path's exact angles: +0.000 to +0.119 %; frozen-kinetics S_N reference vs moving: max 0.145 %
   static reactivity along the path, SPH-DF - S_N: max |d rho| 4.1 pcm ($0.006); rho_SN(end) +186.0 pcm
-  P(t)         SPH-DF full vs S_N: max -0.761 % at t = 1.18 s, end -0.370 %, energy -0.254 %
-  P(t)    SPH-DF adiabatic vs S_N: max -0.762 % at t = 1.18 s, end -0.431 %, energy -0.293 %
+  P(t)         SPH-DF full vs S_N: max -0.925 % at t = 1.28 s, end -0.638 %, energy -0.517 %
+  P(t)    SPH-DF adiabatic vs S_N: max -0.927 % at t = 1.28 s, end -0.698 %, energy -0.556 %
   P(t) S_N linear-interp k vs S_N: max +1.756 % at t = 1.02 s, end +0.115 %, energy +0.230 %
-  P(t) SPH kinetics, S_N k vs S_N: max +0.196 % at t = 2 s, end -0.106 %, energy +0.014 %
+  P(t) SPH kinetics, S_N k vs S_N: max -0.375 % at t = 20 s, end -0.375 %, energy -0.250 %
   shape, pin RMS: max 0.134 % at t = 1 s, t = 0 0.000 %, end 0.008 %
   shape, worst pin: max 1.362 % at t = 1 s, t = 0 0.000 %, end 0.028 %
   shape, worst assembly: max 0.121 % at t = 1 s, t = 0 0.000 %, end 0.008 %
@@ -14,10 +14,10 @@ case A: theta 90 -> 92.5 deg; S_N beta_eff 699.6 pcm, Lambda 8.1526e-05 s; SPH-D
 case B: theta 90 -> 92.5 deg; S_N beta_eff 699.6 pcm, Lambda 8.1526e-05 s; SPH-DF beta_eff 700.7 pcm, Lambda 8.0096e-05 s
   S_N Lambda(theta)/Lambda(theta0) on the path's exact angles: +0.000 to +0.119 %; frozen-kinetics S_N reference vs moving: max 0.131 %
   static reactivity along the path, SPH-DF - S_N: max |d rho| 4.1 pcm ($0.006); rho_SN(end) +186.0 pcm
-  P(t)         SPH-DF full vs S_N: max -0.539 % at t = 0.115 s, end +0.115 %, energy +0.096 %
-  P(t)    SPH-DF adiabatic vs S_N: max -0.539 % at t = 0.115 s, end +0.102 %, energy +0.087 %
+  P(t)         SPH-DF full vs S_N: max -0.697 % at t = 0.125 s, end -0.154 %, energy -0.163 %
+  P(t)    SPH-DF adiabatic vs S_N: max -0.697 % at t = 0.125 s, end -0.167 %, energy -0.172 %
   P(t) S_N linear-interp k vs S_N: max +1.326 % at t = 0.11 s, end -0.002 %, energy +0.074 %
-  P(t) SPH kinetics, S_N k vs S_N: max +0.232 % at t = 0.21 s, end +0.170 %, energy +0.185 %
+  P(t) SPH kinetics, S_N k vs S_N: max -0.099 % at t = 2 s, end -0.099 %, energy -0.075 %
   shape, pin RMS: max 0.135 % at t = 0.1 s, t = 0 0.000 %, end 0.006 %
   shape, worst pin: max 1.368 % at t = 0.1 s, t = 0 0.000 %, end 0.022 %
   shape, worst assembly: max 0.125 % at t = 0.1 s, t = 0 0.000 %, end 0.004 %
@@ -26,10 +26,10 @@ case B: theta 90 -> 92.5 deg; S_N beta_eff 699.6 pcm, Lambda 8.1526e-05 s; SPH-D
 case C: theta 90 -> 90 deg; S_N beta_eff 699.6 pcm, Lambda 8.1526e-05 s; SPH-DF beta_eff 700.7 pcm, Lambda 8.0096e-05 s
   S_N Lambda(theta)/Lambda(theta0) on the path's exact angles: -0.124 to +0.119 %; frozen-kinetics S_N reference vs moving: max 0.130 %
   static reactivity along the path, SPH-DF - S_N: max |d rho| 8.8 pcm ($0.013); rho_SN(end) +0.0 pcm
-  P(t)         SPH-DF full vs S_N: max -2.294 % at t = 5.82 s, end -1.235 %, energy -1.391 %
-  P(t)    SPH-DF adiabatic vs S_N: max -2.297 % at t = 5.82 s, end -1.236 %, energy -1.394 %
+  P(t)         SPH-DF full vs S_N: max -2.156 % at t = 5.84 s, end -1.235 %, energy -1.425 %
+  P(t)    SPH-DF adiabatic vs S_N: max -2.159 % at t = 5.84 s, end -1.236 %, energy -1.429 %
   P(t) S_N linear-interp k vs S_N: max +3.517 % at t = 5.84 s, end +1.009 %, energy +0.871 %
-  P(t) SPH kinetics, S_N k vs S_N: max -0.256 % at t = 5.49 s, end -0.023 %, energy +0.001 %
+  P(t) SPH kinetics, S_N k vs S_N: max -0.076 % at t = 4.66 s, end -0.023 %, energy -0.034 %
   shape, pin RMS: max 0.242 % at t = 1.83 s, t = 0 0.000 %, end 0.004 %
   shape, worst pin: max 2.330 % at t = 1.83 s, t = 0 0.000 %, end 0.015 %
   shape, worst assembly: max 0.218 % at t = 3.83 s, t = 0 0.000 %, end 0.005 %
@@ -38,10 +38,10 @@ case C: theta 90 -> 90 deg; S_N beta_eff 699.6 pcm, Lambda 8.1526e-05 s; SPH-DF 
 case E2: theta 43.75 -> 46.25 deg; S_N beta_eff 704.5 pcm, Lambda 7.8450e-05 s; SPH-DF beta_eff 706.4 pcm, Lambda 7.7206e-05 s
   S_N Lambda(theta)/Lambda(theta0) on the path's exact angles: +0.000 to +0.011 %; frozen-kinetics S_N reference vs moving: max 0.023 %
   static reactivity along the path, SPH-DF - S_N: max |d rho| 12.5 pcm ($0.018); rho_SN(end) +156.7 pcm
-  P(t)         SPH-DF full vs S_N: max +2.261 % at t = 0.51 s, end +1.134 %, energy +1.048 %
-  P(t)    SPH-DF adiabatic vs S_N: max +2.260 % at t = 0.51 s, end +1.114 %, energy +1.035 %
+  P(t)         SPH-DF full vs S_N: max +2.117 % at t = 0.51 s, end +0.872 %, energy +0.805 %
+  P(t)    SPH-DF adiabatic vs S_N: max +2.115 % at t = 0.51 s, end +0.853 %, energy +0.793 %
   P(t) S_N linear-interp k vs S_N: max +2.095 % at t = 0.51 s, end -0.622 %, energy -0.156 %
-  P(t) SPH kinetics, S_N k vs S_N: max +0.201 % at t = 1.02 s, end +0.103 %, energy +0.142 %
+  P(t) SPH kinetics, S_N k vs S_N: max -0.156 % at t = 5 s, end -0.156 %, energy -0.099 %
   shape, pin RMS: max 0.152 % at t = 0 s, t = 0 0.152 %, end 0.134 %
   shape, worst pin: max 1.683 % at t = 0 s, t = 0 1.683 %, end 1.172 %
   shape, worst assembly: max 0.131 % at t = 5 s, t = 0 0.057 %, end 0.131 %
@@ -51,10 +51,10 @@ case D: compared to t = 0.5 s, where the quasi-static reference holds (step 5)
 case D: theta 180 -> 0 deg; S_N beta_eff 693.6 pcm, Lambda 9.2793e-05 s; SPH-DF beta_eff 694.1 pcm, Lambda 9.1047e-05 s
   S_N Lambda(theta)/Lambda(theta0) on the path's exact angles: -12.064 to +0.000 %; frozen-kinetics S_N reference vs moving: max 13.727 %
   static reactivity along the path, SPH-DF - S_N: max |d rho| 12.3 pcm ($0.018); rho_SN(end) -8922.1 pcm
-  P(t)         SPH-DF full vs S_N: max -1.591 % at t = 0.315 s, end -0.633 %, energy -0.983 %
-  P(t)    SPH-DF adiabatic vs S_N: max -1.569 % at t = 0.315 s, end -0.571 %, energy -0.967 %
+  P(t)         SPH-DF full vs S_N: max -1.441 % at t = 0.075 s, end +0.241 %, energy -0.791 %
+  P(t)    SPH-DF adiabatic vs S_N: max -1.437 % at t = 0.075 s, end +0.304 %, energy -0.775 %
   P(t) S_N linear-interp k vs S_N: max -1.319 % at t = 0.075 s, end +0.488 %, energy -0.550 %
-  P(t) SPH kinetics, S_N k vs S_N: max -0.960 % at t = 0.5 s, end -0.960 %, energy -0.220 %
+  P(t) SPH kinetics, S_N k vs S_N: max -0.122 % at t = 0.44 s, end -0.089 %, energy -0.027 %
   shape, pin RMS: max 0.129 % at t = 0.5 s, t = 0 0.000 %, end 0.129 %
   shape, worst pin: max 0.273 % at t = 0.5 s, t = 0 0.000 %, end 0.273 %
   shape, worst assembly: max 0.186 % at t = 0.5 s, t = 0 0.000 %, end 0.186 %
@@ -64,10 +64,10 @@ case E: STRESS CASE, the quasi-static reference itself is off by several % here 
 case E: theta 40 -> 50 deg; S_N beta_eff 704.8 pcm, Lambda 7.8341e-05 s; SPH-DF beta_eff 706.8 pcm, Lambda 7.7065e-05 s
   S_N Lambda(theta)/Lambda(theta0) on the path's exact angles: -0.005 to +0.010 %; frozen-kinetics S_N reference vs moving: max 2.492 %
   static reactivity along the path, SPH-DF - S_N: max |d rho| 14.1 pcm ($0.020); rho_SN(end) +627.5 pcm
-  P(t)         SPH-DF full vs S_N: max -37.603 % at t = 5 s, end -37.603 %, energy -34.482 %
-  P(t)    SPH-DF adiabatic vs S_N: max -42.607 % at t = 5 s, end -42.607 %, energy -39.214 %
+  P(t)         SPH-DF full vs S_N: max -38.223 % at t = 5 s, end -38.223 %, energy -35.134 %
+  P(t)    SPH-DF adiabatic vs S_N: max -43.178 % at t = 5 s, end -43.178 %, energy -39.818 %
   P(t) S_N linear-interp k vs S_N: max -33.880 % at t = 5 s, end -33.880 %, energy -31.024 %
-  P(t) SPH kinetics, S_N k vs S_N: max -13.174 % at t = 5 s, end -13.174 %, energy -11.843 %
+  P(t) SPH kinetics, S_N k vs S_N: max -14.037 % at t = 5 s, end -14.037 %, energy -12.720 %
   shape, pin RMS: max 0.148 % at t = 0.37 s, t = 0 0.000 %, end 0.030 %
   shape, worst pin: max 1.620 % at t = 0.37 s, t = 0 0.000 %, end 0.097 %
   shape, worst assembly: max 0.133 % at t = 0.63 s, t = 0 0.000 %, end 0.036 %

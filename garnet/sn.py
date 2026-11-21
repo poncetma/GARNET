@@ -167,6 +167,55 @@ def quadrature_3d(n_polar: int, n_azi: int):
     return mu, eta, xi, w
 
 
+def octant_quadrature(ux, uy, uz, w, *, unit_tol: float = 1e-3):
+    """Full-sphere ordinate set (mu, eta, xi, w) from one octant's directions
+    (positive cosines) and weights, by sign reflection into all eight octants
+    -- the layout of level-symmetric, Chebyshev-Legendre and GeN-Foam's
+    ``quadratureSet`` files. Directions are renormalized to unit length (files
+    with few digits are off by ~1e-5; more than ``unit_tol`` is refused) and the
+    weights to sum 1. The set is closed under every sign flip, so under
+    Omega -> -Omega (vacuum and adjoint mappings)."""
+    ux, uy, uz, w = (np.atleast_1d(np.asarray(a, dtype=float)) for a in (ux, uy, uz, w))
+    if not (ux.shape == uy.shape == uz.shape == w.shape) or ux.ndim != 1:
+        raise ValueError("octant cosines and weights must be 1-D of equal length")
+    if np.any(ux <= 0) or np.any(uy <= 0) or np.any(uz <= 0) or np.any(w <= 0):
+        raise ValueError("octant cosines and weights must be positive")
+    norm = np.sqrt(ux * ux + uy * uy + uz * uz)
+    if np.max(np.abs(norm - 1.0)) > unit_tol:
+        raise ValueError(f"octant directions are not unit vectors (|n| - 1 up to "
+                         f"{np.max(np.abs(norm - 1.0)):.1e})")
+    ux, uy, uz = ux / norm, uy / norm, uz / norm
+    parts = [(sx * ux, sy * uy, sz * uz) for sz in (1.0, -1.0)
+             for sy in (1.0, -1.0) for sx in (1.0, -1.0)]
+    mu = np.concatenate([p[0] for p in parts])
+    eta = np.concatenate([p[1] for p in parts])
+    xi = np.concatenate([p[2] for p in parts])
+    ww = np.tile(w, 8)
+    return mu, eta, xi, ww / ww.sum()
+
+
+def harmonic_gram_error(mu, eta, xi, w, order: int) -> float:
+    """Largest error of the quadrature's Gram matrix of the real spherical
+    harmonics R_lk, l <= order (Schmidt semi-normalized, all k), against the
+    exact diag(1/(2l+1)): 0 to round-off when the set integrates every product
+    of harmonics up to degree ``order`` exactly."""
+    from scipy.special import factorial, lpmv
+    az = np.arctan2(eta, mu)
+    rows, ls = [], []
+    for l in range(order + 1):
+        for k in range(l + 1):
+            plk = lpmv(k, l, xi)
+            if k == 0:
+                rows.append(plk)
+                ls.append(l)
+            else:
+                c = np.sqrt(2.0 * factorial(l - k) / factorial(l + k))
+                rows += [c * plk * np.cos(k * az), c * plk * np.sin(k * az)]
+                ls += [l, l]
+    R = np.array(rows)
+    return float(np.abs((R * w) @ R.T - np.diag(1.0 / (2.0 * np.array(ls) + 1.0))).max())
+
+
 def _azimuth_mirrors(n_polar: int, n_azi: int):
     """Index maps m -> (x-mirror, y-mirror): the ordinate with mu -> -mu and the
     one with eta -> -eta, for the product set laid out polar-major."""

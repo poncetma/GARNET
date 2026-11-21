@@ -1,0 +1,42 @@
+# two-level GPU CMFD, refine 32, case D, 5 steps of 5 ms; b = 8 (job 256164) then b = 4 (job 256165)
+S_N transient sn-p2:4:16 refine 32, case D: theta 180 -> 177.75 deg, t_end 0.025 s, dt 0.005 s, anderson, step acceleration cmfd, CMFD aggregate 0, device gpu
+  t =   0.0050 s   P/P0 = 1.001755   (3 sweeps, 176.7 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 101))
+  t =   0.0100 s   P/P0 = 1.003149   (3 sweeps, 68.8 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 101))
+  t =   0.0150 s   P/P0 = 1.004071   (3 sweeps, 63.9 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 107))
+  t =   0.0200 s   P/P0 = 1.004159   (3 sweeps, 64.1 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 99))
+  t =   0.0250 s   P/P0 = 1.003492   (3 sweeps, 64.6 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 99))
+done: k0 1.1127416, P(end) 1.003492, 5 steps, sweeps per step mean 3.0 max 3, total 1357 s, inner sweeps 1435
+S_N transient sn-p2:4:16 refine 32, case D: theta 180 -> 177.75 deg, t_end 0.025 s, dt 0.005 s, anderson, step acceleration cmfd, CMFD aggregate 0, device gpu
+  t =   0.0050 s   P/P0 = 1.001755   (3 sweeps, 194.3 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 45))
+  t =   0.0100 s   P/P0 = 1.003149   (3 sweeps, 88.2 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 46))
+  t =   0.0150 s   P/P0 = 1.004071   (3 sweeps, 83.0 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 48))
+  t =   0.0200 s   P/P0 = 1.004159   (3 sweeps, 82.9 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 45))
+  t =   0.0250 s   P/P0 = 1.003492   (3 sweeps, 80.3 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 45))
+done: k0 1.1127416, P(end) 1.003492, 5 steps, sweeps per step mean 3.0 max 3, total 1444 s, inner sweeps 1435
+# before the round-off fix, b = 8 (job 256157): source-only fallbacks
+S_N transient sn-p2:4:16 refine 32, case D: theta 180 -> 179.1 deg, t_end 0.01 s, dt 0.005 s, anderson, step acceleration cmfd, CMFD aggregate 0, device gpu
+      CMFD ('ok', 128) [7.6 s: sweep 1.1, currents 0.6, assembly 0.8, factorization 0.0, gmres 5.1]
+      CMFD ('ok', 101) [6.2 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.9]
+  t =   0.0050 s   P/P0 = 1.001755   (3 sweeps, 173.9 s, CMFD 2 ok / 0 source-only / 0 stalled / 0 negative, last ('ok', 101))
+      CMFD ('source-only', 124, 'min X/max X -1.01e-15') [7.4 s: sweep 1.3, currents 0.6, assembly 0.8, factorization 0.0, gmres 4.7]
+      CMFD ('source-only', 90, 'min X/max X -1.16e-12') [5.9 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.7]
+      CMFD ('source-only', 92, 'min X/max X -7.19e-14') [6.0 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.7]
+      CMFD ('source-only', 93, 'min X/max X -8.10e-13') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 94, 'min X/max X -2.85e-14') [6.0 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.7]
+      CMFD ('source-only', 94, 'min X/max X -1.22e-14') [6.0 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -2.49e-15') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -1.99e-15') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -1.56e-15') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -1.19e-15') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -8.62e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -5.81e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 95, 'min X/max X -3.36e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 96, 'min X/max X -1.15e-15') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 96, 'min X/max X -8.46e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 96, 'min X/max X -5.83e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 96, 'min X/max X -3.52e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('source-only', 96, 'min X/max X -1.48e-16') [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('ok', 96) [6.1 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.8]
+      CMFD ('ok', 101) [6.2 s: sweep 1.1, currents 0.4, assembly 0.8, factorization 0.0, gmres 3.9]
+  t =   0.0100 s   P/P0 = 1.003150   (21 sweeps, 279.9 s, CMFD 2 ok / 18 source-only / 0 stalled / 0 negative, last ('ok', 101))
+done: k0 1.1127416, P(end) 1.003150, 2 steps, sweeps per step mean 12.0 max 21, total 1376 s, inner sweeps 1719

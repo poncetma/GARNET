@@ -39,7 +39,7 @@ import numpy as np
 
 from .materials import Kinetics, Material
 
-__all__ = ["GenFoamZone", "parse_foam_dict", "read_nuclear_data"]
+__all__ = ["GenFoamZone", "parse_foam_dict", "read_nuclear_data", "read_quadrature_set"]
 
 _TOKEN = re.compile(r'"[^"]*"|[{}();]|[^\s{}();]+')
 
@@ -270,3 +270,18 @@ def read_nuclear_data(path: str | Path) -> dict[tuple[str, str], GenFoamZone]:
         for z, data in zones.items():
             out[(s, z)] = GenFoamZone(s, z, data, G, I, L)
     return out
+
+
+def read_quadrature_set(path: str | Path):
+    """A GeN-Foam ``quadratureSet`` file (``directionU{x,y,z}Oct`` and
+    ``directionWeightsOct`` for one octant) as the full-sphere set (mu, eta,
+    xi, w) GeN-Foam's S_N builds from it (``readQuadratureSet.H``: sign
+    reflection into the eight octants, weights normalized to 1)."""
+    from .sn import octant_quadrature
+    d = parse_foam_dict(Path(path).read_text())
+    n = int(d["discreteDirectionsOct"])
+    keys = ("directionUxOct", "directionUyOct", "directionUzOct", "directionWeightsOct")
+    arrs = [np.atleast_1d(np.asarray(d[k], dtype=float)) for k in keys]
+    if any(a.size != n for a in arrs):
+        raise ValueError(f"quadratureSet declares {n} directions per octant")
+    return octant_quadrature(*arrs)
