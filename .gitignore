@@ -15,8 +15,6 @@ venv/
 
 # Local reference copies of papers (not redistributable) + Windows ADS junk
 docs/*.pdf
-!docs/report.pdf
-# ^ GARNET's own theory report, printed from docs/report.html by tools/html_to_pdf.py
 *Zone.Identifier
 results/
 

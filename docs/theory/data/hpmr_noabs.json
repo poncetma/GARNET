@@ -1,0 +1,44 @@
+{
+ "rows": [
+  {
+   "refine": 4,
+   "angle": 0,
+   "device": "cuda (cupy): NVIDIA A100-SXM4-80GB",
+   "k": 1.1525167611402156,
+   "outers": 319,
+   "inners": 26844,
+   "seconds": 9.26664270204492,
+   "cells": 5280
+  },
+  {
+   "refine": 8,
+   "angle": 0,
+   "device": "cuda (cupy): NVIDIA A100-SXM4-80GB",
+   "k": 1.1525175270824766,
+   "outers": 314,
+   "inners": 56614,
+   "seconds": 18.751360152033158,
+   "cells": 21120
+  },
+  {
+   "refine": 16,
+   "angle": 0,
+   "device": "cuda (cupy): NVIDIA A100-SXM4-80GB",
+   "k": 1.1525091517217223,
+   "outers": 315,
+   "inners": 123202,
+   "seconds": 44.08734202000778,
+   "cells": 84480
+  },
+  {
+   "refine": 32,
+   "angle": 0,
+   "device": "cuda (cupy): NVIDIA A100-SXM4-80GB",
+   "k": 1.1525049534929148,
+   "outers": 316,
+   "inners": 269259,
+   "seconds": 95.5252894340083,
+   "cells": 337920
+  }
+ ]
+}

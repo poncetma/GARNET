@@ -1,0 +1,24 @@
+{
+ "rows": [
+  {
+   "refine": 32,
+   "angle": 0,
+   "device": "cuda (cupy): NVIDIA A100-SXM4-80GB",
+   "k": 1.0787848032158893,
+   "outers": 246,
+   "inners": 218495,
+   "seconds": 75.973341163015,
+   "cells": 337920
+  },
+  {
+   "refine": 32,
+   "angle": 180,
+   "device": "cuda (cupy): NVIDIA A100-SXM4-80GB",
+   "k": 1.1501008315004293,
+   "outers": 299,
+   "inners": 255443,
+   "seconds": 87.53499375400133,
+   "cells": 337920
+  }
+ ]
+}

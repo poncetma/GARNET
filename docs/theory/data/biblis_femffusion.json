@@ -1,0 +1,21 @@
+{
+ "source": "FEMFFUSION (build-release/femffusion.exe), examples/2D_BIBLIS/biblis_SP1.prm: diffusion, vacuum boundary (BC=2), FE degree 3, N_Refinements 0/1/2; degree 4 at 0/1 as a check",
+ "fe3": {
+  "0": 1.025346,
+  "1": 1.025279,
+  "2": 1.025263
+ },
+ "fe4": {
+  "0": 1.025303,
+  "1": 1.025264
+ },
+ "dofs_fe3": {
+  "0": 4832,
+  "1": 18914,
+  "2": 74834
+ },
+ "observed_order": 2.0660891904571748,
+ "k_limit": 1.025258,
+ "uncertainty_pcm": 0.5,
+ "note": "limit = Richardson extrapolation of FE3 r1, r2 with the observed order"
+}
