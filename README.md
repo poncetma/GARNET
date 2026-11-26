@@ -9,7 +9,7 @@ The core solvers support:
 - Cartesian and cylindrical r-z grids, body-fitted triangular meshes, and
   extruded triangular prisms; unstructured meshes for diffusion.
 - Criticality and adjoint calculations with diffusion, SP1/3/5/7, and SDP1/2/3,
-  and 2D SN reference solutions on triangular meshes.
+  and SN reference solutions on triangular/prism meshes.
 - Neutron kinetics, coupled thermal transients, and quasi-static acceleration.
 - SPH correction, including boundary discontinuity factors (hybrid SPH-DF), and cross-section readers for Griffin and FEMFFUSION data.
 
