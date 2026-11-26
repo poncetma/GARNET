@@ -462,6 +462,6 @@ and [3-D adaptive-BDF notebook](../notebooks/colab_hpmr3d_adaptive_bdf_gpu.ipynb
 preCICE installation and its test command are in the
 [coupling guide](coupling.md#running-it).
 
-The [July theory report](report.html) retains the original discretization
+The [July theory report](report.pdf) ([HTML source](report.html)) retains the original discretization
 derivations and benchmark snapshot. Use this report and the
 [user guide](user_guide.md) for the current coverage and supported workflows.

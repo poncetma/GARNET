@@ -76,7 +76,8 @@ SPH data, moving control drums, and coupled calculations.
 - [Transient and r-z workflows](docs/transient_api.md): timed controls, adaptive BDF, progress callbacks, and reusable results.
 - [Thermal coupling](docs/coupling.md): conduction, feedback, energy balance,
   and preCICE integration.
-- [Finite-volume theory report](docs/report.html): discretization and solver
+- [Finite-volume theory report](docs/report.pdf) (PDF; HTML source
+  [docs/report.html](docs/report.html)): discretization and solver
   derivations, with the original July 2026 benchmark snapshot.
 - [Examples](examples/) and a [GPU walkthrough](notebooks/colab_coupled_transient_gpu_latest.ipynb).
 
