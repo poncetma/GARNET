@@ -180,3 +180,41 @@ def test_gpu_broken_graph_capture_without_sync_misses_the_cpu(cuda, monkeypatch)
     monkeypatch.setattr(TriSNTransportSolver, "_sync_before_capture", lambda self: None)
     lu, gpu, _ = _tri_sn_transients()
     assert np.abs(gpu.power - lu.power).max() > 1e-6
+
+
+def _prism_p2_k(device, engine, cache="all"):
+    from garnet.materials import Material
+    from garnet.tri import TriGrid
+    from garnet.tri_sn import TriSNTransportSolver
+    s0 = np.array([[0.30, 0.05], [0.0, 0.60]])
+    s1 = np.array([[0.12, 0.02], [0.0, 0.15]])
+    s2 = np.array([[0.05, 0.01], [0.0, 0.04]])
+    m = Material(diffusion=[1.2, 0.5], sigma_a=[0.02, 0.10], nu_sigma_f=[0.01, 0.20],
+                 sigma_s=s0, chi=[1.0, 0.0], total=[0.37, 0.70],
+                 sigma_s_moments=np.stack([s0, s1, s2]))
+    grid = TriGrid(shape=(5, 5, 2, 5), side=1.5, height=5.0)
+    act = np.ones(grid.shape, bool)
+    act[0, 0] = False
+    return TriSNTransportSolver(grid, [m], active=act, n_polar=4, n_azi=8, bc="vacuum",
+                                scheme="scb", engine=engine, device=device,
+                                scattering_order=2, level_cache=cache).solve(**TIGHT).k_eff
+
+
+@pytest.mark.parametrize("cache", ["all", "group"])
+def test_gpu_six_corner_prisms_match_the_cpu_lu_engine(cuda, cache):
+    assert _prism_p2_k("gpu", "levels", cache) == pytest.approx(
+        _prism_p2_k("cpu", "lu"), abs=1e-9)
+
+
+def test_gpu_broken_group_cache_without_refill_misses(cuda, monkeypatch):
+    from garnet.tri_sn import TriSNTransportSolver
+    build = TriSNTransportSolver._scb3d_level_tables
+    first = {}
+
+    def stale(self, g):
+        if "views" not in first:
+            first["views"] = build(self, g)
+        return first["views"]
+
+    monkeypatch.setattr(TriSNTransportSolver, "_scb3d_level_tables", stale)
+    assert abs(_prism_p2_k("gpu", "levels", "group") - _prism_p2_k("cpu", "lu")) > 1e-6

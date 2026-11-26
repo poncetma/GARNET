@@ -14,6 +14,12 @@ Options (KEY=VALUE):
     treatment=blend      blend or staircase (garnet.benchmarks.sood.sphere_on_prisms)
     dz=                  prism height (cm)
     device=gpu
+    corners=2            axial corners per prism (2: SCB in z; 1: step in z)
+    cache=group          levels-engine corner tables: group or all
+    cmfd=mg              3-D CMFD solver: mg (AMG) or lu
+    graphs=1             CUDA-graph capture of the sweep (0 for debugging)
+    reuse=0              CMFD lagged LU: max GMRES iterations before refactorizing
+    accel=cmfd           outer acceleration: cmfd or power (no coarse solve)
     out=godiva_3d_out    directory for the JSON record
 
 The 1D converged reference for the same data is k = 0.994256 (P2).
@@ -46,6 +52,12 @@ def main(path, side, opts):
     treatment = opts.get("treatment", "blend")
     device = opts.get("device", "gpu")
     dz = float(opts["dz"]) if opts.get("dz") else None
+    corners = int(opts.get("corners", 2))
+    cache = opts.get("cache", "group")
+    cmfd = opts.get("cmfd", "mg")
+    graphs = opts.get("graphs", "1") != "0"
+    reuse = int(opts.get("reuse", "0"))
+    accel = opts.get("accel", "cmfd")
     out_dir = Path(opts.get("out", "godiva_3d_out"))
 
     z = next(iter(read_nuclear_data(path).values()))
@@ -67,20 +79,31 @@ def main(path, side, opts):
                                   active=sph.active, mix_material=mixm,
                                   mix_weight=sph.mix_weight, bc="vacuum", scheme=scheme,
                                   engine="levels", device=device, scattering_order=order,
-                                  **kw)
+                                  axial_corners=corners, level_cache=cache,
+                                  cmfd_solver=cmfd, graphs=graphs, cmfd_reuse=reuse,
+                                  outer_acceleration=accel, **kw)
     t_setup = time.perf_counter() - t1
-    r = solver.solve(tol_k=1e-7, tol_source=1e-6)
+    r = solver.solve(tol_k=1e-7, tol_source=1e-6, verbose=True,
+                     max_outer=int(opts.get("max_outer", "500")))
     rec = dict(side=side, dz=sph.grid.dz, order=order, quad=quad, scheme=scheme,
+               corners=corners,
                treatment=treatment, directions=int(solver.M), shape=list(sph.grid.shape),
                active=int(sph.active.sum()), k=float(r.k_eff), converged=bool(r.converged),
                pcm_vs_1d=1e5 * (float(r.k_eff) - K_1D.get(order, np.nan)),
                geometry_s=t_geo, setup_s=t_setup, solve_s=float(r.solve_seconds
                                                                if hasattr(r, "solve_seconds")
                                                                else np.nan),
-               gram_error=getattr(solver, "quadrature_gram_error", None))
+               gram_error=getattr(solver, "quadrature_gram_error", None),
+               t_groups=getattr(solver, "t_groups", None), t_cmfd=getattr(solver, "t_cmfd", None),
+               t_power=getattr(solver, "t_power", None),
+               t_tables=getattr(solver, "t_tables", None), n_tables=getattr(solver, "n_tables", None),
+               outers=int(getattr(r, "outer_iterations", -1)),
+               t_cmfd_parts=getattr(solver, "t_cmfd_parts", None),
+               accel=accel, cmfd_reuse=reuse, cmfd_reuse_stats=getattr(solver, "cmfd_reuse_stats", None))
     print(json.dumps(rec), flush=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    tag = (f"h{side:g}_P{order}_{Path(quad).name}_{scheme}_{treatment}"
+    tag = (f"h{side:g}_P{order}_{Path(quad).name}_{scheme}{corners}_{treatment}"
+           + (f"_reuse{reuse}" if reuse else "") + (f"_{accel}" if accel != "cmfd" else "")
            + (f"_dz{dz:g}" if dz else ""))
     (out_dir / f"godiva_3d_{tag}.json").write_text(json.dumps(rec, indent=1))
 

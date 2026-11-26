@@ -5,7 +5,59 @@ Status: items 0 and 1 done 2026-11-21 (reader `garnet/genfoam.py`, 1D spherical 
 - 3D P_L on prisms, both engines, with CMFD and DSA (`tests/verification/test_tri_sn_3d_anisotropic.py`);
 - `sphere_on_prisms`, blend and staircase.
 
-Item 5 (GPU runs, `tools/godiva_3d.py`) is waiting for a decision on the axial discretization, below.
+Item 5 done 2026-11-22 to 11-26; all items of this plan are complete (`tools/godiva_3d.py`, GH200), after the axial fix below (decision 2026-11-21: option b, the 6-corner prism).
+
+## 3D results (2026-11-26)
+
+Report: [benchmark-results/godiva-genfoam/godiva-genfoam.pdf](../benchmark-results/godiva-genfoam/godiva-genfoam.pdf) (source, data and `make_figures.py` in the same directory).
+
+Same data (P2, 23 groups) on prisms: 6-corner SCB, blend surface, product set 8 × 16 (128 directions), power iteration with Anderson mixing, tolerances k 1e-7 and source 1e-6.
+
+| h (cm) | Prisms | k | Solve |
+|---|---|---|---|
+| 0.9 | 12,216 | 0.975740 | 43 s |
+| 0.7 | 24,934 | 0.981508 | 61 s |
+| 0.5 | 65,610 | 0.986542 | 1533 s (lagged-LU CMFD; power not run) |
+| 0.35 | 186,596 | 0.989779 | 341 s |
+| 0.25 | 501,906 | 0.991551 | 894 s (CUDA graphs off) |
+
+- **Mesh extrapolation.** k(h) = k∞ − C h^p:
+
+  | Fit | p | k∞ | vs 1D 0.994256 |
+  |---|---|---|---|
+  | All 5 meshes | 1.48 | 0.994379 | +12 pcm |
+  | Finest 4 | 1.49 | 0.994333 | +8 pcm |
+  | Finest 3 (exact fit) | 1.57 | 0.994102 | −15 pcm |
+
+  The order of about 1.5 comes from the volume-fraction (blend) surface, as in the verified 2D Sood cylinders (13: −585 pcm at 24 cells, −233 pcm at 48).
+- **Angle.**
+  - 16 × 32 (512 directions) changes k by +19.7 pcm at h = 0.7 and +12.2 pcm at h = 0.5.
+  - The change shrinks with h, so the angular correction at h → 0 is under about +10 pcm.
+- **3D reference for these data:** k = 0.9943 ± 0.00014 (mean and half-spread of the three fits). This agrees with the 1D reference (0.994256) within the extrapolation spread.
+- **GeN-Foam's quadrature is not the cause of its 0.980.**
+  - Its default 32-direction set (P2 Gram error 4.4e-2), in GARNET's discretization, moves k by −1.3 pcm (h = 0.7), +5.4 pcm (h = 0.5) and +11.4 pcm (h = 0.35) against 8 × 16.
+  - Its 128-direction set moves k by −0.5 and −1.7 pcm.
+- **GeN-Foam's 0.980 is its first-order spatial discretization.**
+  - GeN-Foam uses first-order upwind on 177,655 tetrahedra. Their mean volume is 0.016 cm³, the volume of a GARNET h = 0.35 cm prism.
+  - GARNET's step (upwind) scheme, GeN-Foam's 32-direction set, same data:
+
+    | h (cm) | Mean prism volume | k | vs 3D reference |
+    |---|---|---|---|
+    | 0.5 | 0.043 cm³ | 0.970120 | −2430 pcm |
+    | 0.35 | 0.015 cm³ | 0.977035 | −1740 pcm |
+    | 0.25 | 0.0056 cm³ | 0.981761 | −1260 pcm |
+
+  - GeN-Foam's 0.980106 (−1415 pcm) lies between the h = 0.35 and 0.25 values. Upwinding at GeN-Foam's resolution therefore accounts for its offset; its quadrature contributes about 10 pcm.
+  - With the second-order 6-corner SCB at h = 0.35, the error is −460 pcm.
+  - The remaining differences (tetrahedra vs prisms, GeN-Foam's 20 unaccelerated power iterations, its surface representation) are within a few hundred pcm and were not separated.
+- **Costs and fixes found on the way:**
+  - The CMFD drift matrices factorize slowly in 3D: 28 s per group at 65,610 cells, so runs grew as N².
+    - `cmfd_reuse` (lagged LU preconditioning GMRES) gives the same k to 1e-14 at a quarter of the time.
+    - For Godiva, power iteration converges in 12–13 outers, 4.7× faster than CMFD at h = 0.9 with k equal to 7e-9.
+    - AMG or ILU with GMRES needs 150–220 iterations on these matrices.
+  - The SCB current fold now runs on the device.
+  - `level_cache="group"` keeps one group's 6 × 6 corner inverses.
+  - Open: CUDA-graph replay fails with an illegal address at h = 0.25 (500k prisms), with or without CMFD; `graphs=0` works.
 
 ## 3D findings (2026-11-21)
 
@@ -20,7 +72,7 @@ Item 5 (GPU runs, `tools/godiva_3d.py`) is waiting for a decision on the axial d
   | GARNET product 8 × 16 | exact to round-off up to l = 4 |
 
   By the addition theorem the moment source equals the direction-pair source of GeN-Foam on any set. GARNET therefore accepts such a set with `quadrature_check="warn"` and solves the same discrete scattering operator.
-- **The prism SCB is first order in z.** In-plane it splits each triangle into three corners; the axial caps are upwinded (step).
+- **The prism SCB was first order in z** (fixed 2026-11-22: `axial_corners=2`, the default, splits each prism into 6 corners; Sood 14 then gives −3481 / −2251 / −1227 pcm at 12 / 16 / 24 cells, and a slab along z converges at second order, `tests/verification/test_tri_sn_prism_scb.py`). In-plane it splits each triangle into three corners; the axial caps were upwinded (step).
   - **Sood problem 14** (exactly critical sphere, one group, R = 7.43 cm), blend surface, 4 × 16 set:
 
     | Cells across | 8 | 12 | 16 | 24 | 32 |

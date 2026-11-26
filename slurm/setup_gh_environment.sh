@@ -70,4 +70,4 @@ site="$env_root/lib/python3.13/site-packages"
 file -L "$env_root/bin/python3.13" "$site"/numpy/_core/_multiarray_umath*.so \
     "$site/nvidia/cuda_nvrtc/lib/libnvrtc.so.12"
 printf '=== GH200 environment setup finished: %s ===\n' "$(date -Is)"
-printf 'next: sbatch slurm/probe_gh_environment.sh\n'
+printf 'next: sbatch slurm/probe_gh_environment.sh; for cmfd_solver="mg" build pyamg with slurm/build_pyamg_gh.sh (no aarch64 wheel)\n'

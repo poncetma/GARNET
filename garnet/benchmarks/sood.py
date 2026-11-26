@@ -210,12 +210,18 @@ def sphere_on_prisms(radius: float, side: float, dz: float | None = None,
     covered = np.clip(covered, 0.0, 1.0).reshape(n, n, 2, nz)
     vol_exact = 4.0 / 3.0 * np.pi * radius ** 3
     # the residual quadrature error sits in the partial prisms: rescale those
-    full = covered >= 1.0 - 1e-12
-    part = (covered > 1e-12) & ~full
-    deficit = vol_exact / grid.cell_volume - full.sum()
-    covered[part] *= deficit / covered[part].sum()
-    if covered.max() > 1.0 + 1e-12:
-        raise RuntimeError("volume rescaling pushed a partial prism above full cover")
+    # (a prism pushed past full cover is clipped and the rest rescaled again)
+    for _ in range(100):
+        full = covered >= 1.0 - 1e-12
+        part = (covered > 1e-12) & ~full
+        deficit = vol_exact / grid.cell_volume - full.sum()
+        covered[part] *= deficit / covered[part].sum()
+        if covered.max() <= 1.0 + 1e-12:
+            break
+        np.minimum(covered, 1.0, out=covered)
+    else:
+        raise RuntimeError("volume rescaling did not settle")
+    covered = np.minimum(covered, 1.0)
     if treatment == "blend":
         active = covered > 1e-12
         mix_weight = np.where(active & (covered < 1.0 - 1e-12), 1.0 - covered, 0.0)

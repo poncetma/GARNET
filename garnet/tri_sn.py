@@ -48,6 +48,7 @@ the operator). CPU/numpy reference, not the GPU path.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import NamedTuple
 
@@ -208,6 +209,28 @@ class TriSNTransportSolver:
                     outside it are excised; active cells facing them see the
                     ``bc`` boundary law. Defaults to all-active.
     n_polar, n_azi: product-quadrature sizes (n_azi a multiple of 4).
+    axial_corners : SCB on prisms only. 2 (default): each prism is split into
+                    six corner sub-prisms, three in-plane corners times a lower
+                    and an upper half, the halves coupled through an internal
+                    mid-height face carrying their average -- corner balance in
+                    z as in-plane, second order in z. 1: three corner
+                    sub-prisms spanning the full height, axial caps upwinded
+                    (step in z, first order; the scheme before 2026-11-22).
+    cmfd_reuse    : 3-D CMFD with the LU solver: 0 (default) refactorizes every
+                    group's drift matrix at every outer. n > 0 keeps each
+                    group's last factorization as the preconditioner of a GMRES
+                    solve on the new matrix (started from the old LU's
+                    solution) and refactorizes only when a solve needs more than
+                    n iterations or fails. The drift correction settles as the
+                    outers converge, so the stale LU becomes nearly exact: at
+                    1e5 cells a 3-D LU costs ~30 s per group, a GMRES iteration
+                    one LU solve (~0.1 s).
+    level_cache   : SCB on prisms, levels engine: keep every group's corner-block
+                    inverses ("all", default) or only the group being swept
+                    ("group"; one table refilled in place on a group switch, so
+                    captured CUDA graphs stay valid). The tables hold nc^2
+                    values per (ordinate, prism): 36 for six corners, 128
+                    directions and 1e5 prisms make 3.7 GB per group.
     quadrature    : 3-D only: a user ordinate set (mu, eta, xi, w) in place of
                     the product set, e.g. :func:`garnet.sn.octant_quadrature`
                     or :func:`garnet.genfoam.read_quadrature_set`. Unit
@@ -282,7 +305,9 @@ class TriSNTransportSolver:
                  graphs: bool = True, scattering_order: int = 0,
                  adjoint: bool = False, cmfd_aggregate: int = 0,
                  cmfd_split_material: bool = False, cmfd_two_level: int = 0,
-                 quadrature=None, quadrature_check: str = "raise"):
+                 quadrature=None, quadrature_check: str = "raise",
+                 axial_corners: int = 2, level_cache: str = "all",
+                 cmfd_reuse: int = 0):
         if len(grid.shape) not in (3, 4) or grid.shape[2] != 2:
             raise ValueError("tri-S_N grid shape must be (nr, nc, 2) or "
                              "(nr, nc, 2, nz) for extruded prisms")
@@ -381,6 +406,15 @@ class TriSNTransportSolver:
         if require_fissile and not np.any(self.nsf):
             raise ValueError("no fissile material: k-eigenvalue is undefined")
 
+        self.cmfd_reuse = int(cmfd_reuse)
+        if self.cmfd_reuse < 0:
+            raise ValueError("cmfd_reuse must be >= 0")
+        if level_cache not in ("all", "group"):
+            raise ValueError("level_cache must be 'all' or 'group'")
+        self.level_cache = level_cache
+        if axial_corners not in (1, 2):
+            raise ValueError("axial_corners must be 1 or 2")
+        self.axial_corners = int(axial_corners)
         if quadrature_check not in ("raise", "warn"):
             raise ValueError("quadrature_check must be 'raise' or 'warn'")
         self.quadrature_check = quadrature_check
@@ -603,17 +637,18 @@ class TriSNTransportSolver:
             psi = bufs["psi"].reshape(M, self.N)
             return bufs["phiM"].ravel(), self._Rw_dev @ psi
         ac, K = self._ac_dev, self._scb["K"]
+        nco = self._scb.get("nc", 3)
         R = bufs["rhs_ang"].reshape(M, K)
         R[...] = xp.take(src_dev, ac)[None, :]
         if ang_dev is not None:
             R += xp.take(ang_dev, ac, axis=1)
-        R *= (self._measure / 3.0)
+        R *= (self._measure / nco)
         self._levels_exec(g, False)
         pf = bufs["phiN"]
         pf.fill(0.0)
         pf[ac] = bufs["phk"].ravel()
         mom = xp.zeros((len(self._mom_l), self.N))
-        mom[:, ac] = (self._Rw_dev / 3.0) @ bufs["mk"]
+        mom[:, ac] = (self._Rw_dev / nco) @ bufs["mk"]
         return pf, mom
 
     def _sweep_aniso_lu(self, g, src, ang):
@@ -631,11 +666,11 @@ class TriSNTransportSolver:
                 mom += self._Rw[:, m][:, None] * psi[None, :]
             return phi, mom
         d = self._scb
-        ac = d["ac"]
+        ac, nco = d["ac"], d.get("nc", 3)
         for m in range(self.M):
             q = src if ang is None else src + ang[m]
-            psi = self._lu(g, m)(np.repeat(q[ac] * (self._measure / 3.0), 3))
-            cell_psi = psi.reshape(-1, 3).mean(1)
+            psi = self._lu(g, m)(np.repeat(q[ac] * (self._measure / nco), nco))
+            cell_psi = psi.reshape(-1, nco).mean(1)
             phi[ac] += self.w[m] * cell_psi
             mom[:, ac] += self._Rw[:, m][:, None] * cell_psi[None, :]
         return phi, mom
@@ -1065,51 +1100,51 @@ class TriSNTransportSolver:
 
     def _setup_levels_scb_tables_3d(self, direction_indices, cell_indices, spans):
         """SCB per-level tables for the prism levels engine: the corner external
-        inflow gather (width 4 = 2 lateral half-edges + 2 axial caps) + buffers
-        for the batched 3x3 corner-block sweep. The within-cell block (internal
-        in-plane faces) is _lv_tables' Binv; only the EXTERNAL faces (upwind to
-        a neighbour prism's corner) are gathered here."""
+        inflow gather (width 2 lateral half-faces + the corner's external axial
+        caps) and buffers for the batched nc x nc corner-block sweep. The
+        within-prism block is ``_lv_tables``' Binv (``_scb3d_blocks``)."""
         xp, N, M = self.xp, self.N, self.M
-        h, dz, area = self.h, self.dz, self.area
         d = self._scb
-        ac, K = d["ac"], d["K"]
+        ac, K, nco = d["ac"], d["K"], d["nc"]
+        h2, hi, Acap, Vc = self._scb3d_geometry()
+        A = d["ax_sign"].shape[1]
+        width = 2 + A
         aidx = np.full(N, -1, np.int64)
         aidx[ac] = np.arange(K)
         rr = aidx[cell_indices]
         pidx = direction_indices * K + rr
-        h2d, Acap = (h / 2.0) * dz, area / 3.0
-        off = (np.arange(M) * (3 * K))[:, None, None, None]
+        off = (np.arange(M) * (nco * K))[:, None, None, None]
         extn, enbr = d["ext_n"], d["ext_nbr"]
         oe = (self.mu[:, None, None, None] * extn[None, ..., 0]
-              + self.eta[:, None, None, None] * extn[None, ..., 1])      # (M,K,3,2)
-        c_lat = np.where((oe < 0.0) & (enbr >= 0)[None], -oe * h2d, 0.0)
+              + self.eta[:, None, None, None] * extn[None, ..., 1])      # (M,K,nc,2)
+        c_lat = np.where((oe < 0.0) & (enbr >= 0)[None], -oe * h2, 0.0)
         n_lat = np.where(c_lat > 0.0, off + np.maximum(enbr, 0)[None], 0)
-        oz = np.stack([self.xi, -self.xi], -1)[:, None, None, :]         # (M,1,1,2) up/down
+        oz = (self.xi[:, None, None] * d["ax_sign"][None])[:, None]     # (M,1,nc,A)
         anbr = d["ax_nbr"]
         c_ax = np.where((oz < 0.0) & (anbr >= 0)[None], -oz * Acap, 0.0)
         n_ax = np.where(c_ax > 0.0, off + np.maximum(anbr, 0)[None], 0)
-        coef = np.concatenate([c_lat, c_ax], 3).reshape(M * K, 3, 4)     # width 4
-        nbr_f = np.concatenate([n_lat, n_ax], 3).reshape(M * K, 3, 4)
-        self._lv_oe = oe                                                 # host, Binv
+        coef = np.concatenate([c_lat, c_ax], 3).reshape(M * K, nco, width)
+        nbr_f = np.concatenate([n_lat, n_ax], 3).reshape(M * K, nco, width)
+        self._lv_oe = oe
         self._levels = []
         for a, b in spans:
             p = pidx[a:b]
-            sidx = ((p[:, None] * 3) + np.arange(3)).ravel()
+            sidx = ((p[:, None] * nco) + np.arange(nco)).ravel()
             self._levels.append(_CornerLevel(xp.asarray(rr[a:b].astype(np.int32)),
                                  xp.asarray(p.astype(np.int32)),
                                  xp.asarray(sidx.astype(np.int32)),
                                  xp.asarray(nbr_f[p].astype(np.int32)),
                                  xp.asarray(coef[p])))
         self._bufs = dict(
-            psi=xp.zeros(M * K * 3), rhs=xp.zeros(K),
-            IF=xp.zeros((M * K, 3)),
+            psi=xp.zeros(M * K * nco), rhs=xp.zeros(K),
+            IF=xp.zeros((M * K, nco)),
             mk=xp.zeros((M, K)), phk=xp.zeros(K),
             mk_w=self._reduce_buf((M, K)),
-            w3col=xp.asarray(self.w[:, None] / 3.0),
-            w3vec=xp.asarray(self.w / 3.0),
-            work=[_CornerWork(xp.zeros((n, 3, 4)), xp.zeros((n, 3)), xp.zeros(n),
-                   xp.zeros((n, 3)), self._reduce_buf((n, 3, 3)),
-                   xp.zeros((n, 3)))
+            w3col=xp.asarray(self.w[:, None] / nco),
+            w3vec=xp.asarray(self.w / nco),
+            work=[_CornerWork(xp.zeros((n, nco, width)), xp.zeros((n, nco)), xp.zeros(n),
+                   xp.zeros((n, nco)), self._reduce_buf((n, nco, nco)),
+                   xp.zeros((n, nco)))
                   for n in (b - a for a, b in spans)])
         self._ac_dev = xp.asarray(ac)
         self._bufs["phiN"] = xp.zeros(N)
@@ -1268,6 +1303,14 @@ class TriSNTransportSolver:
             denom = (self.st[g].reshape(-1)[None, :] * self._measure
                      + self._lv_out).reshape(-1)
             out = [xp.asarray(denom[asnumpy(lev.angular_indices)]) for lev in self._levels]
+        elif self.is3d:
+            if self.level_cache == "group":
+                if getattr(self, "_lv_resident", None) == g:
+                    return self._lv_group[g]
+                self._lv_group = {}
+            out = self._scb3d_level_tables(g)
+            if self.level_cache == "group":
+                self._lv_resident = g
         else:
             d = self._scb
             K = d["K"]
@@ -1428,7 +1471,7 @@ class TriSNTransportSolver:
                 xp.sum(work.matrix_products, axis=2, out=work.corner_flux)
             xp.put(psi, level.angular_indices, work.corner_flux)
         K = self._scb["K"]
-        xp.sum(psi.reshape(self.M, K, 3), axis=2, out=bufs["mk"])
+        xp.sum(psi.reshape(self.M, K, self._scb.get("nc", 3)), axis=2, out=bufs["mk"])
         # phi_k = sum_m (w_m/3) mk[m, k].
         if self._fused_reduce:
             kernels.moment_gather(xp, bufs["mk"], bufs["w3vec"], out=bufs["phk"])
@@ -1462,6 +1505,8 @@ class TriSNTransportSolver:
         if entry == "fallback":
             self._run_levels(g, iface)
             return
+        if entry is not None:
+            self._lv_tables(g)                   # group cache: refill in place
         if entry is None:
             self._lv_tables(g)                   # build outside the capture
             self._sync_before_capture()
@@ -1560,7 +1605,7 @@ class TriSNTransportSolver:
             return bufs["phiM"].ravel(), bufs["psi"]
         ac = self._ac_dev
         xp.take(src_dev, ac, out=bufs["rhs"])
-        bufs["rhs"] *= (self._measure / 3.0)
+        bufs["rhs"] *= (self._measure / self._scb.get("nc", 3))
         self._levels_exec(g, False)
         pf = bufs["phiN"]
         pf.fill(0.0)
@@ -1623,7 +1668,7 @@ class TriSNTransportSolver:
             return asnumpy(bufs["phiM"]).ravel().copy(), bufs["psi"]
         d = self._scb
         ac, K = d["ac"], d["K"]
-        self._buf_set(bufs["rhs"], src_flat[ac] * (self._measure / 3.0))
+        self._buf_set(bufs["rhs"], src_flat[ac] * (self._measure / d.get("nc", 3)))
         iface = iface_in is not None
         if iface:
             psi_in, is_iface = iface_in
@@ -1948,14 +1993,14 @@ class TriSNTransportSolver:
         meas = self._measure
         if self.scheme == "scb":
             d = self._scb
-            ac, K = d["ac"], d["K"]
-            base = np.repeat(src_flat[ac] * (meas / 3.0), 3).reshape(K, 3)
+            ac, K, nco = d["ac"], d["K"], d.get("nc", 3)
+            base = np.repeat(src_flat[ac] * (meas / nco), nco).reshape(K, nco)
             phi = np.zeros(self.N)
-            psi = np.empty((self.M, K, 3))
+            psi = np.empty((self.M, K, nco))
             self._ensure_group(g)
             for m in range(self.M):
-                rhs = base if q_ang is None else base + q_ang[m] * (meas / 3.0)
-                p = self._lu(g, m)(rhs.ravel()).reshape(K, 3)
+                rhs = base if q_ang is None else base + q_ang[m] * (meas / nco)
+                p = self._lu(g, m)(rhs.ravel()).reshape(K, nco)
                 psi[m] = p
                 phi[ac] += self.w[m] * p.mean(1)   # cell flux = mean of corners
             return phi, psi
@@ -2696,11 +2741,20 @@ class TriSNTransportSolver:
         return phi
 
     def _build_corners_3d(self):
-        """Corner connectivity for SCB on the prism mesh: each active prism is
-        split into three corner sub-prisms (the 2D corner quad extruded in z).
-        A corner keeps its two lateral external half-edges + two lateral
-        internal faces (the 2D structure) and gains two axial cap faces coupling
-        the SAME corner in the prism directly above/below. 3 DoF per prism."""
+        """Corner connectivity for SCB on the prism mesh. Each active prism is
+        split into nc = 3 ncz corner sub-prisms, ncz = ``axial_corners``: the
+        2-D corner quad (in-plane corner lc) times the full height (ncz = 1) or
+        times a lower / upper half (ncz = 2, axial index zc). Local corner index
+        lc + 3 zc, global id r * nc + local. Per corner:
+
+        * two lateral external half-faces (upwind to the neighbour prism's
+          corner at the shared vertex, same axial half) and two lateral
+          internal faces to the other in-plane corners of the same half;
+        * external axial caps: both caps when ncz = 1 (to the same corner of
+          the prism above / below), else one cap, the top of an upper corner or
+          the bottom of a lower one, facing the other half of the neighbour;
+        * ncz = 2: one internal axial face at mid-height to the other half of
+          the same in-plane corner, carrying the average of the two."""
         s = _SQRT3_2
         edge_spec = {
             0: [({1, 2}, (s, 0.5), (0, 0, 1), {1: 0, 2: 1}),
@@ -2723,6 +2777,8 @@ class TriSNTransportSolver:
                                     in edge_spec[t] if lc in cs]
                 int_tab[(t, lc)] = [(w, int_dir[t][(lc, w)])
                                     for w in (0, 1, 2) if w != lc]
+        ncz = self.axial_corners
+        nco = 3 * ncz
         nr, nc, nz, N = self.nr, self.nc, self.nz, self.N
         cell, act_flat = self._cell, self._act_flat
         rad_per, ax_per = self.bc_radial == "periodic", self.bc_axial == "periodic"
@@ -2730,107 +2786,225 @@ class TriSNTransportSolver:
         K = ac.size
         aidx = np.full(N, -1)
         aidx[ac] = np.arange(K)
-        ext_n = np.zeros((K, 3, 2, 2))
-        ext_nbr = np.full((K, 3, 2), -1)
-        int_n = np.zeros((K, 3, 2, 2))
-        int_w = np.zeros((K, 3, 2), int)
-        ax_nbr = np.full((K, 3, 2), -1)                      # [corner, lc, up/down]
-        for r in range(K):
-            c = ac[r]
-            k = c % nz
-            t = (c // nz) % 2
-            j = (c // (nz * 2)) % nc
-            i = c // (nz * 2 * nc)
-            for lc in range(3):
-                for f, (nrm, (di, dj, tn), nbr_lc) in enumerate(ext_tab[(t, lc)]):
-                    ext_n[r, lc, f] = nrm
-                    ni, nj = i + di, j + dj
-                    ok = (rad_per or (0 <= ni < nr and 0 <= nj < nc))
-                    if ok:
-                        nb = cell[ni % nr, nj % nc, tn, k]
-                        if act_flat[nb]:
-                            ext_nbr[r, lc, f] = aidx[nb] * 3 + nbr_lc
-                for f, (w, nrm) in enumerate(int_tab[(t, lc)]):
-                    int_n[r, lc, f] = nrm
-                    int_w[r, lc, f] = r * 3 + w
-                for uf, dk in enumerate((+1, -1)):
-                    nk = k + dk
-                    if ax_per or (0 <= nk < nz):
-                        nb = cell[i, j, t, nk % nz]
-                        if act_flat[nb]:
-                            ax_nbr[r, lc, uf] = aidx[nb] * 3 + lc
+        # external axial caps per local corner: outward z sign, facing corner
+        if ncz == 1:
+            ax_sign = np.array([[1.0, -1.0]] * 3)                    # (3, 2)
+            ax_face = np.array([[lc, lc] for lc in range(3)])
+        else:
+            ax_sign = np.array([[-1.0]] * 3 + [[1.0]] * 3)          # (6, 1)
+            ax_face = np.array([[lc + 3] for lc in range(3)] + [[lc] for lc in range(3)])
+        A = ax_sign.shape[1]
+        ext_n = np.zeros((K, nco, 2, 2))
+        ext_nbr = np.full((K, nco, 2), -1)
+        int_n = np.zeros((K, nco, 2, 2))
+        int_w = np.zeros((K, nco, 2), int)
+        ax_nbr = np.full((K, nco, A), -1)
+        # in-plane geometry per (cell type, local corner), vectorized over cells
+        kk = ac % nz
+        tt = (ac // nz) % 2
+        jj = (ac // (nz * 2)) % nc
+        ii = ac // (nz * 2 * nc)
+        rr = np.arange(K)
+        for t in (0, 1):
+            sel = tt == t
+            r_t, i_t, j_t, k_t = rr[sel], ii[sel], jj[sel], kk[sel]
+            for zc in range(ncz):
+                for lc in range(3):
+                    cc = lc + 3 * zc
+                    for f, (nrm, (di, dj, tn), nbr_lc) in enumerate(ext_tab[(t, lc)]):
+                        ext_n[r_t, cc, f] = nrm
+                        ni, nj = i_t + di, j_t + dj
+                        ok = (np.ones(r_t.size, bool) if rad_per else
+                              (ni >= 0) & (ni < nr) & (nj >= 0) & (nj < nc))
+                        nb = cell[ni % nr, nj % nc, tn, k_t]
+                        ok &= act_flat[nb]
+                        ext_nbr[r_t[ok], cc, f] = aidx[nb[ok]] * nco + nbr_lc + 3 * zc
+                    for f, (w, nrm) in enumerate(int_tab[(t, lc)]):
+                        int_n[r_t, cc, f] = nrm
+                        int_w[r_t, cc, f] = r_t * nco + w + 3 * zc
+        kk3 = kk
+        for cc in range(nco):
+            for a in range(A):
+                nk = kk3 + int(ax_sign[cc, a])
+                ok = np.ones(K, bool) if ax_per else (nk >= 0) & (nk < nz)
+                nb = cell[ii, jj, tt, nk % nz]
+                ok &= act_flat[nb]
+                ax_nbr[ok, cc, a] = aidx[nb[ok]] * nco + ax_face[cc, a]
+        # ncz = 2: internal mid-height face to the other half, outward z sign
+        if ncz == 2:
+            axi_w = np.stack([rr * nco + (cc + 3) % 6 for cc in range(6)], 1)  # (K, 6)
+            axi_sign = np.array([1.0] * 3 + [-1.0] * 3)
+        else:
+            axi_w, axi_sign = None, None
         # per cell edge (t, e) -> the (corner, ext-face) pairs on it, for folding
-        # the corner half-edge currents into the _faces_3d per-cell-face current.
+        # the corner half-face currents into the _faces_3d per-cell-face current.
         edge_corners = {}
         for t in (0, 1):
             lc_edges = {lc: [e for e, (cs, *_) in enumerate(edge_spec[t])
                              if lc in cs] for lc in range(3)}
             for e, (cs, *_) in enumerate(edge_spec[t]):
-                edge_corners[(t, e)] = [(lc, lc_edges[lc].index(e))
-                                        for lc in sorted(cs)]
-        self._scb = {"ac": ac, "K": K, "ext_n": ext_n, "ext_nbr": ext_nbr,
-                     "int_n": int_n, "int_w": int_w, "ax_nbr": ax_nbr,
-                     "edge_corners": edge_corners}
+                edge_corners[(t, e)] = [(lc + 3 * zc, lc_edges[lc].index(e))
+                                        for zc in range(ncz) for lc in sorted(cs)]
+        self._scb = {"ac": ac, "K": K, "nc": nco, "ncz": ncz, "ext_n": ext_n,
+                     "ext_nbr": ext_nbr, "int_n": int_n, "int_w": int_w,
+                     "ax_nbr": ax_nbr, "ax_sign": ax_sign, "axi_w": axi_w,
+                     "axi_sign": axi_sign, "edge_corners": edge_corners}
+
+    def _scb3d_geometry(self):
+        """Face areas and corner volume of the prism corners: lateral external
+        half-face, lateral internal face, axial cap, corner sub-prism volume."""
+        dzc = self.dz / self._scb["ncz"]
+        return ((self.h / 2.0) * dzc, (self.h / (2.0 * np.sqrt(3.0))) * dzc,
+                self.area / 3.0, (self.area / 3.0) * dzc)
+
+    def _scb3d_blocks(self, g, m):
+        """The within-prism corner block (K, nc, nc) of ordinate m, group g:
+        collision, outflow through the external faces, and the internal
+        faces (lateral, and axial at mid-height for ncz = 2) carrying the
+        average of the two corners they separate."""
+        d = self._scb
+        K, nco = d["K"], d["nc"]
+        h2, hi, Acap, Vc = self._scb3d_geometry()
+        st_c = self.st[g].reshape(-1)[d["ac"]]
+        oe = self.mu[m] * d["ext_n"][..., 0] + self.eta[m] * d["ext_n"][..., 1]
+        oi = self.mu[m] * d["int_n"][..., 0] + self.eta[m] * d["int_n"][..., 1]
+        oz = d["ax_sign"] * self.xi[m]                        # (nc, A)
+        B = np.zeros((K, nco, nco))
+        diag = (st_c[:, None] * Vc
+                + (np.maximum(oe, 0.0) * h2).sum(2)
+                + (oi * hi * 0.5).sum(2)
+                + (np.maximum(oz, 0.0) * Acap).sum(1)[None, :])
+        rK = np.arange(K)
+        wloc = d["int_w"] - rK[:, None, None] * nco
+        for cc in range(nco):
+            B[:, cc, cc] = diag[:, cc]
+            for f in range(2):
+                B[rK, cc, wloc[:, cc, f]] += oi[:, cc, f] * hi * 0.5
+        if d["ncz"] == 2:
+            c_ax = d["axi_sign"] * self.xi[m] * Acap * 0.5      # (6,)
+            for cc in range(nco):
+                B[:, cc, cc] += c_ax[cc]
+                B[:, cc, (cc + 3) % 6] += c_ax[cc]
+        return B
+
+    def _scb3d_blocks_vec(self, g, ms):
+        """``_scb3d_blocks`` for a batch of ordinates ``ms`` at once, on the
+        backend: (len(ms), K, nc, nc)."""
+        xp = self.xp
+        d = self._scb
+        K, nco = d["K"], d["nc"]
+        if getattr(self, "_scb_dev", None) is None:
+            rK = np.arange(K)
+            self._scb_dev = dict(
+                ext_n=xp.asarray(d["ext_n"]), int_n=xp.asarray(d["int_n"]),
+                wloc=(d["int_w"] - rK[:, None, None] * nco), ax_sign=xp.asarray(d["ax_sign"]))
+        dv = self._scb_dev
+        h2, hi, Acap, Vc = self._scb3d_geometry()
+        st_c = xp.asarray(self.st[g].reshape(-1)[d["ac"]])
+        mu, eta, xi = (xp.asarray(a[ms]) for a in (self.mu, self.eta, self.xi))
+        oe = mu[:, None, None, None] * dv["ext_n"][None, ..., 0] \
+            + eta[:, None, None, None] * dv["ext_n"][None, ..., 1]      # (mc,K,nc,2)
+        oi = mu[:, None, None, None] * dv["int_n"][None, ..., 0] \
+            + eta[:, None, None, None] * dv["int_n"][None, ..., 1]
+        oz = xi[:, None, None] * dv["ax_sign"][None]                     # (mc,nc,A)
+        B = xp.zeros((len(ms), K, nco, nco))
+        diag = (st_c[None, :, None] * Vc
+                + (xp.maximum(oe, 0.0) * h2).sum(3)
+                + (oi * hi * 0.5).sum(3)
+                + (xp.maximum(oz, 0.0) * Acap).sum(2)[:, None, :])
+        idx = xp.arange(nco)
+        B[:, :, idx, idx] = diag
+        rK = xp.arange(K)
+        for cc in range(nco):
+            for f in range(2):
+                col = dv["wloc"][:, cc, f]
+                if np.all(col == col[0]):                        # same partner everywhere
+                    B[:, :, cc, int(col[0])] += oi[:, :, cc, f] * hi * 0.5
+                else:
+                    B[:, rK, cc, xp.asarray(col)] += oi[:, :, cc, f] * hi * 0.5
+        if d["ncz"] == 2:
+            c_ax = xp.asarray(d["axi_sign"])[None, :] * xi[:, None] * (Acap * 0.5)
+            for cc in range(nco):
+                B[:, :, cc, cc] += c_ax[:, None, cc]
+                B[:, :, cc, (cc + 3) % 6] += c_ax[:, None, cc]
+        return B
+
+    def _scb3d_level_tables(self, g):
+        """Corner-block inverses of group g in level order, as per-level views
+        of one (M K, nc, nc) table built on the backend in ordinate chunks. With
+        ``level_cache="group"`` the same table is refilled in place."""
+        xp, M = self.xp, self.M
+        d = self._scb
+        K, nco = d["K"], d["nc"]
+        t_tab = time.perf_counter()
+        if getattr(self, "_lv_pos", None) is None:
+            order = np.concatenate([asnumpy(lev.angular_cell_indices)
+                                    for lev in self._levels])
+            pos = np.empty(M * K, np.int64)
+            pos[order] = np.arange(order.size)
+            self._lv_pos = xp.asarray(pos)
+            sizes = [int(lev.angular_cell_indices.shape[0]) for lev in self._levels]
+            self._lv_bounds = np.concatenate([[0], np.cumsum(sizes)])
+        T = getattr(self, "_lv_shared", None) if self.level_cache == "group" else None
+        if T is None:
+            T = xp.empty((M * K, nco, nco))
+            if self.level_cache == "group":
+                self._lv_shared = T
+        chunk = max(1, int(4e8 // max(1, K * nco * nco * 8)))
+        for m0 in range(0, M, chunk):
+            ms = np.arange(m0, min(M, m0 + chunk))
+            inv = xp.linalg.inv(self._scb3d_blocks_vec(g, ms)).reshape(-1, nco, nco)
+            T[self._lv_pos[m0 * K:(ms[-1] + 1) * K]] = inv
+            del inv
+        b = self._lv_bounds
+        self._sync()
+        self.t_tables = getattr(self, "t_tables", 0.0) + time.perf_counter() - t_tab
+        self.n_tables = getattr(self, "n_tables", 0) + 1
+        return [T[b[i]:b[i + 1]] for i in range(len(self._levels))]
 
     def _prefactor_scb_3d(self, groups=None):
-        """Factorize the 3K corner system per ordinate/group on prisms: the 2D
-        corner operator with lateral face areas scaled by dz, plus two axial cap
-        faces (area = corner cap A3 = area/3, cosine +/-xi) upwind-coupled to the
-        same corner above/below."""
+        """Factorize the nc K corner system per ordinate/group on prisms: the
+        within-prism corner blocks (``_scb3d_blocks``) plus the upwind inflow
+        couplings through the external lateral half-faces and axial caps."""
         d = self._scb
-        K = d["K"]
-        dz = self.dz
-        h2 = (self.h / 2.0) * dz                             # lateral ext area
-        hi = (self.h / (2.0 * np.sqrt(3.0))) * dz            # lateral int area
-        A3 = (self.area / 3.0) * dz                          # corner sub-prism volume
-        Acap = self.area / 3.0                               # axial cap area
-        row = np.broadcast_to(
-            np.arange(K)[:, None, None] * 3 + np.arange(3)[None, :, None], (K, 3, 2))
-        rid = (np.arange(K)[:, None] * 3 + np.arange(3)[None, :]).ravel()
-        arow = np.broadcast_to(
-            np.arange(K)[:, None, None] * 3 + np.arange(3)[None, :, None], (K, 3, 2))
+        K, nco = d["K"], d["nc"]
+        h2, hi, Acap, Vc = self._scb3d_geometry()
+        A = d["ax_sign"].shape[1]
+        brow = np.broadcast_to((np.arange(K)[:, None] * nco + np.arange(nco))[:, :, None],
+                               (K, nco, nco))
+        bcol = np.broadcast_to((np.arange(K)[:, None] * nco)[:, :, None]
+                               + np.arange(nco)[None, None, :], (K, nco, nco))
+        row2 = np.broadcast_to((np.arange(K)[:, None] * nco + np.arange(nco))[:, :, None],
+                               (K, nco, 2))
+        rowA = np.broadcast_to((np.arange(K)[:, None] * nco + np.arange(nco))[:, :, None],
+                               (K, nco, A))
         if getattr(self, "_solvers", None) is None or groups is None:
             self._solvers = [[None] * self.M for _ in range(self.G)]
         for g in (range(self.G) if groups is None else groups):
-            st_c = self.st[g].reshape(-1)[d["ac"]]
             for m in range(self.M):
+                B = self._scb3d_blocks(g, m)
                 oe = self.mu[m] * d["ext_n"][..., 0] + self.eta[m] * d["ext_n"][..., 1]
-                oi = self.mu[m] * d["int_n"][..., 0] + self.eta[m] * d["int_n"][..., 1]
-                oz = np.array([self.xi[m], -self.xi[m]])      # up, down cap cosines
-                diag = st_c[:, None] * A3                     # (K, 3) collision
-                diag = diag + (np.where(oe > 0, oe, 0.0) * h2).sum(2)
-                diag = diag + (oi * hi * 0.5).sum(2)
-                diag = diag + (np.where(oz > 0, oz, 0.0) * Acap).sum()  # axial outflow
-                rows = [rid]
-                cols = [rid]
-                vals = [diag.ravel()]
-                inflow = (oe < 0) & (d["ext_nbr"] >= 0)       # lateral inflow
-                rows.append(row[inflow])
-                cols.append(d["ext_nbr"][inflow])
-                vals.append((oe * h2)[inflow])
-                rows.append(row.ravel())
-                cols.append(d["int_w"].ravel())  # internal
-                vals.append((oi * hi * 0.5).ravel())
-                azin = (oz < 0)[None, None, :] & (d["ax_nbr"] >= 0)  # axial inflow
-                coef = np.broadcast_to(oz * Acap, (K, 3, 2))
-                rows.append(arow[azin])
-                cols.append(d["ax_nbr"][azin])
-                vals.append(coef[azin])
-                Amat = sp.csr_matrix((np.concatenate(vals),
-                                      (np.concatenate(rows), np.concatenate(cols))),
-                                     shape=(3 * K, 3 * K))
+                oz = np.broadcast_to(d["ax_sign"] * self.xi[m], (K, nco, A))
+                lat = (oe < 0) & (d["ext_nbr"] >= 0)
+                axin = (oz < 0) & (d["ax_nbr"] >= 0)
+                nzb = B != 0.0
+                Amat = sp.csr_matrix(
+                    (np.concatenate([B[nzb], (oe * h2)[lat], (oz * Acap)[axin]]),
+                     (np.concatenate([brow[nzb], row2[lat], rowA[axin]]),
+                      np.concatenate([bcol[nzb], d["ext_nbr"][lat], d["ax_nbr"][axin]]))),
+                    shape=(nco * K, nco * K))
                 self._solvers[g][m] = factorized(Amat.tocsc())
 
     def _sweep_scb_3d(self, g, src_flat):
         """One SCB prism sweep: phi = sum_m w_m mean_corner(psi_m), the corner
-        source being src * corner-sub-prism-volume (vol/3)."""
+        source being src * corner-sub-prism-volume (vol / nc)."""
         self._sweep_count += 1
         d = self._scb
-        ac, K = d["ac"], d["K"]
-        base = np.repeat(src_flat[ac] * (self.vol / 3.0), 3)
+        ac, K, nco = d["ac"], d["K"], d["nc"]
+        base = np.repeat(src_flat[ac] * (self.vol / nco), nco)
         phi = np.zeros(self.N)
         for m in range(self.M):
-            psi = self._lu(g, m)(base).reshape(K, 3)
+            psi = self._lu(g, m)(base).reshape(K, nco)
             phi[ac] += self.w[m] * psi.mean(1)
         return phi
 
@@ -3235,14 +3409,14 @@ class TriSNTransportSolver:
     def _sweep_currents_scb_3d(self, g, src_flat, ang=None):
         """CMFD currents for the SCB prism scheme, in the same _faces_3d
         per-cell-face convention as _sweep_currents_3d. The transport current
-        density across a lateral cell edge is the mean of its two corner
-        half-edge densities (each J = sum_m w_m (Omega.n_hat) psi_upwind, upwind
-        = own corner on outflow, the neighbour prism's shared-vertex corner on
-        inflow); across an axial cap it is the mean over the cell's three
-        corners. Works for the LU and levels engines (corner angular flux)."""
+        density across a lateral cell face is the mean of its corner half-face
+        densities (two corners, or four with axial corners; each J = sum_m w_m
+        (Omega.n_hat) psi_upwind, upwind = own corner on outflow, the neighbour
+        prism's corner on inflow); across an axial cap it is the mean over the
+        three corners on that cap. Works for the LU and levels engines."""
         M, N = self.M, self.N
         d = self._scb
-        ac, K = d["ac"], d["K"]
+        ac, K, nco = d["ac"], d["K"], d["nc"]
         if self.engine == "levels":
             if ang is not None:                       # P_L: per-ordinate source
                 phi, _ = self._sweep_aniso_dev(g, self.xp.asarray(src_flat),
@@ -3250,28 +3424,17 @@ class TriSNTransportSolver:
                 phi, psi = asnumpy(phi).copy(), self._bufs["psi"]
             else:
                 phi, psi = self._sweep_levels(g, src_flat)
-            psi3 = asnumpy(psi).reshape(M, K, 3)
+            t_fold = time.perf_counter()
+            Jh, Ja = self._scb3d_corner_currents(psi, self.xp)   # on the device
         else:
             self._sweep_count += 1
             psi3 = np.stack([self._lu(g, m)(np.repeat(
-                (src_flat if ang is None else src_flat + ang[m])[ac] * (self.vol / 3.0), 3)
-            ).reshape(K, 3) for m in range(M)])
+                (src_flat if ang is None else src_flat + ang[m])[ac] * (self.vol / nco), nco)
+            ).reshape(K, nco) for m in range(M)])
             phi = np.zeros(N)
             phi[ac] = (self.w[:, None] * psi3.mean(2)).sum(0)
-        psi_flat = psi3.reshape(M, 3 * K)                    # (M, 3K)
-
-        def upwind_density(cos, nbr_id):                     # (M,K,3,F) cosine
-            valid = (nbr_id >= 0)[None]
-            npsi = np.where(valid, psi_flat[:, np.maximum(nbr_id, 0)], 0.0)
-            face = np.where(cos > 0.0, psi3[..., None], npsi)  # own vs neighbour
-            return (self.w[:, None, None, None] * cos * face).sum(0)  # (K,3,F)
-
-        extn = d["ext_n"]
-        oe = (self.mu[:, None, None, None] * extn[None, ..., 0]
-              + self.eta[:, None, None, None] * extn[None, ..., 1])   # (M,K,3,2)
-        Jh = upwind_density(oe, d["ext_nbr"])                # lateral half-edges
-        oz = np.stack([self.xi, -self.xi], -1)[:, None, None, :]      # (M,1,1,2)
-        Ja = upwind_density(oz, d["ax_nbr"])                 # axial caps (K,3,2)
+            t_fold = time.perf_counter()
+            Jh, Ja = self._scb3d_corner_currents(psi3, np)
         aidx = np.full(N, -1)
         aidx[ac] = np.arange(K)
         cell = self._cell
@@ -3281,22 +3444,81 @@ class TriSNTransportSolver:
             r = aidx[cell[:, :, t, :]]                       # (nr,nc,nz), -1 excised
             mrk = r >= 0
             J = np.zeros(r.shape)
-            for lc, f in d["edge_corners"][(t, e)]:          # the 2 corners on edge e
-                J[mrk] += 0.5 * Jh[r[mrk], lc, f]
+            pairs = d["edge_corners"][(t, e)]               # corner faces on edge e
+            for lc, f in pairs:                              # (equal areas: mean)
+                J[mrk] += Jh[r[mrk], lc, f] / len(pairs)
             currents.append(J)
-        for uf in (0, 1):                                    # axial dk=+1, -1
+        for sgn in (1.0, -1.0):                              # axial dk=+1, -1
             r = aidx[cell]                                   # (nr,nc,2,nz)
             mrk = r >= 0
             J = np.zeros(r.shape)
-            J[mrk] = Ja[r[mrk], :, uf].mean(1)               # mean over 3 corners
+            cc, aa = np.nonzero(d["ax_sign"] == sgn)         # the 3 corners on the cap
+            J[mrk] = Ja[r[mrk]][:, cc, aa].mean(1)
             currents.append(J)
+        tm = self.__dict__.setdefault("t_cmfd_parts", {})
+        tm["host_fold"] = tm.get("host_fold", 0.0) + time.perf_counter() - t_fold
         return phi, currents
+
+    def _scb3d_corner_currents(self, psi, xp):
+        """Per-corner net current densities J = sum_m w_m (Omega.n) psi_upwind
+        through the external lateral half-faces (K, nc, 2) and axial caps
+        (K, nc, A), upwind = own corner on outflow, the neighbour's on inflow.
+        Computed on the backend holding ``psi`` (levels engine: the device), in
+        ordinate chunks; returned on the host."""
+        d = self._scb
+        K, nco, M = d["K"], d["nc"], self.M
+        key = "_scb_cur_dev" if xp is not np else "_scb_cur_host"
+        cache = getattr(self, key, None)
+        if cache is None:
+            cache = dict(extn=xp.asarray(d["ext_n"]),
+                         enbr=xp.asarray(np.maximum(d["ext_nbr"], 0)),
+                         evalid=xp.asarray(d["ext_nbr"] >= 0),
+                         anbr=xp.asarray(np.maximum(d["ax_nbr"], 0)),
+                         avalid=xp.asarray(d["ax_nbr"] >= 0),
+                         axs=xp.asarray(d["ax_sign"]),
+                         mu=xp.asarray(self.mu), eta=xp.asarray(self.eta),
+                         xi=xp.asarray(self.xi), w=xp.asarray(self.w))
+            setattr(self, key, cache)
+        c = cache
+        psi3 = xp.asarray(psi).reshape(M, K, nco)
+        pflat = psi3.reshape(M, K * nco)
+        A = d["ax_sign"].shape[1]
+        Jh = xp.zeros((K, nco, 2))
+        Ja = xp.zeros((K, nco, A))
+        chunk = max(1, int(1.5e8 // max(1, K * nco * 2)))
+        for m0 in range(0, M, chunk):
+            m1 = min(M, m0 + chunk)
+            ps, pf, w = psi3[m0:m1], pflat[m0:m1], c["w"][m0:m1]
+            oe = (c["mu"][m0:m1, None, None, None] * c["extn"][None, ..., 0]
+                  + c["eta"][m0:m1, None, None, None] * c["extn"][None, ..., 1])
+            nb = xp.where(c["evalid"][None], pf[:, c["enbr"]], 0.0)
+            face = xp.where(oe > 0.0, ps[..., None], nb)
+            Jh += (w[:, None, None, None] * oe * face).sum(0)
+            oz = c["xi"][m0:m1, None, None, None] * c["axs"][None, None]
+            nb = xp.where(c["avalid"][None], pf[:, c["anbr"]], 0.0)
+            face = xp.where(oz > 0.0, ps[..., None], nb)
+            Ja += (w[:, None, None, None] * oz * face).sum(0)
+        return asnumpy(Jh), asnumpy(Ja)
 
     def _cmfd_factor_3d(self, g, p, currents):
         """Solver for the group-g drift-corrected prism diffusion operator (LU,
         or multigrid when cmfd_solver='mg' -- 3D sparse LU is O(N^2)/O(N^4/3)
         fill and blows up, while AMG stays O(N))."""
-        return self._make_cmfd_solver(self._cmfd_matrix_3d(g, p, currents))
+        t0 = time.perf_counter()
+        A = self._cmfd_matrix_3d(g, p, currents)
+        dump = os.environ.get("GARNET_DUMP_CMFD")       # solver studies: one per group
+        if dump and not os.path.exists(os.path.join(dump, f"cmfd_g{g}.npz")):
+            os.makedirs(dump, exist_ok=True)
+            sp.save_npz(os.path.join(dump, f"cmfd_g{g}.npz"), A.tocsr())
+        t1 = time.perf_counter()
+        if self.cmfd_reuse and getattr(self, "cmfd_solver", "lu") == "lu":
+            solve = self._cmfd_reuse_solver(g, A)
+        else:
+            solve = self._make_cmfd_solver(A)
+        tm = self.__dict__.setdefault("t_cmfd_parts", {})
+        tm["assembly"] = tm.get("assembly", 0.0) + t1 - t0
+        tm["lu_or_amg_setup"] = tm.get("lu_or_amg_setup", 0.0) + time.perf_counter() - t1
+        return solve
 
     def _cmfd_matrix_3d(self, g, p, currents):
         """Assemble the drift-corrected FV diffusion operator on the prism mesh
@@ -3339,6 +3561,55 @@ class TriSNTransportSolver:
         return sp.csr_matrix((np.concatenate(vals),
                               (np.concatenate(rows), np.concatenate(cols))),
                              shape=(N, N))
+
+    def _cmfd_reuse_solver(self, g, A):
+        """Group g's CMFD solve with a lagged factorization (``cmfd_reuse``):
+        GMRES on the current drift matrix A, preconditioned by the group's last
+        LU and started from that LU's solution; the LU is rebuilt when a solve
+        needs more than ``cmfd_reuse`` iterations or does not converge (then
+        that solve is redone with the fresh LU, so every returned x solves A)."""
+        from scipy.sparse.linalg import LinearOperator, gmres
+        cache = self.__dict__.setdefault("_cmfd_lu", {})
+        stats = self.__dict__.setdefault("cmfd_reuse_stats",
+                                         {"factorizations": 0, "gmres_solves": 0,
+                                          "gmres_iterations": 0})
+        ent = cache.get(g)
+        Ac = A.tocsr()
+        if ent is None or ent["stale"]:
+            ent = {"lu": factorized(A.tocsc()), "stale": False}
+            cache[g] = ent
+            stats["factorizations"] += 1
+            fresh = True
+        else:
+            fresh = False
+        N = A.shape[0]
+
+        def host_solve(b):
+            lu = ent["lu"]
+            if fresh and ent.get("exact_for") is Ac:
+                return lu(b)
+            x0 = lu(b)
+            it = [0]
+            M = LinearOperator((N, N), matvec=lu, dtype=float)
+            x, info = gmres(Ac, b, x0=x0, M=M, rtol=1e-11, atol=0.0, restart=20,
+                            maxiter=max(1, self.cmfd_reuse),
+                            callback=lambda _: it.__setitem__(0, it[0] + 1),
+                            callback_type="pr_norm")
+            stats["gmres_solves"] += 1
+            stats["gmres_iterations"] += it[0]
+            if info != 0 or it[0] > self.cmfd_reuse:
+                ent["lu"] = factorized(A.tocsc())          # refresh now, redo exactly
+                ent["exact_for"] = Ac
+                stats["factorizations"] += 1
+                return ent["lu"](b)
+            return x
+
+        if fresh:
+            ent["exact_for"] = Ac
+        if self.xp is np:
+            return host_solve
+        xp = self.xp
+        return lambda b: xp.asarray(host_solve(asnumpy(b)))
 
     def _make_cmfd_solver(self, A):
         """Solver for a CMFD drift matrix. Default: scipy sparse LU. With
@@ -3523,12 +3794,20 @@ class TriSNTransportSolver:
                         if gf != g and scat[gf][g] is not None:
                             q = q + scat[gf][g] * phi_new[gf]
                     if aniso and self.is3d:
+                        t_a = time.perf_counter()
                         ang = self._expand(self._moment_source(g, mom_new,
                                                                exclude_self=False))
                         cur_fn = (self._sweep_currents_scb_3d if self.scheme == "scb"
                                   else self._sweep_currents_3d)
+                        t_b = time.perf_counter()
                         ps, cur = cur_fn(g, ss[g] * phi_new[g] + q, ang)
+                        t_c = time.perf_counter()
                         facs[g] = self._cmfd_factor_3d(g, ps, cur)
+                        t_d = time.perf_counter()
+                        tm = self.__dict__.setdefault("t_cmfd_parts", {})
+                        for key, dt in (("ang_source", t_b - t_a), ("current_sweep", t_c - t_b),
+                                        ("factor", t_d - t_c)):
+                            tm[key] = tm.get(key, 0.0) + dt
                     elif aniso:
                         ang = self._expand(self._moment_source(g, mom_new,
                                                                exclude_self=False))

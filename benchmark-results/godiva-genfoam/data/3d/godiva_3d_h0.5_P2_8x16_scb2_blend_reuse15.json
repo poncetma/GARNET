@@ -1,0 +1,44 @@
+{
+ "side": 0.5,
+ "dz": 0.4330127018922193,
+ "order": 2,
+ "quad": "8x16",
+ "scheme": "scb",
+ "corners": 2,
+ "treatment": "blend",
+ "directions": 128,
+ "shape": [
+  44,
+  44,
+  2,
+  43
+ ],
+ "active": 65610,
+ "k": 0.9865423462227492,
+ "converged": true,
+ "pcm_vs_1d": -771.3653777250862,
+ "geometry_s": 7.818933626869693,
+ "setup_s": 7.841926296008751,
+ "solve_s": 1532.9209295760375,
+ "gram_error": 6.661338147750939e-16,
+ "t_groups": 79.00184916495346,
+ "t_cmfd": 1453.5231280091684,
+ "t_power": 790.1336259958334,
+ "t_tables": 54.71800510818139,
+ "n_tables": 414,
+ "outers": 9,
+ "t_cmfd_parts": {
+  "host_fold": 3.958099351497367,
+  "assembly": 4.217002797406167,
+  "lu_or_amg_setup": 607.6096400890965,
+  "ang_source": 6.8733333023265,
+  "current_sweep": 44.29740622127429,
+  "factor": 611.8269693064503
+ },
+ "cmfd_reuse": 15,
+ "cmfd_reuse_stats": {
+  "factorizations": 23,
+  "gmres_solves": 1173,
+  "gmres_iterations": 8991
+ }
+}

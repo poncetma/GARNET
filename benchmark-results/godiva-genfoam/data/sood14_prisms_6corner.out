@@ -1,0 +1,8 @@
+blend     cells   8 h 1.857 S(4, 16) active     1064: k-1 =   -6137.2 pcm conv True     2.4 s
+blend     cells  12 h 1.238 S(4, 16) active     3084: k-1 =   -3480.8 pcm conv True     9.1 s
+blend     cells  16 h 0.929 S(4, 16) active     7080: k-1 =   -2250.6 pcm conv True    21.8 s
+blend     cells  24 h 0.619 S(4, 16) active    22056: k-1 =   -1226.6 pcm conv True   106.0 s
+staircase cells   8 h 1.857 S(4, 16) active      715: k-1 =   -7564.1 pcm conv True     1.7 s
+staircase cells  12 h 1.238 S(4, 16) active     2413: k-1 =   -4311.2 pcm conv True     5.8 s
+staircase cells  16 h 0.929 S(4, 16) active     5719: k-1 =   -2964.8 pcm conv True    15.7 s
+staircase cells  24 h 0.619 S(4, 16) active    19302: k-1 =   -1805.2 pcm conv True   217.5 s

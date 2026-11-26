@@ -1,0 +1,24 @@
+{
+ "side": 0.7,
+ "dz": 0.606217782649107,
+ "order": 2,
+ "quad": "8x16",
+ "scheme": "scb",
+ "corners": 2,
+ "treatment": "blend",
+ "directions": 128,
+ "shape": [
+  33,
+  33,
+  2,
+  31
+ ],
+ "active": 24934,
+ "k": 0.9815076775613439,
+ "converged": true,
+ "pcm_vs_1d": -1274.832243865609,
+ "geometry_s": 3.911552228964865,
+ "setup_s": 3.9013135679997504,
+ "solve_s": 785.7201276109554,
+ "gram_error": 6.661338147750939e-16
+}
