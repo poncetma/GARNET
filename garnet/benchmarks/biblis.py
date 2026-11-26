@@ -59,8 +59,13 @@ _XS = {
     8: (0.231594061928, 0.0102940, 0.0064285, 0.017027, 0.905797101449, 0.0905100, 0.1091100),
 }
 
-# Published 2D eigenvalue for the BIBLIS configuration.
-K_REFERENCE = 1.0287
+# Converged diffusion eigenvalue of this configuration: FEMFFUSION degree-3
+# finite elements on its own examples/2D_BIBLIS input (vacuum, BC=2) at
+# refinements 0/1/2 (1.025346, 1.025279, 1.025263; observed order 2.07),
+# Richardson-extrapolated, +-0.5 pcm; degree 4 at refinement 1 gives 1.025264.
+# See docs/theory/data/biblis_femffusion.json. (The 1.0287 carried here before
+# was GARNET's own result at 2 cells per assembly, not a published value.)
+K_REFERENCE = 1.025258
 
 
 def _material(mid: int) -> Material:

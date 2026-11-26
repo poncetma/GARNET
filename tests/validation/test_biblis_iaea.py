@@ -10,6 +10,7 @@ import pytest
 
 from garnet import DiffusionEigenSolver
 from garnet.benchmarks import build_biblis, build_iaea
+from garnet.benchmarks.biblis import K_REFERENCE as BIBLIS_K_REFERENCE
 
 TOL = dict(tol_k=1e-8, tol_source=1e-7)
 
@@ -20,18 +21,29 @@ def _solve(p):
                                 device="cpu").solve(**TOL)
 
 
-def test_biblis_geometry_and_keff():
+def test_biblis_geometry():
     p = build_biblis(cells_per_assembly=2)
     assert p.grid.shape == (34, 34, 1)
     assert int(p.active.sum()) == 257 * 4        # matches FEMFFUSION active cells
     # Fully symmetric octagonal core.
     m = p.material_map[:, :, 0]
     assert np.array_equal(m, m[:, ::-1]) and np.array_equal(m, m.T)
-    res = _solve(p)
-    assert res.converged
-    # FEMFFUSION diffusion (FE3, converged) gives 1.02535; FV at this mesh is
-    # near it and Richardson-extrapolates onto it.
-    assert res.k_eff == pytest.approx(1.0287, abs=2e-3)
+
+
+def test_biblis_keff_converges_to_femffusion_reference():
+    # K_REFERENCE is the extrapolated FEMFFUSION FE3 diffusion limit,
+    # 1.025258 +- 0.5 pcm. The cell-centred FV error is +341 / +72 / +14 pcm at
+    # 2 / 4 / 8 cells per assembly (second order from above), so the 8-cell
+    # mesh must sit within 30 pcm and closer than the 4-cell one. Shown to fail
+    # with the old 1.0287 constant and with a 0.3 % thermal-absorption error in
+    # one fuel. It cannot see boundary or face-mean defects: the reflector screens
+    # the boundary (vacuum vs reflective moves k by 3 pcm) and all compositions
+    # share nearly the same D; tests/verification covers those.
+    k = {c: _solve(build_biblis(cells_per_assembly=c)) for c in (4, 8)}
+    assert all(r.converged for r in k.values())
+    err = {c: k[c].k_eff - BIBLIS_K_REFERENCE for c in k}
+    assert 0.0 < err[8] < 3e-4
+    assert err[8] < err[4] / 3.0
 
 
 def test_iaea_geometry_and_keff():
